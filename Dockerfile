@@ -1,27 +1,27 @@
-# Use an official lightweight Python image
+# Base image with Python
 FROM python:3.10-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set working directory inside container
+# Set work directory
 WORKDIR /app
 
-# Create the data directory for your parquet + logs
-RUN mkdir -p /app/data
+# Install system dependencies
+RUN apt-get update && apt-get install -y build-essential curl
 
-# Copy requirements first (for caching)
+# Copy requirement files
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Copy the rest of your app code
+# Copy app source code
 COPY . .
 
-# Expose the FastAPI port
-EXPOSE 4512
+# Expose the port Cloud Run expects
+EXPOSE 8080
 
-# Command to run the API
-CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "4512"]
+# Run the app using uvicorn on the correct port
+CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8080"]
