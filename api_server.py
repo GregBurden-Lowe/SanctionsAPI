@@ -9,6 +9,15 @@ from utils import (
 
 app = FastAPI(title="Sanctions & PEP Screening API")
 
+@app.on_event("startup")
+def startup_event():
+    print("🔄 Refreshing OpenSanctions data on startup...")
+    try:
+        refresh_opensanctions_data()
+        print("✅ OpenSanctions data loaded.")
+    except Exception as e:
+        print(f"❌ Failed to refresh data: {e}")
+
 # --- Shared Request Model ---
 class SearchRequest(BaseModel):
     name: str
