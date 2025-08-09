@@ -1,3 +1,4 @@
+# Core API
 fastapi>=0.111
 uvicorn[standard]>=0.30
 pydantic>=2.8
@@ -7,6 +8,11 @@ python-dateutil>=2.9
 beautifulsoup4>=4.12
 typing-extensions>=4.12 ; python_version < "3.12"
 
-# If your utils actually use pandas/numpy, keep these modern:
+# Data handling (only if utils.py actually uses them)
 pandas>=2.2.2
 numpy>=1.26.4
+
+# PDF generation (only if API itself produces PDFs)
+fpdf2>=2.7.9
+reportlab>=4.2
+weasyprint>=61.2   # needs extra system libs if used
