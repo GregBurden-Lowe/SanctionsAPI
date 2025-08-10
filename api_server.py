@@ -12,15 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI(title="Sanctions & PEP Screening API")
 
 # Single CORS block (regex supports Dynamics/Power Apps + your domain)
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=(
-        r"^https://([a-zA-Z0-9-]+\.)*dynamics\.com$|"
-        r"^https://([a-zA-Z0-9-]+\.)*crm[0-9]*\.dynamics\.com$|"
-        r"^https://make\.powerapps\.com$|"
-        r"^https://([a-zA-Z0-9-]+\.)*powerapps(portals)?\.com$|"
-        r"^https://(www\.)?sanctions-check\.co\.uk$"
-    ),
+    allow_origins=[
+        "https://org5cf4e5f6.crm11.dynamics.com",
+        "https://sanctions-check.co.uk",
+        "https://www.sanctions-check.co.uk",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
