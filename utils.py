@@ -11,7 +11,13 @@ import requests
 from rapidfuzz import fuzz
 import pyarrow as pa
 import pyarrow.parquet as pq
-
+# PDF export
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib import colors
 
 # ---------------------------
 # General helpers
@@ -262,7 +268,83 @@ def _empty_no_match_result():
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
     }
+def generate_opensanctions_pdf_report(name, dob, result, user_name=None, user_email=None):
+    """
+    Build a simple, printable PDF report for an OpenSanctions check.
+    Expects `result` to be the dict returned by perform_opensanctions_check.
+    """
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    styles = getSampleStyleSheet()
 
+    title = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=18, alignment=TA_CENTER, textColor=colors.HexColor("#0a2540"))
+    h2 = ParagraphStyle('H2', parent=styles['Heading2'], textColor=colors.HexColor("#0a2540"))
+    normal = styles['Normal']
+
+    elems = []
+    # Header
+    elems.append(Paragraph("Sanctions & PEP Screening Report", title))
+    elems.append(Spacer(1, 6))
+    elems.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal))
+    if user_name or user_email:
+        elems.append(Paragraph(f"Checked By: {user_name or 'N/A'} ({user_email or 'N/A'})", normal))
+    elems.append(Spacer(1, 12))
+
+    # Search inputs
+    inputs_table = Table([
+        ["Name Searched", name or "N/A"],
+        ["Date of Birth", dob or "N/A"],
+    ], colWidths=[130, 380])
+    inputs_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (0,-1), colors.whitesmoke),
+        ('BOX', (0,0), (-1,-1), 0.25, colors.grey),
+        ('INNERGRID', (0,0), (-1,-1), 0.25, colors.grey),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+    ]))
+    elems.append(inputs_table)
+    elems.append(Spacer(1, 10))
+
+    # Check Summary
+    cs = (result or {}).get("Check Summary", {}) if isinstance(result, dict) else {}
+    summary_table = Table([
+        ["Status", cs.get("Status", "N/A")],
+        ["Source", cs.get("Source", "N/A")],
+        ["Date",   cs.get("Date", "N/A")],
+    ], colWidths=[130, 380])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (0,-1), colors.whitesmoke),
+        ('BOX', (0,0), (-1,-1), 0.25, colors.grey),
+        ('INNERGRID', (0,0), (-1,-1), 0.25, colors.grey),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+    ]))
+    elems.append(Paragraph("Check Summary", h2))
+    elems.append(summary_table)
+    elems.append(Spacer(1, 10))
+
+    # Match details
+    elems.append(Paragraph("Match Details", h2))
+    details = [
+        ["Sanctions Name", result.get("Sanctions Name") if isinstance(result, dict) else "N/A"],
+        ["Birth Date",     result.get("Birth Date") if isinstance(result, dict) else "N/A"],
+        ["Regime",         result.get("Regime") if isinstance(result, dict) else "N/A"],
+        ["Is Sanctioned",  "Yes" if result.get("Is Sanctioned") else "No"],
+        ["Is PEP",         "Yes" if result.get("Is PEP") else "No"],
+        ["Risk Level",     result.get("Risk Level", "N/A")],
+        ["Confidence",     result.get("Confidence", "N/A")],
+        ["Score",          f"{result.get('Score', 0)}%"],
+    ]
+    details_table = Table(details, colWidths=[130, 380])
+    details_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (0,-1), colors.whitesmoke),
+        ('BOX', (0,0), (-1,-1), 0.25, colors.grey),
+        ('INNERGRID', (0,0), (-1,-1), 0.25, colors.grey),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+    ]))
+    elems.append(details_table)
+
+    doc.build(elems)
+    buf.seek(0)
+    return buf.getvalue()
 
 # ---------------------------
 # (Optional) OFSI + simple PEP lookup for /check
