@@ -4,7 +4,8 @@ from fastapi.responses import JSONResponse
 from utils import (
     perform_sanctions_check,
     perform_opensanctions_check,
-    refresh_opensanctions_data
+    efresh_opensanctions_data,
+    generate_opensanctions_pdf_report
 )
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -66,3 +67,23 @@ def trigger_refresh():
 @app.get("/")
 def root():
     return {"message": "API is running"}
+
+@app.post("/opcheck/pdf")
+def check_opensanctions_pdf(data: OpenSanctionsRequest):
+    result = perform_opensanctions_check(
+        name=data.name,
+        dob=data.dob,
+        entity_type=data.entity_type
+    )
+    pdf_bytes = generate_opensanctions_pdf_report(
+        name=data.name,
+        dob=data.dob,
+        result=result,
+        user_name=None,
+        user_email=None
+    )
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="sanctions_check.pdf"'},
+    )
