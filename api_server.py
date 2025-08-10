@@ -4,10 +4,31 @@ from fastapi.responses import JSONResponse
 from utils import (
     perform_sanctions_check,
     perform_opensanctions_check,
-    refresh_opensanctions_data  
+    refresh_opensanctions_data
 )
 
+# 🔽 ADD THIS IMPORT
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="Sanctions & PEP Screening API")
+
+# 🔽 ADD THIS BLOCK (tune origins to your tenant/domains)
+allowed_origins = [
+    "https://*.dynamics.com",
+    "https://*.crm*.dynamics.com",
+    "https://make.powerapps.com",
+    "https://*.powerappsportals.com",
+    "https://*.powerapps.com",
+    # "https://api.yourdomain.com",  # add your API domain if you put it behind HTTPS
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,   # for quick testing you can use ["*"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 def startup_event():
@@ -37,7 +58,6 @@ def check_ofsi_pep(data: SearchRequest):
 def check_opensanctions(data: OpenSanctionsRequest):
     results = perform_opensanctions_check(name=data.name, dob=data.dob, entity_type=data.entity_type)
     return JSONResponse(content=results)
-
 
 # --- OpenSanctions Refresh ---
 @app.post("/refresh_opensanctions")
