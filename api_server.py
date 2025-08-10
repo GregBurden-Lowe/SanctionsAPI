@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from utils import (
     perform_sanctions_check,
     perform_opensanctions_check,
-    efresh_opensanctions_data,
+    refresh_opensanctions_data,
     generate_opensanctions_pdf_report
 )
 from fastapi.middleware.cors import CORSMiddleware
