@@ -394,6 +394,17 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
     _append_search_to_csv(name, result["Check Summary"])
     return result
 
+def load_opensanctions_from_parquet(parquet_path="data/opensanctions.parquet") -> pd.DataFrame:
+    """Load the consolidated OpenSanctions parquet written during refresh."""
+    if not os.path.exists(parquet_path):
+        print(f"[OpenSanctions] parquet not found at {parquet_path}")
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(parquet_path)
+    except Exception as e:
+        print(f"[OpenSanctions] Failed to load parquet: {e}")
+        return pd.DataFrame()
+
 def _source_label_for_row(row) -> str:
     """
     For sanctions: prefer dataset value; fallback to 'OpenSanctions'.
