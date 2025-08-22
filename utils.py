@@ -241,96 +241,156 @@ def clear_osn_cache():
 # Matching
 # ---------------------------
 
-def perform_opensanctions_check(name: str, dob: Optional[str], entity_type: str = "Person",
-                                parquet_path: str = OSN_PARQUET):
-    """
-    If DOB is provided:
-      - First restrict candidates to exact DOB matches (if any).
-      - Score by fuzzy name.
-      - If top match doesn't have exact DOB, return Cleared with top matches shown.
+def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="data/opensanctions.parquet"):
+    import math
 
-    If DOB not provided:
-      - Score all by fuzzy name and take the best reasonable match (>=60), else Cleared.
-    """
-    df = get_opensanctions_df(parquet_path)
+    df = load_opensanctions_from_parquet(parquet_path)
     if df.empty:
-        return {"error": "No data available. Please refresh data."}
+        return {"error": "No data available."}
 
-    # Filter by entity type
+    # Filter by entity type/schema
     et = (entity_type or "Person").lower()
-    schemas = df["schema"].astype("string[pyarrow]").str.lower()
-    if et == "organization":
-        mask = schemas.isin(["organization", "legalentity", "company"])
-    else:
-        mask = schemas.eq("person")
-    cand = df[mask]
-    if cand.empty:
-        res = _empty_no_match_result()
-        _append_search_to_csv(name, res["Check Summary"])
-        return res
+    schema_col = df.get("schema")
+    if schema_col is not None:
+        schemas = schema_col.astype(str).str.lower()
+        if et == "organization":
+            df = df[schemas.isin(["organization", "legalentity", "company"])]
+        else:
+            df = df[schemas == "person"]
 
-    # Normalize inputs
-    name_norm = _normalize_text(name)
-    dob_norm = None
-    if dob:
+    if df.empty:
+        result = _empty_no_match_result()
+        _append_search_to_csv(name, result["Check Summary"])
+        return result
+
+    norm_name = normalize_text(name)
+    norm_dob = normalize_dob(dob)
+
+    def parse_dob(val):
         try:
-            dob_norm = pd.to_datetime(dob, errors="coerce").strftime("%Y-%m-%d")
+            s = str(val)
+            if not s or s.lower() in ("nan", "none", "nat"):
+                return None
+            return normalize_dob(s)
         except Exception:
-            dob_norm = None
+            return None
 
-    # DOB narrowing
-    if dob_norm:
-        narrowed = cand[cand["birth_norm"] == dob_norm]
-        if not narrowed.empty:
-            cand = narrowed
+    def as_safe_str(x):
+        if x is None:
+            return ""
+        if isinstance(x, float) and math.isnan(x):
+            return ""
+        return str(x)
 
-    # Fuzzy score
-    cand = cand.copy()
-    cand["score"] = cand["name_norm"].map(lambda n: fuzz.token_set_ratio(name_norm, n))
-    cand = cand.sort_values("score", ascending=False)
+    def best_match_from(df_subset, top_limit=50, threshold=75):
+        """Return (row, score, top_matches_list) or (None, None, []) respecting DOB strictness."""
+        if df_subset is None or df_subset.empty:
+            return None, None, []
 
-    if cand.empty or int(cand.iloc[0]["score"]) < 60:
-        res = _empty_no_match_result()
-        _append_search_to_csv(name, res["Check Summary"])
-        return res
+        candidates = df_subset["name"].fillna("").tolist()
+        matches = get_best_name_matches(norm_name, candidates, limit=top_limit, threshold=threshold)
+        if not matches:
+            return None, None, []
 
-    top = cand.iloc[0]
-    best_score = int(top["score"])
+        # If DOB provided, require exact DOB match among the matched indices.
+        if norm_dob:
+            dob_ok_matches = []
+            for _, score, idx in matches:
+                r = df_subset.iloc[idx]
+                cand_dob = parse_dob(r.get("birth_date"))
+                if cand_dob and cand_dob == norm_dob:
+                    dob_ok_matches.append((_, score, idx))
+            if not dob_ok_matches:
+                # No exact DOB matches -> treat as no match for this dataset
+                return None, None, []
+            matches = dob_ok_matches
 
-    # If DOB provided and top row STILL doesn't have exact DOB, -> Cleared but include matches
-    if dob_norm and _safe_str(top.get("birth_norm")) != dob_norm:
-        res = _empty_no_match_result(_source_label_for_row(top))
-        res["Top Matches"] = _top_matches_list(cand)
-        _append_search_to_csv(name, res["Check Summary"])
-        return res
+        # Pick the highest score after the DOB filter (if applied)
+        matches_sorted = sorted(matches, key=lambda x: x[1], reverse=True)
+        _, best_score, best_idx = matches_sorted[0]
+        best_row = df_subset.iloc[best_idx]
 
-    # Determine flags + regime/source
-    source_label = _source_label_for_row(top)
-    is_pep = (_safe_str(top.get("source_type")).lower() == "peps")
-    is_sanctioned = (_safe_str(top.get("source_type")).lower() == "sanctions")
+        # Build a compact Top Matches list for UI
+        top_list = []
+        for i, (cleaned_name, score, idx) in enumerate(matches_sorted[:10]):
+            display_name = as_safe_str(df_subset.iloc[idx].get("name") or cleaned_name)
+            top_list.append((display_name, round(float(score), 1)))
 
-    regime = _derive_regime_like_row(top)
+        return best_row, float(best_score), top_list
 
-    result = {
-        "Sanctions Name": _safe_str(top.get("name")),
-        "Birth Date": _safe_str(top.get("birth_norm")),
-        "Regime": regime,
-        "Position": None,
-        "Topics": [],
-        "Is PEP": is_pep,
-        "Is Sanctioned": is_sanctioned,
-        "Confidence": "High" if best_score >= 90 else "Medium" if best_score >= 80 else "Low",
-        "Score": best_score,
-        "Risk Level": "High Risk" if is_sanctioned else ("Medium Risk" if is_pep else "Cleared"),
-        "Top Matches": _top_matches_list(cand),
-        "Match Found": True,
-        "Check Summary": {
-            "Status": "Fail Sanction" if is_sanctioned else ("Fail PEP" if is_pep else "Cleared"),
-            "Source": source_label,
-            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    }
+    # Split by source_type
+    st = df.get("source_type")
+    if st is not None:
+        st_lower = st.astype(str).str.lower()
+        sanc_df = df[st_lower == "sanctions"]
+        pep_df  = df[st_lower == "peps"]
+    else:
+        # Fallback: if not labeled, treat everything as sanctions (shouldn’t happen with your refresh)
+        sanc_df, pep_df = df, df.iloc[0:0]
 
+    # Try sanctions first
+    s_row, s_score, s_top = best_match_from(sanc_df)
+    if s_row is not None:
+        # Derive fields
+        is_sanctioned = True
+        is_pep = False
+
+        # Prefer dataset label for Source; fall back to consolidated label
+        dataset_label = as_safe_str(s_row.get("dataset")).strip()
+        source_label = dataset_label or "OpenSanctions – Sanctions"
+
+        result = {
+            "Sanctions Name": s_row.get("name"),
+            "Birth Date": parse_dob(s_row.get("birth_date")),
+            "Regime": _derive_regime_like(s_row),
+            "Position": s_row.get("positions"),
+            "Topics": [],
+            "Is PEP": is_pep,
+            "Is Sanctioned": is_sanctioned,
+            "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
+            "Score": s_score,
+            "Risk Level": "High Risk",
+            "Top Matches": s_top,
+            "Match Found": True,
+            "Check Summary": {
+                "Status": "Fail Sanction",
+                "Source": source_label,
+                "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        }
+        _append_search_to_csv(name, result["Check Summary"])
+        return result
+
+    # Otherwise, try PEPs
+    p_row, p_score, p_top = best_match_from(pep_df)
+    if p_row is not None:
+        is_sanctioned = False
+        is_pep = True
+
+        result = {
+            "Sanctions Name": p_row.get("name"),
+            "Birth Date": parse_dob(p_row.get("birth_date")),
+            "Regime": _derive_regime_like(p_row),
+            "Position": p_row.get("positions"),
+            "Topics": [],
+            "Is PEP": is_pep,
+            "Is Sanctioned": is_sanctioned,
+            "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
+            "Score": p_score,
+            "Risk Level": "Medium Risk",
+            "Top Matches": p_top,
+            "Match Found": True,
+            "Check Summary": {
+                "Status": "Fail PEP",
+                "Source": "Consolidated PEP list",
+                "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        }
+        _append_search_to_csv(name, result["Check Summary"])
+        return result
+
+    # Nothing matched (or DOB filter eliminated candidates)
+    result = _empty_no_match_result()
     _append_search_to_csv(name, result["Check Summary"])
     return result
 
