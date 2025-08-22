@@ -12,39 +12,48 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz
 
-# ---------------------------
+# =========================
 # Configuration
-# ---------------------------
+# =========================
 
 DATA_DIR = "data"
 OSN_PARQUET = os.path.join(DATA_DIR, "opensanctions.parquet")
 
-# Latest consolidated sanctions (targets.simple.csv)
+# Latest consolidated lists
 CONSOLIDATED_SANCTIONS_URL = (
     "https://data.opensanctions.org/datasets/latest/sanctions/targets.simple.csv"
 )
-
-# Optional: Consolidated PEPs (targets.simple.csv). Enable if you want PEPs included.
 CONSOLIDATED_PEPS_URL = (
     "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
 )
 
-# Only keep columns we actually use to keep memory down:
-OSN_COLS = [
+# Columns we keep from OpenSanctions (small footprint)
+BASE_COLS = [
     "schema",       # Person / Organization / Company / LegalEntity
     "name",         # primary display name
-    "aliases",      # pipe/semicolon separated aliases (optional)
-    "birth_date",   # ISO or partial
+    "aliases",      # alias list (optional)
+    "birth_date",   # ISO/partial date
     "program_ids",  # e.g. "EU-UKR;SECO-UKRAINE;UA-SA1644"
-    "dataset",      # dataset label (e.g. "EU Council Official Journal…")
-    "sanctions",    # long text; we only take a short first chunk
-    # internal flag we add when saving parquet:
-    "source_type",  # "sanctions" or "peps"
+    "dataset",      # dataset label (e.g., "EU Financial Sanctions Files (FSF)")
+    "sanctions",    # long descriptions; we take a short chunk for UI
+]
+ALL_COLS = BASE_COLS + ["source_type"]  # source_type = "sanctions" | "peps"
+
+# Limit sanctions to UN / EU / OFAC / UK HMT (OFSI)
+SANCTION_SOURCE_KEYWORDS = [
+    # United Nations
+    "united nations", "un security council", "unsc",
+    # European Union
+    "european union", "eu council", "eu sanctions", "eu fsf", "financial sanctions files",
+    # OFAC / US Treasury
+    "ofac", "specially designated nationals", "sdn", "us treasury",
+    # UK HMT / OFSI
+    "hm treasury", "hmt", "ofsi", "uk sanctions",
 ]
 
-# ---------------------------
-# Small helpers
-# ---------------------------
+# =========================
+# Mini helpers
+# =========================
 
 def _normalize_text(s: str) -> str:
     import re, unicodedata
@@ -62,9 +71,28 @@ def _safe_str(v) -> str:
         pass
     return str(v)
 
+def _contains_any_keyword(text: str, keywords) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    return any(k in t for k in keywords)
+
+def _matches_allowed_sanction_sources(row) -> bool:
+    """
+    True if row appears to come from UN/EU/OFAC/UK sources, based on dataset/program_ids/sanctions.
+    """
+    dataset = _safe_str(row.get("dataset"))
+    program = _safe_str(row.get("program_ids"))
+    sanc    = _safe_str(row.get("sanctions"))
+    return (
+        _contains_any_keyword(dataset, SANCTION_SOURCE_KEYWORDS) or
+        _contains_any_keyword(program, SANCTION_SOURCE_KEYWORDS) or
+        _contains_any_keyword(sanc, SANCTION_SOURCE_KEYWORDS)
+    )
+
 def _derive_regime_like_row(row) -> Optional[str]:
     """
-    Create a short label for UI, prioritizing:
+    Short label for UI:
       1) program_ids (first token)
       2) sanctions (first ';' chunk or first line)
       3) dataset
@@ -92,7 +120,7 @@ def _top_matches_list(df: pd.DataFrame, limit: int = 10) -> List[Tuple[str, int]
         out.append((nm, sc))
     return out
 
-def _empty_no_match_result(source_label: str = "OpenSanctions"):
+def _empty_no_match_result():
     return {
         "Sanctions Name": None,
         "Birth Date": None,
@@ -108,7 +136,7 @@ def _empty_no_match_result(source_label: str = "OpenSanctions"):
         "Match Found": False,
         "Check Summary": {
             "Status": "Cleared",
-            "Source": source_label,
+            "Source": "OpenSanctions (UN/EU/OFAC/UK + PEPs)",
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
     }
@@ -128,91 +156,133 @@ def _append_search_to_csv(name, summary, path=os.path.join(DATA_DIR, "search_log
                 "Source": summary.get("Source"),
             })
     except Exception:
-        # best-effort logging only
-        pass
+        pass  # best effort
 
-# ---------------------------
-# Data refresh (download -> parquet)
-# ---------------------------
+# =========================
+# Refresh (stream -> Parquet)
+# =========================
 
-def _download_csv(url: str, dest_path: str, timeout: int = 120):
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    with open(dest_path, "wb") as f:
-        f.write(r.content)
+def _osn_parquet_schema():
+    return pa.schema([(c, pa.string()) for c in ALL_COLS])
 
-def refresh_opensanctions_data(include_peps: bool = False):
+def _normalize_chunk_columns(chunk: pd.DataFrame, source_type: str) -> pd.DataFrame:
+    for c in BASE_COLS:
+        if c not in chunk.columns:
+            chunk[c] = ""
+    chunk = chunk[[c for c in BASE_COLS]].copy()
+    for c in BASE_COLS:
+        chunk[c] = chunk[c].astype("string").fillna("")
+    chunk["source_type"] = source_type
+    return chunk
+
+def _stream_csv_to_parquet(url: str,
+                           writer: pq.ParquetWriter,
+                           source_type: str,
+                           filter_fn=None,
+                           chunksize: int = 100_000,
+                           usecols: Optional[List[str]] = None):
+    if usecols is None:
+        usecols = BASE_COLS
+    for chunk in pd.read_csv(url, chunksize=chunksize, low_memory=False, usecols=lambda c: c in usecols):
+        if filter_fn:
+            chunk = filter_fn(chunk)
+        if chunk is None or chunk.empty:
+            continue
+        chunk = _normalize_chunk_columns(chunk, source_type)
+        table = pa.Table.from_pandas(chunk, schema=writer.schema, preserve_index=False)
+        writer.write_table(table)
+
+def refresh_opensanctions_data(include_peps: bool = True,
+                               pep_only_person: bool = True,
+                               pep_row_limit: Optional[int] = None):
     """
-    Download latest consolidated sanctions (and optionally PEPs), keep only columns we need,
-    add a 'source_type' column, and write a single compact parquet for fast loading.
+    Stream consolidated sanctions (filtered to UN/EU/OFAC/UK) + PEPs (persons).
+    Writes a single compact parquet at OSN_PARQUET.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
+    schema = _osn_parquet_schema()
+    tmp_path = OSN_PARQUET + ".tmp"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+    writer = pq.ParquetWriter(tmp_path, schema)
 
-    parts = []
+    # ---- Sanctions: filter to allowed sources
+    def sanc_filter(df: pd.DataFrame) -> pd.DataFrame:
+        # Keep typical schemas
+        if "schema" in df.columns:
+            mask_schema = df["schema"].astype(str).str.lower().isin(["person", "organization", "company", "legalentity"])
+            df = df[mask_schema]
+        # Row-wise filter by allowed sources
+        if not df.empty:
+            df = df[df.apply(_matches_allowed_sanction_sources, axis=1)]
+        keep = [c for c in BASE_COLS]
+        existing = [c for c in keep if c in df.columns]
+        return df[existing]
 
-    # Sanctions
-    try:
-        sanc_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
-        _download_csv(CONSOLIDATED_SANCTIONS_URL, sanc_csv, timeout=240)
-        df_s = pd.read_csv(sanc_csv, low_memory=False)
-        # Keep only needed cols; fill missing
-        for c in OSN_COLS:
-            if c not in df_s.columns and c != "source_type":
-                df_s[c] = pd.Series(dtype="string")
-        df_s = df_s[[c for c in OSN_COLS if c != "source_type"]].copy()
-        df_s["source_type"] = "sanctions"
-        parts.append(df_s)
-        print(f"[OpenSanctions] Downloaded sanctions ({len(df_s):,} rows).")
-    except Exception as e:
-        print(f"[OpenSanctions] Sanctions download/parsing failed: {e}")
+    print("[OpenSanctions] Streaming sanctions (UN/EU/OFAC/UK)…")
+    _stream_csv_to_parquet(
+        url=CONSOLIDATED_SANCTIONS_URL,
+        writer=writer,
+        source_type="sanctions",
+        filter_fn=sanc_filter,
+        chunksize=100_000,
+        usecols=BASE_COLS
+    )
 
-    # PEPs (optional)
+    # ---- PEPs: persons only (optional)
     if include_peps:
-        try:
-            peps_csv = os.path.join(DATA_DIR, "os_peps_latest.csv")
-            _download_csv(CONSOLIDATED_PEPS_URL, peps_csv, timeout=240)
-            df_p = pd.read_csv(peps_csv, low_memory=False)
-            for c in OSN_COLS:
-                if c not in df_p.columns and c != "source_type":
-                    df_p[c] = pd.Series(dtype="string")
-            df_p = df_p[[c for c in OSN_COLS if c != "source_type"]].copy()
-            df_p["source_type"] = "peps"
-            parts.append(df_p)
-            print(f"[OpenSanctions] Downloaded PEPs ({len(df_p):,} rows).")
-        except Exception as e:
-            print(f"[OpenSanctions] PEPs download/parsing failed: {e}")
+        seen = 0
+        def pep_filter(df: pd.DataFrame) -> pd.DataFrame:
+            nonlocal seen, pep_row_limit
+            if "schema" in df.columns and pep_only_person:
+                df = df[df["schema"].astype(str).str.lower() == "person"]
+            if pep_row_limit is not None and pep_row_limit >= 0:
+                remaining = pep_row_limit - seen
+                if remaining <= 0:
+                    return df.iloc[0:0]
+                if len(df) > remaining:
+                    df = df.iloc[:remaining]
+            keep = [c for c in BASE_COLS]
+            existing = [c for c in keep if c in df.columns]
+            seen += len(df)
+            return df[existing]
 
-    if not parts:
-        print("[OpenSanctions] No data written (nothing downloaded).")
-        return
+        print("[OpenSanctions] Streaming PEPs (persons)…")
+        _stream_csv_to_parquet(
+            url=CONSOLIDATED_PEPS_URL,
+            writer=writer,
+            source_type="peps",
+            filter_fn=pep_filter,
+            chunksize=100_000,
+            usecols=BASE_COLS
+        )
+        print(f"[OpenSanctions] PEP rows written: {seen}")
 
-    df = pd.concat(parts, ignore_index=True)
-    # Write compact parquet
-    table = pa.Table.from_pandas(df)
-    pq.write_table(table, OSN_PARQUET)
+    writer.close()
+    os.replace(tmp_path, OSN_PARQUET)
     print(f"[OpenSanctions] Parquet saved -> {OSN_PARQUET}")
+    try:
+        clear_osn_cache()
+    except Exception:
+        pass
 
-    # clear cache so next request sees the new file
-    clear_osn_cache()
-
-# ---------------------------
-# Loading & caching
-# ---------------------------
+# =========================
+# Loading & cache
+# =========================
 
 @lru_cache(maxsize=1)
 def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
     """
-    Load parquet once, project required columns, and precompute normalized fields.
-    Uses Arrow-backed dtypes to keep memory small.
+    Load parquet once, add normalized fields (kept small with Arrow dtypes).
     """
     if not os.path.exists(parquet_path):
-        return pd.DataFrame(columns=OSN_COLS + ["name_norm", "birth_norm"])
+        return pd.DataFrame(columns=ALL_COLS + ["name_norm", "birth_norm"])
 
     table = pq.read_table(parquet_path)
-    # ensure all required columns exist in the table
+    # Ensure all required columns exist
     have = set(table.column_names)
     arrays, names = [], []
-    for c in OSN_COLS:
+    for c in ALL_COLS:
         if c in have:
             arrays.append(table[c])
         else:
@@ -220,7 +290,6 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
         names.append(c)
     table2 = pa.Table.from_arrays(arrays, names=names)
 
-    # Convert to pandas with ArrowDtype to reduce memory
     df = table2.to_pandas(types_mapper=pd.ArrowDtype)
 
     # Precompute normalized fields
@@ -230,48 +299,104 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
         errors="coerce"
     ).dt.strftime("%Y-%m-%d")
 
-    # Ensure flags exist (source_type is in the parquet)
     df["source_type"] = df["source_type"].astype("string[pyarrow]").fillna("")
     return df
 
 def clear_osn_cache():
     get_opensanctions_df.cache_clear()
 
-# ---------------------------
+# =========================
 # Matching
-# ---------------------------
+# =========================
 
-def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="data/opensanctions.parquet"):
+def _normalize_dob(dob: Optional[str]) -> Optional[str]:
+    if not dob:
+        return None
+    try:
+        return pd.to_datetime(str(dob), errors="coerce").strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def get_best_name_matches(search_name, candidates, limit=50, threshold=80):
+    """Robust fuzzy match with basic heuristics."""
+    def preprocess(name):
+        name = _normalize_text(name)
+        blacklist = {
+            "the","ltd","llc","inc","co","company","corp","plc","limited",
+            "real","estate","group","services","solutions","hub","global",
+            "trust","association","federation","union","committee","organization",
+            "network","centre","center","international","foundation","institute","bank"
+        }
+        tokens = [w for w in name.split() if w not in blacklist]
+        return " ".join(tokens), set(tokens)
+
+    search_cleaned, search_tokens = preprocess(search_name)
+    clean_candidates = [(i, *preprocess(c)) for i, c in enumerate(candidates)]
+    results = []
+
+    for idx, candidate_cleaned, candidate_tokens in clean_candidates:
+        score = fuzz.token_set_ratio(search_cleaned, candidate_cleaned)
+        if score < threshold:
+            continue
+        token_union = search_tokens | candidate_tokens
+        overlap = len(search_tokens & candidate_tokens)
+        jaccard = overlap / max(1, len(token_union))
+        if len(search_tokens) <= 2 and search_cleaned == candidate_cleaned:
+            results.append((candidate_cleaned, score, idx)); continue
+        if overlap < 2 or jaccard < 0.4:
+            continue
+        if abs(len(search_tokens) - len(candidate_tokens)) > 2:
+            score -= 15
+        if len(candidate_tokens) <= 2 and len(search_tokens) > 3:
+            score -= 20
+        if score >= threshold:
+            results.append((candidate_cleaned, score, idx))
+
+    return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
+
+def _source_label_for_row(row) -> str:
+    """
+    For sanctions: prefer dataset; fallback to 'OpenSanctions – Sanctions'.
+    For PEPs: fixed 'Consolidated PEP list'.
+    """
+    st = _safe_str(row.get("source_type")).lower()
+    if st == "peps":
+        return "Consolidated PEP list"
+    ds = _safe_str(row.get("dataset")).strip()
+    return ds or "OpenSanctions – Sanctions"
+
+def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path=OSN_PARQUET):
+    """
+    Main /opcheck logic (DOB-strict when provided).
+    """
     import math
 
-    df = load_opensanctions_from_parquet(parquet_path)
+    df = get_opensanctions_df(parquet_path)
     if df.empty:
         return {"error": "No data available."}
 
-    # Filter by entity type/schema
+    # Filter by schema/entity_type
     et = (entity_type or "Person").lower()
-    schema_col = df.get("schema")
-    if schema_col is not None:
-        schemas = schema_col.astype(str).str.lower()
-        if et == "organization":
-            df = df[schemas.isin(["organization", "legalentity", "company"])]
-        else:
-            df = df[schemas == "person"]
+    schemas = df["schema"].astype(str).str.lower() if "schema" in df.columns else pd.Series([], dtype="string")
+    if et == "organization":
+        df = df[schemas.isin(["organization", "legalentity", "company"])]
+    else:
+        df = df[schemas == "person"]
 
     if df.empty:
         result = _empty_no_match_result()
         _append_search_to_csv(name, result["Check Summary"])
         return result
 
-    norm_name = normalize_text(name)
-    norm_dob = normalize_dob(dob)
+    norm_name = _normalize_text(name)
+    norm_dob = _normalize_dob(dob)
 
     def parse_dob(val):
         try:
             s = str(val)
             if not s or s.lower() in ("nan", "none", "nat"):
                 return None
-            return normalize_dob(s)
+            return _normalize_dob(s)
         except Exception:
             return None
 
@@ -294,59 +419,43 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
 
         # If DOB provided, require exact DOB match among the matched indices.
         if norm_dob:
-            dob_ok_matches = []
+            dob_ok = []
             for _, score, idx in matches:
                 r = df_subset.iloc[idx]
                 cand_dob = parse_dob(r.get("birth_date"))
                 if cand_dob and cand_dob == norm_dob:
-                    dob_ok_matches.append((_, score, idx))
-            if not dob_ok_matches:
-                # No exact DOB matches -> treat as no match for this dataset
+                    dob_ok.append((_, score, idx))
+            if not dob_ok:
                 return None, None, []
-            matches = dob_ok_matches
+            matches = dob_ok
 
-        # Pick the highest score after the DOB filter (if applied)
         matches_sorted = sorted(matches, key=lambda x: x[1], reverse=True)
         _, best_score, best_idx = matches_sorted[0]
         best_row = df_subset.iloc[best_idx]
 
-        # Build a compact Top Matches list for UI
         top_list = []
-        for i, (cleaned_name, score, idx) in enumerate(matches_sorted[:10]):
+        for cleaned_name, score, idx in matches_sorted[:10]:
             display_name = as_safe_str(df_subset.iloc[idx].get("name") or cleaned_name)
             top_list.append((display_name, round(float(score), 1)))
 
         return best_row, float(best_score), top_list
 
     # Split by source_type
-    st = df.get("source_type")
-    if st is not None:
-        st_lower = st.astype(str).str.lower()
-        sanc_df = df[st_lower == "sanctions"]
-        pep_df  = df[st_lower == "peps"]
-    else:
-        # Fallback: if not labeled, treat everything as sanctions (shouldn’t happen with your refresh)
-        sanc_df, pep_df = df, df.iloc[0:0]
+    st_lower = df["source_type"].astype(str).str.lower() if "source_type" in df.columns else pd.Series([], dtype="string")
+    sanc_df = df[st_lower == "sanctions"]
+    pep_df  = df[st_lower == "peps"]
 
     # Try sanctions first
     s_row, s_score, s_top = best_match_from(sanc_df)
     if s_row is not None:
-        # Derive fields
-        is_sanctioned = True
-        is_pep = False
-
-        # Prefer dataset label for Source; fall back to consolidated label
-        dataset_label = as_safe_str(s_row.get("dataset")).strip()
-        source_label = dataset_label or "OpenSanctions – Sanctions"
-
         result = {
             "Sanctions Name": s_row.get("name"),
             "Birth Date": parse_dob(s_row.get("birth_date")),
-            "Regime": _derive_regime_like(s_row),
-            "Position": s_row.get("positions"),
+            "Regime": _derive_regime_like_row(s_row),
+            "Position": None,
             "Topics": [],
-            "Is PEP": is_pep,
-            "Is Sanctioned": is_sanctioned,
+            "Is PEP": False,
+            "Is Sanctioned": True,
             "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
             "Score": s_score,
             "Risk Level": "High Risk",
@@ -354,7 +463,7 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
             "Match Found": True,
             "Check Summary": {
                 "Status": "Fail Sanction",
-                "Source": source_label,
+                "Source": _source_label_for_row(s_row),
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         }
@@ -364,17 +473,14 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
     # Otherwise, try PEPs
     p_row, p_score, p_top = best_match_from(pep_df)
     if p_row is not None:
-        is_sanctioned = False
-        is_pep = True
-
         result = {
             "Sanctions Name": p_row.get("name"),
             "Birth Date": parse_dob(p_row.get("birth_date")),
-            "Regime": _derive_regime_like(p_row),
-            "Position": p_row.get("positions"),
+            "Regime": _derive_regime_like_row(p_row),
+            "Position": None,
             "Topics": [],
-            "Is PEP": is_pep,
-            "Is Sanctioned": is_sanctioned,
+            "Is PEP": True,
+            "Is Sanctioned": False,
             "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
             "Score": p_score,
             "Risk Level": "Medium Risk",
@@ -394,31 +500,9 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
     _append_search_to_csv(name, result["Check Summary"])
     return result
 
-def load_opensanctions_from_parquet(parquet_path="data/opensanctions.parquet") -> pd.DataFrame:
-    """Load the consolidated OpenSanctions parquet written during refresh."""
-    if not os.path.exists(parquet_path):
-        print(f"[OpenSanctions] parquet not found at {parquet_path}")
-        return pd.DataFrame()
-    try:
-        return pd.read_parquet(parquet_path)
-    except Exception as e:
-        print(f"[OpenSanctions] Failed to load parquet: {e}")
-        return pd.DataFrame()
-
-def _source_label_for_row(row) -> str:
-    """
-    For sanctions: prefer dataset value; fallback to 'OpenSanctions'.
-    For PEPs: fixed 'Consolidated PEP list'.
-    """
-    st = _safe_str(row.get("source_type")).lower()
-    if st == "peps":
-        return "Consolidated PEP list"
-    ds = _safe_str(row.get("dataset")).strip()
-    return ds or "OpenSanctions"
-
-# ---------------------------
-# Optional: OFSI + Wikidata (for /check endpoint compatibility)
-# ---------------------------
+# =========================
+# Legacy OFSI + Wikidata (optional; for /check)
+# =========================
 
 def get_latest_ofsi_csv_url():
     return "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
@@ -462,43 +546,6 @@ def load_ofsi_data(file_path):
 def get_ofsi_data(force_refresh=False):
     path = download_and_save_ofsi_file(force_refresh)
     return load_ofsi_data(path) if path else None
-
-def get_best_name_matches(search_name, candidates, limit=50, threshold=80):
-    """Robust fuzzy match with basic heuristics."""
-    def preprocess(name):
-        name = _normalize_text(name)
-        blacklist = {
-            "the","ltd","llc","inc","co","company","corp","plc","limited",
-            "real","estate","group","services","solutions","hub","global",
-            "trust","association","federation","union","committee","organization",
-            "network","centre","center","international","foundation","institute","bank"
-        }
-        tokens = [w for w in name.split() if w not in blacklist]
-        return " ".join(tokens), set(tokens)
-
-    search_cleaned, search_tokens = preprocess(search_name)
-    clean_candidates = [(i, *preprocess(c)) for i, c in enumerate(candidates)]
-    results = []
-
-    for idx, candidate_cleaned, candidate_tokens in clean_candidates:
-        score = fuzz.token_set_ratio(search_cleaned, candidate_cleaned)
-        if score < threshold:
-            continue
-        token_union = search_tokens | candidate_tokens
-        overlap = len(search_tokens & candidate_tokens)
-        jaccard = overlap / max(1, len(token_union))
-        if len(search_tokens) <= 2 and search_cleaned == candidate_cleaned:
-            results.append((candidate_cleaned, score, idx)); continue
-        if overlap < 2 or jaccard < 0.4:
-            continue
-        if abs(len(search_tokens) - len(candidate_tokens)) > 2:
-            score -= 15
-        if len(candidate_tokens) <= 2 and len(search_tokens) > 3:
-            score -= 20
-        if score >= threshold:
-            results.append((candidate_cleaned, score, idx))
-
-    return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
 
 def match_against_ofsi(customer_name, dob, ofsi_df):
     normalized_input = _normalize_text(customer_name)
@@ -575,30 +622,9 @@ def query_wikidata(name):
         pass
     return None
 
-# --- compatibility shims / helpers ---
-
-def normalize_text(s: str) -> str:
-    """Public-friendly alias used by earlier code."""
-    return _normalize_text(s)
-
-def normalize_dob(dob):
-    """Normalize any DOB-ish input to 'YYYY-MM-DD' or None."""
-    try:
-        v = str(dob).strip()
-        if not v or v.lower() in ("nan", "none", "nat"):
-            return None
-        return pd.to_datetime(v, errors="coerce").strftime("%Y-%m-%d")
-    except Exception:
-        return None
-
-def _derive_regime_like(row) -> Optional[str]:
-    """Alias to the row-based implementation used in results."""
-    return _derive_regime_like_row(row)
-
 def perform_sanctions_check(name, dob, force_refresh=False):
     """
-    Legacy /check endpoint: OFSI fuzzy + Wikidata hint.
-    Keeps memory impact small.
+    Legacy /check endpoint: OFSI fuzzy + Wikidata hint (small memory).
     """
     ofsi_df = get_ofsi_data(force_refresh=force_refresh)
     if ofsi_df is None:
