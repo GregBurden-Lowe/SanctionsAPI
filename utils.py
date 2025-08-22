@@ -18,6 +18,30 @@ import pyarrow.parquet as pq
 # General helpers
 # ---------------------------
 
+def sget(row, key, default=""):
+    """Safe get: returns trimmed string, mapping pd.NA/None to default."""
+    v = row.get(key, default)
+    if pd.isna(v):
+        return default
+    return str(v).strip()
+
+def sget_list(row, key):
+    """Return a cleaned list from a field that may be NA / string / list-like."""
+    v = row.get(key)
+    if pd.isna(v) or v is None:
+        return []
+    if isinstance(v, (list, tuple, set)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    # handle semicolon/comma separated strings
+    txt = str(v)
+    if ";" in txt:
+        parts = [p.strip() for p in txt.split(";")]
+    elif "," in txt:
+        parts = [p.strip() for p in txt.split(",")]
+    else:
+        parts = [txt.strip()]
+    return [p for p in parts if p]
+
 def normalize_text(text: str) -> str:
     if not isinstance(text, str):
         return ""
@@ -191,21 +215,20 @@ def _derive_regime_like(row) -> Optional[str]:
       2) sanctions (long text; take first semicolon/newline chunk)
       3) dataset (e.g., 'EU Council Official Journal Sanctioned Entities')
     """
-    prog = str(row.get("program_ids") or "").strip()
+    prog = sget(row, "program_ids")
     if prog:
         return prog.split(";")[0].strip()
 
-    sanc = str(row.get("sanctions") or "").strip()
+    sanc = sget(row, "sanctions")
     if sanc:
         part = sanc.split(";")[0].strip()
-        if not part:
+        if not part and "\n" in sanc:
             part = sanc.splitlines()[0].strip()
         if part:
             return part
 
-    ds = str(row.get("dataset") or "").strip()
+    ds = sget(row, "dataset")
     return ds or None
-
 
 def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="data/opensanctions.parquet"):
     """
