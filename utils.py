@@ -575,6 +575,26 @@ def query_wikidata(name):
         pass
     return None
 
+# --- compatibility shims / helpers ---
+
+def normalize_text(s: str) -> str:
+    """Public-friendly alias used by earlier code."""
+    return _normalize_text(s)
+
+def normalize_dob(dob):
+    """Normalize any DOB-ish input to 'YYYY-MM-DD' or None."""
+    try:
+        v = str(dob).strip()
+        if not v or v.lower() in ("nan", "none", "nat"):
+            return None
+        return pd.to_datetime(v, errors="coerce").strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def _derive_regime_like(row) -> Optional[str]:
+    """Alias to the row-based implementation used in results."""
+    return _derive_regime_like_row(row)
+
 def perform_sanctions_check(name, dob, force_refresh=False):
     """
     Legacy /check endpoint: OFSI fuzzy + Wikidata hint.
