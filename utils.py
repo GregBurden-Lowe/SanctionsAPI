@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz
+import threading
 
 # =============================================================================
 # Configuration
@@ -520,3 +521,29 @@ def send_audit_to_power_automate(
                 time.sleep(1.5 * (attempt + 1))
                 continue
             return (False, f"Exception: {e.__class__.__name__}: {e}")
+
+def post_to_power_automate_async(
+    payload: Dict[str, Any],
+    flow_url: Optional[str] = None,
+    timeout: int = 8,
+    retries: int = 1,
+) -> None:
+    """
+    Spawn a daemon thread to call send_audit_to_power_automate(payload, ...).
+    Never raises; returns immediately.
+    """
+    def _worker():
+        try:
+            ok, msg = send_audit_to_power_automate(
+                payload=payload,
+                flow_url=flow_url,
+                timeout=timeout,
+                retries=retries,
+            )
+            print(f"[Audit->PA] ok={ok} msg={msg}")
+        except Exception as e:
+            # absolutely don't let background failures crash anything
+            print(f"[Audit->PA] unexpected error: {e}")
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
