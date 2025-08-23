@@ -1,64 +1,56 @@
-# utils.py — lean, low-RAM OpenSanctions utils (no PDF)
-# - Sanctions sources: UN, EU, OFAC, UK HMT/OFSI (filtered)
-# - Optional PEPs (consolidated)
-# - DOB exact-match required when DOB provided
-# - Compact parquet, cached load
-# - Search logging with requestor
+# utils.py — lean, low-RAM OpenSanctions + PEPs utils with Power Automate hook
 
 import os
 import csv
+import time
 from datetime import datetime
 from functools import lru_cache
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
-import pandas as pd
 import requests
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz
 
-
-# ---------------------------
+# =============================================================================
 # Configuration
-# ---------------------------
+# =============================================================================
 
 DATA_DIR = "data"
 OSN_PARQUET = os.path.join(DATA_DIR, "opensanctions.parquet")
 
-# Latest consolidated datasets
-CONSOLIDATED_SANCTIONS_URL = "https://data.opensanctions.org/datasets/latest/sanctions/targets.simple.csv"
-CONSOLIDATED_PEPS_URL = "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
-
-# Keep only columns we actually use
-OSN_COLS = [
-    "schema",       # Person / Organization / Company / LegalEntity
-    "name",         # primary display name
-    "aliases",      # aliases
-    "birth_date",   # ISO or partial
-    "program_ids",  # e.g. "EU-UKR;SECO-UKRAINE;UA-SA1644"
-    "dataset",      # dataset label (e.g. "EU Financial Sanctions Files (FSF)")
-    "sanctions",    # long text; we only take a short first chunk
-    # extra (we add at refresh time):
-    "source_type",  # "sanctions" or "peps"
-]
-
-# Sanction dataset filter (choose only these families)
-SANCTION_DATASET_KEYWORDS = (
-    "united nations",        # UN
-    "security council",      # UN/UNSC
-    "ofac",                  # US OFAC (SDN & non-SDN)
-    "consolidated (non-sdn)",# US OFAC consolidated
-    "sdn",                   # US OFAC SDN
-    "financial sanctions files",  # EU FSF
-    "eu council",            # EU OJ
-    "uk sanctions list",     # UK HMT OFSI
-    "hm treasury",           # UK HMT
-    "ofsi",                  # UK OFSI
+# Latest consolidated dumps
+CONSOLIDATED_SANCTIONS_URL = (
+    "https://data.opensanctions.org/datasets/latest/sanctions/targets.simple.csv"
+)
+CONSOLIDATED_PEPS_URL = (
+    "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
 )
 
-# ---------------------------
+# We only keep these columns to reduce memory
+OSN_COLS = [
+    "schema",       # Person / Organization / Company / LegalEntity
+    "name",         # display name
+    "aliases",
+    "birth_date",
+    "program_ids",
+    "dataset",      # dataset label/source
+    "sanctions",    # long text; we’ll trim for a short label
+    "source_type",  # we add this: "sanctions" | "peps"
+]
+
+# Restrict sanctions data to these sources only (case-insensitive substring match)
+SANCTIONS_DATASET_ALLOWLIST = [
+    "United Nations",                          # UN Security Council
+    "OFAC",                                    # US OFAC (SDN etc.)
+    "HM Treasury", "HMT", "UK Financial",      # UK HMT
+    "EU Council", "EU Financial Sanctions",    # EU lists
+]
+
+# =============================================================================
 # Small helpers
-# ---------------------------
+# =============================================================================
 
 def _normalize_text(s: str) -> str:
     import re, unicodedata
@@ -78,10 +70,11 @@ def _safe_str(v) -> str:
 
 def _derive_regime_like_row(row) -> Optional[str]:
     """
-    Create a short label for UI, prioritizing:
+    Create a short UI label using:
       1) program_ids (first token)
       2) sanctions (first ';' chunk or first line)
       3) dataset
+    Always treats NA safely.
     """
     prog = _safe_str(row.get("program_ids")).strip()
     if prog:
@@ -96,11 +89,20 @@ def _derive_regime_like_row(row) -> Optional[str]:
     ds = _safe_str(row.get("dataset")).strip()
     return ds or None
 
-def _top_matches_list(matches: List[Tuple[str, float, int]], df: pd.DataFrame, limit: int = 10) -> List[Tuple[str, float]]:
-    out = []
-    for _, score, idx in matches[:limit]:
-        name = _safe_str(df.iloc[idx].get("name"))
-        out.append((name, round(float(score), 1)))
+def _top_matches_list(df: pd.DataFrame, limit: int = 10) -> List[Tuple[str, float]]:
+    out: List[Tuple[str, float]] = []
+    if df is None or df.empty:
+        return out
+    rows = df.head(limit).itertuples(index=False)
+    for r in rows:
+        name = getattr(r, "name", None)
+        score = getattr(r, "score", None)
+        if name is None or score is None:
+            continue
+        try:
+            out.append((_safe_str(name), float(score)))
+        except Exception:
+            continue
     return out
 
 def _empty_no_match_result(source_label: str = "OpenSanctions"):
@@ -124,28 +126,31 @@ def _empty_no_match_result(source_label: str = "OpenSanctions"):
         },
     }
 
-def _append_search_to_csv(name, summary, requestor: Optional[str], path=os.path.join(DATA_DIR, "search_log.csv")):
+def _append_search_to_csv(
+    name: str,
+    summary: Dict[str, Any],
+    path: str = os.path.join(DATA_DIR, "search_log.csv")
+):
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         file_exists = os.path.isfile(path)
         with open(path, mode="a", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=["Date", "Name Searched", "Status", "Source", "Requestor"])
+            writer = csv.DictWriter(csvfile, fieldnames=["Date", "Name Searched", "Status", "Source"])
             if not file_exists:
                 writer.writeheader()
             writer.writerow({
-                "Date":       summary.get("Date"),
+                "Date":   summary.get("Date"),
                 "Name Searched": name,
-                "Status":     summary.get("Status"),
-                "Source":     summary.get("Source"),
-                "Requestor":  requestor or "",
+                "Status": summary.get("Status"),
+                "Source": summary.get("Source"),
             })
     except Exception:
-        # best-effort logging only
+        # best-effort only
         pass
 
-# ---------------------------
+# =============================================================================
 # Data refresh (download -> filter -> parquet)
-# ---------------------------
+# =============================================================================
 
 def _download_csv(url: str, dest_path: str, timeout: int = 240):
     r = requests.get(url, timeout=timeout)
@@ -153,38 +158,44 @@ def _download_csv(url: str, dest_path: str, timeout: int = 240):
     with open(dest_path, "wb") as f:
         f.write(r.content)
 
-def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
-    for c in OSN_COLS:
-        if c not in df.columns and c != "source_type":
-            df[c] = pd.Series(dtype="string")
-    return df[[c for c in OSN_COLS if c != "source_type"]].copy()
-
-def _filter_sanction_datasets(df: pd.DataFrame) -> pd.DataFrame:
-    # keep rows where dataset contains any of the keywords
-    ds = df["dataset"].astype(str).str.lower().fillna("")
-    mask = False
-    for kw in SANCTION_DATASET_KEYWORDS:
-        mask = mask | ds.str.contains(kw, na=False)
-    return df[mask]
+def _dataset_allowed(label: str) -> bool:
+    """Loose allowlist check on dataset labels."""
+    if not label:
+        return False
+    L = label.lower()
+    for needle in SANCTIONS_DATASET_ALLOWLIST:
+        if needle.lower() in L:
+            return True
+    return False
 
 def refresh_opensanctions_data(include_peps: bool = True):
     """
-    Download latest consolidated sanctions (filtered to UN/EU/OFAC/UK),
-    and optionally consolidated PEPs. Write a compact parquet and clear cache.
+    Download latest consolidated sanctions (filtered to UN/EU/OFAC/HMT) and optional PEPs.
+    Keep only columns we need, add 'source_type', and write a single compact parquet.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
-    parts = []
+    parts: List[pd.DataFrame] = []
 
     # Sanctions
     try:
         sanc_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
-        _download_csv(CONSOLIDATED_SANCTIONS_URL, sanc_csv, timeout=360)
+        _download_csv(CONSOLIDATED_SANCTIONS_URL, sanc_csv, timeout=300)
         df_s = pd.read_csv(sanc_csv, low_memory=False)
-        df_s = _ensure_cols(df_s)
-        df_s = _filter_sanction_datasets(df_s)
+
+        # Ensure columns exist
+        for c in OSN_COLS:
+            if c not in df_s.columns and c != "source_type":
+                df_s[c] = pd.Series(dtype="string")
+
+        # Filter to allowlist datasets
+        df_s["dataset"] = df_s["dataset"].astype("string").fillna("")
+        mask = df_s["dataset"].apply(_dataset_allowed)
+        df_s = df_s[mask].copy()
+
+        df_s = df_s[[c for c in OSN_COLS if c != "source_type"]]
         df_s["source_type"] = "sanctions"
         parts.append(df_s)
-        print(f"[OpenSanctions] Sanctions filtered rows: {len(df_s):,}")
+        print(f"[OpenSanctions] Sanctions kept: {len(df_s):,} rows (filtered to UN/EU/OFAC/HMT).")
     except Exception as e:
         print(f"[OpenSanctions] Sanctions download/parsing failed: {e}")
 
@@ -192,12 +203,15 @@ def refresh_opensanctions_data(include_peps: bool = True):
     if include_peps:
         try:
             peps_csv = os.path.join(DATA_DIR, "os_peps_latest.csv")
-            _download_csv(CONSOLIDATED_PEPS_URL, peps_csv, timeout=360)
+            _download_csv(CONSOLIDATED_PEPS_URL, peps_csv, timeout=300)
             df_p = pd.read_csv(peps_csv, low_memory=False)
-            df_p = _ensure_cols(df_p)
+            for c in OSN_COLS:
+                if c not in df_p.columns and c != "source_type":
+                    df_p[c] = pd.Series(dtype="string")
+            df_p = df_p[[c for c in OSN_COLS if c != "source_type"]]
             df_p["source_type"] = "peps"
             parts.append(df_p)
-            print(f"[OpenSanctions] PEP rows: {len(df_p):,}")
+            print(f"[OpenSanctions] PEPs added: {len(df_p):,} rows.")
         except Exception as e:
             print(f"[OpenSanctions] PEPs download/parsing failed: {e}")
 
@@ -206,17 +220,18 @@ def refresh_opensanctions_data(include_peps: bool = True):
         return
 
     df = pd.concat(parts, ignore_index=True)
+
     # Write compact parquet
     table = pa.Table.from_pandas(df)
     pq.write_table(table, OSN_PARQUET)
     print(f"[OpenSanctions] Parquet saved -> {OSN_PARQUET}")
 
-    # clear cache so next request sees the new file
+    # clear cache
     clear_osn_cache()
 
-# ---------------------------
+# =============================================================================
 # Loading & caching
-# ---------------------------
+# =============================================================================
 
 @lru_cache(maxsize=1)
 def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
@@ -225,10 +240,9 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
     Uses Arrow-backed dtypes to keep memory small.
     """
     if not os.path.exists(parquet_path):
-        return pd.DataFrame(columns=OSN_COLS + ["name_norm", "birth_norm", "source_type"])
+        return pd.DataFrame(columns=OSN_COLS + ["name_norm", "birth_norm"])
 
     table = pq.read_table(parquet_path)
-    # ensure all required columns exist in the table
     have = set(table.column_names)
     arrays, names = [], []
     for c in OSN_COLS:
@@ -239,41 +253,50 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
         names.append(c)
     table2 = pa.Table.from_arrays(arrays, names=names)
 
-    # Convert to pandas (ArrowDtype to reduce memory)
+    # Convert to pandas with ArrowDtype
     df = table2.to_pandas(types_mapper=pd.ArrowDtype)
 
     # Precompute normalized fields
-    df["name_norm"] = df["name"].astype("string[pyarrow]").fillna("").map(str).map(_normalize_text)
+    df["name_norm"] = (
+        df["name"]
+        .astype("string[pyarrow]")
+        .fillna("")
+        .map(str)
+        .map(_normalize_text)
+    )
     df["birth_norm"] = pd.to_datetime(
         df["birth_date"].astype("string[pyarrow]").fillna(""),
-        errors="coerce"
+        errors="coerce",
     ).dt.strftime("%Y-%m-%d")
 
-    # Ensure flags exist
-    if "source_type" not in df.columns:
-        df["source_type"] = "sanctions"
     df["source_type"] = df["source_type"].astype("string[pyarrow]").fillna("")
     return df
 
 def clear_osn_cache():
     get_opensanctions_df.cache_clear()
 
+# Backward-compat helper (if you still call it elsewhere)
 def load_opensanctions_from_parquet(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
-    """
-    Legacy loader (used by some code paths). Prefer get_opensanctions_df().
-    """
-    try:
-        return pd.read_parquet(parquet_path)
-    except Exception as e:
-        print(f"[OpenSanctions] Failed to load parquet: {e}")
-        return pd.DataFrame()
+    return get_opensanctions_df(parquet_path)
 
-# ---------------------------
+# =============================================================================
 # Matching
-# ---------------------------
+# =============================================================================
 
-def get_best_name_matches(search_name, candidates, limit=50, threshold=80):
-    """Robust fuzzy match with basic heuristics."""
+def _normalize_dob(dob: Optional[str]) -> Optional[str]:
+    if not dob:
+        return None
+    try:
+        # accept YYYY-MM or YYYY too
+        dt = pd.to_datetime(str(dob), errors="coerce")
+        if pd.isna(dt):
+            return None
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def get_best_name_matches(search_name: str, candidates: List[str], limit=50, threshold=80):
+    """Robust fuzzy match with simple heuristics."""
     def preprocess(name):
         name = _normalize_text(name)
         blacklist = {
@@ -282,30 +305,35 @@ def get_best_name_matches(search_name, candidates, limit=50, threshold=80):
             "trust","association","federation","union","committee","organization",
             "network","centre","center","international","foundation","institute","bank"
         }
-        tokens = [w for w in name.split() if w not in blacklist]
+        tokens = [w for w in name.split() if w and w not in blacklist]
         return " ".join(tokens), set(tokens)
 
-    search_cleaned, search_tokens = preprocess(search_name)
+    s_clean, s_tokens = preprocess(search_name)
     clean_candidates = [(i, *preprocess(c)) for i, c in enumerate(candidates)]
     results = []
 
-    for idx, candidate_cleaned, candidate_tokens in clean_candidates:
-        score = fuzz.token_set_ratio(search_cleaned, candidate_cleaned)
+    for idx, c_clean, c_tokens in clean_candidates:
+        score = fuzz.token_set_ratio(s_clean, c_clean)
         if score < threshold:
             continue
-        token_union = search_tokens | candidate_tokens
-        overlap = len(search_tokens & candidate_tokens)
+        token_union = s_tokens | c_tokens
+        overlap = len(s_tokens & c_tokens)
         jaccard = overlap / max(1, len(token_union))
-        if len(search_tokens) <= 2 and search_cleaned == candidate_cleaned:
-            results.append((candidate_cleaned, score, idx)); continue
+
+        # exact(ish) short matches
+        if len(s_tokens) <= 2 and s_clean == c_clean:
+            results.append((c_clean, score, idx))
+            continue
+
         if overlap < 2 or jaccard < 0.4:
             continue
-        if abs(len(search_tokens) - len(candidate_tokens)) > 2:
+        if abs(len(s_tokens) - len(c_tokens)) > 2:
             score -= 15
-        if len(candidate_tokens) <= 2 and len(search_tokens) > 3:
+        if len(c_tokens) <= 2 and len(s_tokens) > 3:
             score -= 20
+
         if score >= threshold:
-            results.append((candidate_cleaned, score, idx))
+            results.append((c_clean, score, idx))
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
 
@@ -313,52 +341,45 @@ def perform_opensanctions_check(
     name: str,
     dob: Optional[str],
     entity_type: str = "Person",
-    requestor: Optional[str] = None,
-    parquet_path: str = OSN_PARQUET,
-):
+    requestor: Optional[str] = None,  # purely for audit hook
+) -> Dict[str, Any]:
     """
-    Main screening:
-      - If DOB provided, require exact DOB among candidate matches.
-      - Try sanctions first; if none (after DOB strictness), try PEPs.
+    Main match function. If DoB is provided, it requires an exact DoB match
+    among name matches for that dataset. Tries sanctions first, then PEPs.
     """
-    df = get_opensanctions_df(parquet_path)
-    if df.empty:
-        return {"error": "No data available. Please refresh datasets."}
+    import math
 
-    # Filter by schema (entity type)
+    df = get_opensanctions_df(OSN_PARQUET)
+    if df.empty:
+        return {"error": "No data available."}
+
+    # Filter by schema
     et = (entity_type or "Person").lower()
     schemas = df["schema"].astype(str).str.lower()
     if et == "organization":
-        mask = schemas.isin(["organization", "legalentity", "company"])
+        df = df[schemas.isin(["organization", "legalentity", "company"])]
     else:
-        mask = (schemas == "person")
-    df = df[mask]
+        df = df[schemas == "person"]
+
     if df.empty:
         result = _empty_no_match_result()
-        _append_search_to_csv(name, result["Check Summary"], requestor)
+        _append_search_to_csv(name, result["Check Summary"])
         return result
 
     norm_name = _normalize_text(name)
-    norm_dob = None
-    if dob:
-        try:
-            norm_dob = pd.to_datetime(dob, errors="coerce")
-            norm_dob = None if pd.isna(norm_dob) else norm_dob.strftime("%Y-%m-%d")
-        except Exception:
-            norm_dob = None
+    norm_dob = _normalize_dob(dob)
 
     def parse_dob(val):
         try:
             s = _safe_str(val)
             if not s:
                 return None
-            dt = pd.to_datetime(s, errors="coerce")
-            return None if pd.isna(dt) else dt.strftime("%Y-%m-%d")
+            return _normalize_dob(s)
         except Exception:
             return None
 
-    def best_match_from(df_subset: pd.DataFrame, top_limit=50, threshold=78):
-        """Return (row, score, top_matches_list) or (None, None, []), honoring DOB strictness."""
+    def best_match_from(df_subset: pd.DataFrame, top_limit=50, threshold=80):
+        """Return (row, score, top_matches) or (None, None, []). Enforces DoB if provided."""
         if df_subset is None or df_subset.empty:
             return None, None, []
 
@@ -367,23 +388,33 @@ def perform_opensanctions_check(
         if not matches:
             return None, None, []
 
-        # If DOB provided, require exact DOB match among the matched indices.
+        # If DoB provided, require exact match
         if norm_dob:
-            dob_ok = []
-            for cleaned_name, score, idx in matches:
-                cand_dob = parse_dob(df_subset.iloc[idx].get("birth_date"))
+            filt = []
+            for _, score, idx in matches:
+                r = df_subset.iloc[idx]
+                cand_dob = parse_dob(r.get("birth_date"))
                 if cand_dob and cand_dob == norm_dob:
-                    dob_ok.append((cleaned_name, score, idx))
-            if not dob_ok:
+                    filt.append((_, score, idx))
+            if not filt:
                 return None, None, []
-            matches = dob_ok
+            matches = filt
 
-        best = sorted(matches, key=lambda x: x[1], reverse=True)[0]
-        _, best_score, best_idx = best
-        top_list = _top_matches_list(matches, df_subset, limit=10)
-        return df_subset.iloc[best_idx], float(best_score), top_list
+        matches_sorted = sorted(matches, key=lambda x: x[1], reverse=True)
+        _, best_score, best_idx = matches_sorted[0]
+        best_row = df_subset.iloc[best_idx]
 
-    # Split by source_type
+        top_list: List[Tuple[str, float]] = []
+        for cleaned_name, score, idx in matches_sorted[:10]:
+            display_name = _safe_str(df_subset.iloc[idx].get("name") or cleaned_name)
+            try:
+                top_list.append((display_name, round(float(score), 1)))
+            except Exception:
+                top_list.append((display_name, 0.0))
+
+        return best_row, float(best_score), top_list
+
+    # Split by source
     st_lower = df["source_type"].astype(str).str.lower()
     sanc_df = df[st_lower == "sanctions"]
     pep_df  = df[st_lower == "peps"]
@@ -391,12 +422,14 @@ def perform_opensanctions_check(
     # Try sanctions first
     s_row, s_score, s_top = best_match_from(sanc_df)
     if s_row is not None:
-        source_label = _safe_str(s_row.get("dataset")).strip() or "OpenSanctions – Sanctions"
+        dataset_label = _safe_str(s_row.get("dataset")).strip()
+        source_label = dataset_label or "OpenSanctions – Sanctions"
+
         result = {
             "Sanctions Name": s_row.get("name"),
             "Birth Date": parse_dob(s_row.get("birth_date")),
             "Regime": _derive_regime_like_row(s_row),
-            "Position": s_row.get("positions"),
+            "Position": None,
             "Topics": [],
             "Is PEP": False,
             "Is Sanctioned": True,
@@ -411,17 +444,18 @@ def perform_opensanctions_check(
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         }
-        _append_search_to_csv(name, result["Check Summary"], requestor)
+        _append_search_to_csv(name, result["Check Summary"])
+        # Optional: Power Automate audit (call from api_server after enrich with requestor)
         return result
 
-    # Otherwise, try PEPs
+    # Try PEPs
     p_row, p_score, p_top = best_match_from(pep_df)
     if p_row is not None:
         result = {
             "Sanctions Name": p_row.get("name"),
             "Birth Date": parse_dob(p_row.get("birth_date")),
             "Regime": _derive_regime_like_row(p_row),
-            "Position": p_row.get("positions"),
+            "Position": None,
             "Topics": [],
             "Is PEP": True,
             "Is Sanctioned": False,
@@ -436,10 +470,53 @@ def perform_opensanctions_check(
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         }
-        _append_search_to_csv(name, result["Check Summary"], requestor)
+        _append_search_to_csv(name, result["Check Summary"])
         return result
 
-    # Nothing matched (or DOB strictness eliminated candidates)
+    # No matches
     result = _empty_no_match_result()
-    _append_search_to_csv(name, result["Check Summary"], requestor)
+    _append_search_to_csv(name, result["Check Summary"])
     return result
+
+# =============================================================================
+# Power Automate audit hook
+# =============================================================================
+
+def send_audit_to_power_automate(
+    payload: Dict[str, Any],
+    flow_url: Optional[str] = None,
+    timeout: int = 8,
+    retries: int = 1,
+) -> Tuple[bool, str]:
+    """
+    POST 'payload' to a Power Automate HTTP trigger.
+
+    Returns: (ok, message)
+      ok=True  -> delivered (2xx)
+      ok=False -> not delivered; message contains status or exception
+
+    Reads FLOW URL from env POWER_AUTOMATE_FLOW_URL unless 'flow_url' is provided.
+    Safe to call inline; it won't raise.
+    """
+    url = (flow_url or os.getenv("POWER_AUTOMATE_FLOW_URL", "")).strip()
+    if not url:
+        return (False, "POWER_AUTOMATE_FLOW_URL not set")
+
+    headers = {"Content-Type": "application/json"}
+
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if 200 <= resp.status_code < 300:
+                return (True, f"Delivered {resp.status_code}")
+            transient = (resp.status_code == 429) or (500 <= resp.status_code < 600)
+            if attempt < retries and transient:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            body_snip = (resp.text or "")[:200]
+            return (False, f"HTTP {resp.status_code}: {body_snip}")
+        except requests.RequestException as e:
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return (False, f"Exception: {e.__class__.__name__}: {e}")
