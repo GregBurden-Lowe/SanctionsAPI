@@ -1,21 +1,23 @@
 # api_server.py
 
-from typing import Optional, Literal
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel, Field
 
 from utils import (
-    perform_sanctions_check,
     perform_opensanctions_check,
     refresh_opensanctions_data,
 )
 
-app = FastAPI(title="Sanctions & PEP Screening API")
+app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0")
 
-# --- CORS (Dynamics/Power Apps + your domain) ---
+
+# ---------------------------
+# CORS (Dynamics/Dataverse + Power Apps + your domain)
+# ---------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=(
@@ -28,53 +30,85 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=86400,
 )
 
-# --- Models ---
-class SearchRequest(BaseModel):
-    name: str
-    dob: Optional[str] = None
 
-class OpenSanctionsRequest(SearchRequest):
-    # Accept "Person" or "Organization"
-    entity_type: Literal["Person", "Organization"] = "Person"
-
-# --- Startup: ensure data is present ---
-@app.on_event("startup")
-def startup_event():
-    print("🔄 Refreshing OpenSanctions data on startup...")
-    try:
-        refresh_opensanctions_data()
-        print("✅ OpenSanctions data loaded.")
-    except Exception as e:
-        print(f"❌ Failed to refresh data: {e}")
-
-# --- Health ---
-@app.get("/")
-def root():
-    return {"message": "API is running"}
-
-# --- UK OFSI + light PEP (Wikidata) ---
-@app.post("/check")
-def check_ofsi_pep(data: SearchRequest):
-    results = perform_sanctions_check(name=data.name, dob=data.dob)
-    return JSONResponse(content=results)
-
-# --- OpenSanctions consolidated matching ---
-@app.post("/opcheck")
-def check_opensanctions(data: OpenSanctionsRequest):
-    results = perform_opensanctions_check(
-        name=data.name,
-        dob=data.dob,
-        entity_type=data.entity_type,
+# ---------------------------
+# Models
+# ---------------------------
+class OpCheckRequest(BaseModel):
+    name: str = Field(..., description="Full name or organization to screen")
+    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or None")
+    entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
+    requestor: Optional[str] = Field(
+        None,
+        description="Name of the user initiating the check (required for audit)"
     )
-    return JSONResponse(content=results)
 
-# --- Manually refresh OpenSanctions parquet ---
+
+class RefreshRequest(BaseModel):
+    include_peps: bool = Field(
+        True,
+        description="Include consolidated PEPs in the parquet (uses additional memory)"
+    )
+
+
+# ---------------------------
+# Routes
+# ---------------------------
+@app.get("/", response_class=PlainTextResponse)
+async def root():
+    return "Sanctions/PEP Screening API is running."
+
+
+@app.get("/health", response_class=PlainTextResponse)
+async def health():
+    return "ok"
+
+
+@app.post("/opcheck")
+async def check_opensanctions(data: OpCheckRequest):
+    # Validate presence of requestor with a friendly message
+    if not data.requestor or not data.requestor.strip():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_requestor",
+                "message": "Please provide 'requestor' (your name) to run a check."
+            },
+        )
+
+    # Validate name is present
+    if not data.name or not data.name.strip():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_name",
+                "message": "Please provide 'name' to run a check."
+            },
+        )
+
+    results = perform_opensanctions_check(
+        name=data.name.strip(),
+        dob=(data.dob.strip() if isinstance(data.dob, str) else data.dob),
+        entity_type=(data.entity_type or "Person"),
+        requestor=data.requestor.strip(),
+    )
+    return results
+
+
 @app.post("/refresh_opensanctions")
-def trigger_refresh():
+async def refresh_opensanctions(body: RefreshRequest):
+    """
+    Download latest consolidated sanctions (and optionally PEPs), write to parquet.
+    This clears cached DataFrame in utils so new data is used immediately.
+    """
     try:
-        refresh_opensanctions_data()
-        return JSONResponse({"status": "success", "message": "OpenSanctions data refreshed."})
+        refresh_opensanctions_data(include_peps=body.include_peps)
+        return {"status": "ok", "include_peps": body.include_peps}
     except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)},
+        )
