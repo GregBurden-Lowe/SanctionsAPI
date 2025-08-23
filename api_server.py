@@ -1,6 +1,7 @@
 # api_server.py
 
 from typing import Optional
+from datetime import datetime
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,10 +11,10 @@ from pydantic import BaseModel, Field
 from utils import (
     perform_opensanctions_check,
     refresh_opensanctions_data,
+    post_to_power_automate_async,  # <-- async fire-and-forget helper
 )
 
 app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0")
-
 
 # ---------------------------
 # CORS (Dynamics/Dataverse + Power Apps + your domain)
@@ -33,7 +34,6 @@ app.add_middleware(
     max_age=86400,
 )
 
-
 # ---------------------------
 # Models
 # ---------------------------
@@ -46,13 +46,11 @@ class OpCheckRequest(BaseModel):
         description="Name of the user initiating the check (required for audit)"
     )
 
-
 class RefreshRequest(BaseModel):
     include_peps: bool = Field(
         True,
         description="Include consolidated PEPs in the parquet (uses additional memory)"
     )
-
 
 # ---------------------------
 # Routes
@@ -61,11 +59,9 @@ class RefreshRequest(BaseModel):
 async def root():
     return "Sanctions/PEP Screening API is running."
 
-
 @app.get("/health", response_class=PlainTextResponse)
 async def health():
     return "ok"
-
 
 @app.post("/opcheck")
 async def check_opensanctions(data: OpCheckRequest):
@@ -89,14 +85,32 @@ async def check_opensanctions(data: OpCheckRequest):
             },
         )
 
+    # Run the core check
     results = perform_opensanctions_check(
         name=data.name.strip(),
         dob=(data.dob.strip() if isinstance(data.dob, str) else data.dob),
         entity_type=(data.entity_type or "Person"),
         requestor=data.requestor.strip(),
     )
-    return results
 
+    # Fire-and-forget audit push to Power Automate
+    try:
+        post_payload = {
+            "request": {
+                "name": data.name.strip(),
+                "dob": (data.dob.strip() if isinstance(data.dob, str) else None),
+                "entity_type": (data.entity_type or "Person"),
+                "requestor": data.requestor.strip(),
+                "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            },
+            "result": results,
+        }
+        post_to_power_automate_async(post_payload)
+    except Exception:
+        # Don't fail the API if audit push has issues
+        pass
+
+    return results
 
 @app.post("/refresh_opensanctions")
 async def refresh_opensanctions(body: RefreshRequest):
