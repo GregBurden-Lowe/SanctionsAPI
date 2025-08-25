@@ -373,27 +373,32 @@ def _suggest_name_matches(search_name: str, candidates: List[str], limit: int = 
 
 
 
-def _top_name_suggestions(df_subset: pd.DataFrame, search_name: str, limit: int = 5):
+def _top_name_suggestions(
+    df_subset: pd.DataFrame,
+    search_name: str,
+    limit: int = 5,
+    threshold: int = 60,
+):
     """
-    Return up to 'limit' suggestions [(name, score), ...] based ONLY on *name* similarity.
-    This is lenient and ignores DOB and strict heuristics.
+    Return up to 'limit' fuzzy suggestions [(name, score), ...] based ONLY on name similarity.
+    DOB and other strict rules are ignored here so users can see likely intended names.
     """
     if df_subset is None or df_subset.empty:
         return []
 
+    # Use the raw search name; get_best_name_matches will normalize internally
     candidates = df_subset["name"].fillna("").tolist()
-    hits = _suggest_name_matches(search_name, candidates, limit=limit * 4)
+    hits = get_best_name_matches(search_name, candidates, limit=limit * 3, threshold=threshold)
 
-    # Deduplicate by display name, keep highest score
+    # Deduplicate by display name (keep highest score), then cap
     seen: Dict[str, float] = {}
-    for idx, score in hits:
-        display = str(df_subset.iloc[idx].get("name") or "").strip()
+    for cleaned_name, score, idx in hits:
+        display = str(df_subset.iloc[idx].get("name") or cleaned_name)
         if not display:
             continue
         if display not in seen or score > seen[display]:
             seen[display] = float(score)
 
-    # Return top 'limit'
     return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
 
@@ -440,7 +445,7 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
         sanc_df, pep_df = df, df.iloc[0:0]
         combined_for_suggestions = df
 
-    top_suggestions = _top_name_suggestions(combined_for_suggestions, norm_name, limit=5, threshold=60)
+    top_suggestions = _top_name_suggestions(combined_for_suggestions, name, limit=5, threshold=60)
 
     # ---- Existing strict match logic (unchanged except Top Matches assignment) ----
 
