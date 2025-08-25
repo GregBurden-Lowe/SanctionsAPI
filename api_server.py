@@ -92,7 +92,22 @@ async def check_opensanctions(data: OpCheckRequest):
         entity_type=(data.entity_type or "Person"),
         requestor=data.requestor.strip(),
     )
-
+# ---- Make Top Matches Power Automate–friendly (objects, not tuples) ----
+tm = results.get("Top Matches", [])
+if isinstance(tm, list) and tm and isinstance(tm[0], (list, tuple)):
+    tm_objs = []
+    for item in tm[:10]:  # keep it tidy
+        try:
+            n, s = item
+        except Exception:
+            continue
+        tm_objs.append({"name": str(n), "score": float(s)})
+    # Only change the copy we send to Flow
+    results_for_flow = {**results, "Top Matches": tm_objs}
+else:
+    results_for_flow = results
+# -----------------------------------------------------------------------
+    
     # Fire-and-forget audit push to Power Automate
     try:
         post_payload = {
