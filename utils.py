@@ -378,28 +378,53 @@ def _top_name_suggestions(
     search_name: str,
     limit: int = 5,
     threshold: int = 60,
-):
+) -> List[Tuple[str, int]]:
     """
-    Return up to 'limit' fuzzy suggestions [(name, score), ...] based ONLY on name similarity.
-    DOB and other strict rules are ignored here so users can see likely intended names.
+    Relaxed suggestions for UI only (do NOT affect result):
+    - Name similarity only (no DOB, no 2-token overlap rule)
+    - Uses a 'best of' RapidFuzz score (partial_ratio / token_set_ratio / token_sort_ratio)
+    - Deduplicates by display name and returns top N as (name, score)
     """
     if df_subset is None or df_subset.empty:
         return []
 
-    # Use the raw search name; get_best_name_matches will normalize internally
-    candidates = df_subset["name"].fillna("").tolist()
-    hits = get_best_name_matches(search_name, candidates, limit=limit * 3, threshold=threshold)
+    # Build candidate list (keep original display names for dedup/display)
+    candidates = df_subset["name"].fillna("").astype(str).tolist()
+    if not candidates:
+        return []
 
-    # Deduplicate by display name (keep highest score), then cap
-    seen: Dict[str, float] = {}
-    for cleaned_name, score, idx in hits:
-        display = str(df_subset.iloc[idx].get("name") or cleaned_name)
-        if not display:
+    def best_score(a: str, b: str) -> int:
+        # Fast, robust scoring for suggestions
+        s1 = fuzz.partial_ratio(a, b)
+        s2 = fuzz.token_set_ratio(a, b)
+        s3 = fuzz.token_sort_ratio(a, b)
+        return max(s1, s2, s3)
+
+    # Score all candidates (could be ~tens of thousands, still OK)
+    # If you want to cap runtime, slice candidates[:N] here.
+    scored: List[Tuple[str, int]] = []
+    q = str(search_name or "")
+    for cand in candidates:
+        if not cand:
             continue
-        if display not in seen or score > seen[display]:
-            seen[display] = float(score)
+        sc = best_score(q, cand)
+        if sc >= threshold:
+            scored.append((cand, sc))
 
-    return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
+    if not scored:
+        return []
+
+    # Deduplicate by display name keeping highest score
+    best_per_name: Dict[str, int] = {}
+    for nm, sc in scored:
+        prev = best_per_name.get(nm)
+        if prev is None or sc > prev:
+            best_per_name[nm] = sc
+
+    # Sort and take top N
+    top = sorted(best_per_name.items(), key=lambda x: x[1], reverse=True)[:limit]
+    # Cast to int for stable JSON (no numpy types)
+    return [(n, int(s)) for n, s in top]
 
 
 def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="data/opensanctions.parquet", requestor: Optional[str]=None):
