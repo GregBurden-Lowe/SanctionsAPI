@@ -338,106 +338,135 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
 
-def perform_opensanctions_check(
-    name: str,
-    dob: Optional[str],
-    entity_type: str = "Person",
-    requestor: Optional[str] = None,  # purely for audit hook
-) -> Dict[str, Any]:
+def _top_name_suggestions(df_subset: pd.DataFrame, search_name: str, limit: int = 5, threshold: int = 60):
     """
-    Main match function. If DoB is provided, it requires an exact DoB match
-    among name matches for that dataset. Tries sanctions first, then PEPs.
+    Return up to 'limit' fuzzy suggestions [(name, score), ...] based ONLY on name similarity.
+    DOB and other strict rules are ignored here so users can see likely intended names.
     """
+    if df_subset is None or df_subset.empty:
+        return []
+    candidates = df_subset["name"].fillna("").tolist()
+    hits = get_best_name_matches(search_name, candidates, limit=limit * 3, threshold=threshold)
+    # Deduplicate by display name, keep highest score, then take top 'limit'
+    seen = {}
+    for cleaned_name, score, idx in hits:
+        display = str(df_subset.iloc[idx].get("name") or cleaned_name)
+        if not display:
+            continue
+        if display not in seen or score > seen[display]:
+            seen[display] = score
+    # Sort by score desc and cap
+    return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
+
+
+def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="data/opensanctions.parquet", requestor: Optional[str]=None):
     import math
 
-    df = get_opensanctions_df(OSN_PARQUET)
+    df = load_opensanctions_from_parquet(parquet_path)
     if df.empty:
-        return {"error": "No data available."}
-
-    # Filter by schema
-    et = (entity_type or "Person").lower()
-    schemas = df["schema"].astype(str).str.lower()
-    if et == "organization":
-        df = df[schemas.isin(["organization", "legalentity", "company"])]
-    else:
-        df = df[schemas == "person"]
-
-    if df.empty:
+        # Still provide suggestions from empty => none
         result = _empty_no_match_result()
         _append_search_to_csv(name, result["Check Summary"])
         return result
 
+    # Filter by entity type/schema
+    et = (entity_type or "Person").lower()
+    schema_col = df.get("schema")
+    if schema_col is not None:
+        schemas = schema_col.astype(str).str.lower()
+        if et == "organization":
+            df = df[schemas.isin(["organization", "legalentity", "company"])]
+        else:
+            df = df[schemas == "person"]
+
+    # Precompute normalized search
     norm_name = _normalize_text(name)
-    norm_dob = _normalize_dob(dob)
+    # Normalize DOB for strict result logic (unchanged)
+    def normalize_dob(d):
+        try:
+            if not d:
+                return None
+            return pd.to_datetime(str(d), errors="coerce").strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    norm_dob = normalize_dob(dob)
+
+    # ---- NEW: compute suggestions ignoring DOB (from BOTH sanctions+peps in the filtered schema) ----
+    st = df.get("source_type")
+    if st is not None:
+        st_lower = st.astype(str).str.lower()
+        sanc_df = df[st_lower == "sanctions"]
+        pep_df  = df[st_lower == "peps"]
+        combined_for_suggestions = pd.concat([sanc_df, pep_df], ignore_index=True)
+    else:
+        sanc_df, pep_df = df, df.iloc[0:0]
+        combined_for_suggestions = df
+
+    top_suggestions = _top_name_suggestions(combined_for_suggestions, norm_name, limit=5, threshold=60)
+
+    # ---- Existing strict match logic (unchanged except Top Matches assignment) ----
 
     def parse_dob(val):
         try:
-            s = _safe_str(val)
-            if not s:
+            s = str(val)
+            if not s or s.lower() in ("nan", "none", "nat"):
                 return None
-            return _normalize_dob(s)
+            return normalize_dob(s)
         except Exception:
             return None
 
-    def best_match_from(df_subset: pd.DataFrame, top_limit=50, threshold=80):
-        """Return (row, score, top_matches) or (None, None, []). Enforces DoB if provided."""
+    def as_safe_str(x):
+        if x is None:
+            return ""
+        if isinstance(x, float) and math.isnan(x):
+            return ""
+        return str(x)
+
+    def best_match_from(df_subset, top_limit=50, threshold=75):
+        """Return (row, score) using strict DOB rule if norm_dob is provided."""
         if df_subset is None or df_subset.empty:
-            return None, None, []
+            return None, None
 
         candidates = df_subset["name"].fillna("").tolist()
         matches = get_best_name_matches(norm_name, candidates, limit=top_limit, threshold=threshold)
         if not matches:
-            return None, None, []
+            return None, None
 
-        # If DoB provided, require exact match
+        # DOB strictness for the ACTUAL result (unchanged)
         if norm_dob:
-            filt = []
+            dob_ok_matches = []
             for _, score, idx in matches:
                 r = df_subset.iloc[idx]
                 cand_dob = parse_dob(r.get("birth_date"))
                 if cand_dob and cand_dob == norm_dob:
-                    filt.append((_, score, idx))
-            if not filt:
-                return None, None, []
-            matches = filt
+                    dob_ok_matches.append((_, score, idx))
+            if not dob_ok_matches:
+                return None, None
+            matches = dob_ok_matches
 
         matches_sorted = sorted(matches, key=lambda x: x[1], reverse=True)
         _, best_score, best_idx = matches_sorted[0]
         best_row = df_subset.iloc[best_idx]
-
-        top_list: List[Tuple[str, float]] = []
-        for cleaned_name, score, idx in matches_sorted[:10]:
-            display_name = _safe_str(df_subset.iloc[idx].get("name") or cleaned_name)
-            try:
-                top_list.append((display_name, round(float(score), 1)))
-            except Exception:
-                top_list.append((display_name, 0.0))
-
-        return best_row, float(best_score), top_list
-
-    # Split by source
-    st_lower = df["source_type"].astype(str).str.lower()
-    sanc_df = df[st_lower == "sanctions"]
-    pep_df  = df[st_lower == "peps"]
+        return best_row, float(best_score)
 
     # Try sanctions first
-    s_row, s_score, s_top = best_match_from(sanc_df)
+    s_row, s_score = best_match_from(sanc_df)
     if s_row is not None:
-        dataset_label = _safe_str(s_row.get("dataset")).strip()
+        dataset_label = as_safe_str(s_row.get("dataset")).strip()
         source_label = dataset_label or "OpenSanctions – Sanctions"
-
         result = {
             "Sanctions Name": s_row.get("name"),
             "Birth Date": parse_dob(s_row.get("birth_date")),
             "Regime": _derive_regime_like_row(s_row),
-            "Position": None,
+            "Position": s_row.get("positions"),
             "Topics": [],
             "Is PEP": False,
             "Is Sanctioned": True,
             "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
             "Score": s_score,
             "Risk Level": "High Risk",
-            "Top Matches": s_top,
+            # NEW: suggestions shown regardless of strict logic; they do NOT affect the result
+            "Top Matches": top_suggestions,
             "Match Found": True,
             "Check Summary": {
                 "Status": "Fail Sanction",
@@ -446,24 +475,24 @@ def perform_opensanctions_check(
             },
         }
         _append_search_to_csv(name, result["Check Summary"])
-        # Optional: Power Automate audit (call from api_server after enrich with requestor)
         return result
 
-    # Try PEPs
-    p_row, p_score, p_top = best_match_from(pep_df)
+    # Otherwise, try PEPs
+    p_row, p_score = best_match_from(pep_df)
     if p_row is not None:
         result = {
             "Sanctions Name": p_row.get("name"),
             "Birth Date": parse_dob(p_row.get("birth_date")),
             "Regime": _derive_regime_like_row(p_row),
-            "Position": None,
+            "Position": p_row.get("positions"),
             "Topics": [],
             "Is PEP": True,
             "Is Sanctioned": False,
             "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
             "Score": p_score,
             "Risk Level": "Medium Risk",
-            "Top Matches": p_top,
+            # NEW: suggestions independent of strict result
+            "Top Matches": top_suggestions,
             "Match Found": True,
             "Check Summary": {
                 "Status": "Fail PEP",
@@ -474,8 +503,9 @@ def perform_opensanctions_check(
         _append_search_to_csv(name, result["Check Summary"])
         return result
 
-    # No matches
-    result = _empty_no_match_result()
+    # Nothing matched under strict rules -> Cleared, but STILL return suggestions
+    result = _empty_no_match_result(source_label="OpenSanctions")
+    result["Top Matches"] = top_suggestions
     _append_search_to_csv(name, result["Check Summary"])
     return result
 
