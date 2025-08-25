@@ -338,24 +338,62 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
 
-def _top_name_suggestions(df_subset: pd.DataFrame, search_name: str, limit: int = 5, threshold: int = 60):
+def _suggest_name_matches(search_name: str, candidates: List[str], limit: int = 10):
     """
-    Return up to 'limit' fuzzy suggestions [(name, score), ...] based ONLY on name similarity.
-    DOB and other strict rules are ignored here so users can see likely intended names.
+    Lenient, *assistive* suggestions for Top Matches:
+    - Uses partial and token-sort ratios (no jaccard/token-overlap gating)
+    - Strong bonus if candidate startswith the query (prefix/partial typing)
+    - Keeps only reasonable scores (>=55) and returns top 'limit'
+    Returns: list of tuples (idx, score)
+    """
+    s = _normalize_text(search_name)
+    if not s:
+        return []
+
+    pairs = []
+    for i, c in enumerate(candidates):
+        cn = _normalize_text(c)
+        if not cn:
+            continue
+        # partial is great for substrings; token_sort helps with transpositions
+        score = max(
+            fuzz.partial_ratio(s, cn),
+            fuzz.token_sort_ratio(s, cn),
+            fuzz.token_set_ratio(s, cn)
+        )
+        # strong boost if user typed a prefix of the name
+        if cn.startswith(s):
+            score = max(score, 95)
+        if score >= 55:
+            pairs.append((i, score))
+
+    # sort by score desc and keep top N
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    return pairs[:limit]
+
+
+
+def _top_name_suggestions(df_subset: pd.DataFrame, search_name: str, limit: int = 5):
+    """
+    Return up to 'limit' suggestions [(name, score), ...] based ONLY on *name* similarity.
+    This is lenient and ignores DOB and strict heuristics.
     """
     if df_subset is None or df_subset.empty:
         return []
+
     candidates = df_subset["name"].fillna("").tolist()
-    hits = get_best_name_matches(search_name, candidates, limit=limit * 3, threshold=threshold)
-    # Deduplicate by display name, keep highest score, then take top 'limit'
-    seen = {}
-    for cleaned_name, score, idx in hits:
-        display = str(df_subset.iloc[idx].get("name") or cleaned_name)
+    hits = _suggest_name_matches(search_name, candidates, limit=limit * 4)
+
+    # Deduplicate by display name, keep highest score
+    seen: Dict[str, float] = {}
+    for idx, score in hits:
+        display = str(df_subset.iloc[idx].get("name") or "").strip()
         if not display:
             continue
         if display not in seen or score > seen[display]:
-            seen[display] = score
-    # Sort by score desc and cap
+            seen[display] = float(score)
+
+    # Return top 'limit'
     return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
 
