@@ -1,9 +1,11 @@
 # api_server.py
 
+from typing import Optional
 from datetime import datetime
-from typing import Optional, Dict, Any
+import os
+import logging
 
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
@@ -11,10 +13,14 @@ from pydantic import BaseModel, Field
 from utils import (
     perform_opensanctions_check,
     refresh_opensanctions_data,
-    send_audit_to_power_automate,  # used via BackgroundTasks
+    post_to_power_automate_async,
+    send_audit_to_power_automate,  # used only when sync debug is enabled
 )
 
-app = FastAPI(title="Sanctions/PEP Screening API", version="1.1.0")
+# Use uvicorn's logger so messages show in `journalctl -u sanctions-api -f`
+logger = logging.getLogger("uvicorn.access")
+
+app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0")
 
 # ---------------------------
 # CORS (Dynamics/Dataverse + Power Apps + your domain)
@@ -39,17 +45,14 @@ app.add_middleware(
 # ---------------------------
 class OpCheckRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
-    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or None")
+    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
-    requestor: Optional[str] = Field(
-        None,
-        description="Name of the user initiating the check (required for audit)",
-    )
+    requestor: Optional[str] = Field(None, description="User performing the check (required)")
 
 class RefreshRequest(BaseModel):
     include_peps: bool = Field(
         True,
-        description="Include consolidated PEPs in the parquet (uses additional memory)",
+        description="Include consolidated PEPs in the parquet (uses additional memory)"
     )
 
 # ---------------------------
@@ -64,7 +67,7 @@ async def health():
     return "ok"
 
 @app.post("/opcheck")
-async def check_opensanctions(data: OpCheckRequest, background_tasks: BackgroundTasks):
+async def check_opensanctions(data: OpCheckRequest):
     # Validate presence of requestor with a friendly message
     if not data.requestor or not data.requestor.strip():
         return JSONResponse(
@@ -79,10 +82,7 @@ async def check_opensanctions(data: OpCheckRequest, background_tasks: Background
     if not data.name or not data.name.strip():
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "missing_name",
-                "message": "Please provide 'name' to run a check."
-            },
+            content={"error": "missing_name", "message": "Please provide 'name' to run a check."},
         )
 
     # Run the core check
@@ -93,11 +93,21 @@ async def check_opensanctions(data: OpCheckRequest, background_tasks: Background
         requestor=data.requestor.strip(),
     )
 
-    # Build the audit payload for Power Automate (includes a flattened Top Matches helper)
+    # Prepare audit payload (+ flattened top matches for PA convenience)
     top_matches = results.get("Top Matches") or []
-    top_matches_flat = [f"{n} ({int(s)})" for n, s in top_matches if isinstance(n, str)]
+    # Support either [(name,score), ...] or [{"name":..,"score":..}, ...]
+    top_matches_flat = []
+    for tm in top_matches:
+        if isinstance(tm, (list, tuple)) and len(tm) >= 2:
+            n, s = tm[0], tm[1]
+        elif isinstance(tm, dict):
+            n, s = tm.get("name"), tm.get("score")
+        else:
+            continue
+        if isinstance(n, str):
+            top_matches_flat.append(f"{n} ({s})")
 
-    post_payload: Dict[str, Any] = {
+    payload = {
         "request": {
             "name": data.name.strip(),
             "dob": (data.dob.strip() if isinstance(data.dob, str) else None),
@@ -109,14 +119,19 @@ async def check_opensanctions(data: OpCheckRequest, background_tasks: Background
         "top_matches_flat": top_matches_flat,
     }
 
-    # Fire-and-forget audit push to Power Automate (uses env POWER_AUTOMATE_FLOW_URL)
-    background_tasks.add_task(
-        send_audit_to_power_automate,
-        post_payload,   # payload
-        None,           # flow_url -> use env
-        12,             # timeout seconds
-        2,              # retries
-    )
+    # Log what we're sending
+    logger.info(f"[Audit->PA] prepared payload keys={list(payload.keys())}")
+
+    # Send audit (async by default). Set POWER_AUTOMATE_SYNC_TEST=1 to send synchronously for debugging.
+    try:
+        if os.getenv("POWER_AUTOMATE_SYNC_TEST", "").strip() == "1":
+            ok, msg = send_audit_to_power_automate(payload)
+            logger.info(f"[Audit->PA][SYNC] ok={ok} msg={msg}")
+        else:
+            logger.info("[Audit->PA] dispatching async …")
+            post_to_power_automate_async(payload)
+    except Exception as e:
+        logger.error(f"[Audit->PA] unexpected error: {e}")
 
     return results
 
@@ -134,13 +149,3 @@ async def refresh_opensanctions(body: RefreshRequest):
             status_code=500,
             content={"status": "error", "message": str(e)},
         )
-
-# Small helper to confirm the Flow URL is visible to the app (does not leak the secret)
-@app.get("/debug/flow_env")
-async def debug_flow_env():
-    import os, urllib.parse
-    url = (os.getenv("POWER_AUTOMATE_FLOW_URL") or "").strip()
-    if not url:
-        return {"has_env": False}
-    parts = urllib.parse.urlparse(url)
-    return {"has_env": True, "host": parts.netloc, "path": parts.path}
