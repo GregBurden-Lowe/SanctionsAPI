@@ -7,12 +7,12 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Optional, List, Tuple, Dict, Any
 
+import threading
 import requests
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz
-import threading
 
 # =============================================================================
 # Configuration
@@ -45,7 +45,7 @@ OSN_COLS = [
 SANCTIONS_DATASET_ALLOWLIST = [
     "United Nations",                          # UN Security Council
     "OFAC",                                    # US OFAC (SDN etc.)
-    "HM Treasury", "HMT", "UK Financial",      # UK HMT
+    "HM Treasury", "HMT", "UK Financial",      # UK HMT/OFSI lists
     "EU Council", "EU Financial Sanctions",    # EU lists
 ]
 
@@ -89,22 +89,6 @@ def _derive_regime_like_row(row) -> Optional[str]:
 
     ds = _safe_str(row.get("dataset")).strip()
     return ds or None
-
-def _top_matches_list(df: pd.DataFrame, limit: int = 10) -> List[Tuple[str, float]]:
-    out: List[Tuple[str, float]] = []
-    if df is None or df.empty:
-        return out
-    rows = df.head(limit).itertuples(index=False)
-    for r in rows:
-        name = getattr(r, "name", None)
-        score = getattr(r, "score", None)
-        if name is None or score is None:
-            continue
-        try:
-            out.append((_safe_str(name), float(score)))
-        except Exception:
-            continue
-    return out
 
 def _empty_no_match_result(source_label: str = "OpenSanctions"):
     return {
@@ -153,7 +137,7 @@ def _append_search_to_csv(
 # Data refresh (download -> filter -> parquet)
 # =============================================================================
 
-def _download_csv(url: str, dest_path: str, timeout: int = 240):
+def _download_csv(url: str, dest_path: str, timeout: int = 300):
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
     with open(dest_path, "wb") as f:
@@ -276,7 +260,7 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
 def clear_osn_cache():
     get_opensanctions_df.cache_clear()
 
-# Backward-compat helper (if you still call it elsewhere)
+# Backward-compat helper
 def load_opensanctions_from_parquet(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
     return get_opensanctions_df(parquet_path)
 
@@ -288,7 +272,6 @@ def _normalize_dob(dob: Optional[str]) -> Optional[str]:
     if not dob:
         return None
     try:
-        # accept YYYY-MM or YYYY too
         dt = pd.to_datetime(str(dob), errors="coerce")
         if pd.isna(dt):
             return None
@@ -338,101 +321,41 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
 
-def _suggest_name_matches(search_name: str, candidates: List[str], limit: int = 10):
-    """
-    Lenient, *assistive* suggestions for Top Matches:
-    - Uses partial and token-sort ratios (no jaccard/token-overlap gating)
-    - Strong bonus if candidate startswith the query (prefix/partial typing)
-    - Keeps only reasonable scores (>=55) and returns top 'limit'
-    Returns: list of tuples (idx, score)
-    """
-    s = _normalize_text(search_name)
-    if not s:
-        return []
-
-    pairs = []
-    for i, c in enumerate(candidates):
-        cn = _normalize_text(c)
-        if not cn:
-            continue
-        # partial is great for substrings; token_sort helps with transpositions
-        score = max(
-            fuzz.partial_ratio(s, cn),
-            fuzz.token_sort_ratio(s, cn),
-            fuzz.token_set_ratio(s, cn)
-        )
-        # strong boost if user typed a prefix of the name
-        if cn.startswith(s):
-            score = max(score, 95)
-        if score >= 55:
-            pairs.append((i, score))
-
-    # sort by score desc and keep top N
-    pairs.sort(key=lambda x: x[1], reverse=True)
-    return pairs[:limit]
-
-
-
 def _top_name_suggestions(
     df_subset: pd.DataFrame,
     search_name: str,
     limit: int = 5,
-    threshold: int = 60,
+    threshold: int = 60
 ) -> List[Tuple[str, int]]:
     """
-    Relaxed suggestions for UI only (do NOT affect result):
-    - Name similarity only (no DOB, no 2-token overlap rule)
-    - Uses a 'best of' RapidFuzz score (partial_ratio / token_set_ratio / token_sort_ratio)
-    - Deduplicates by display name and returns top N as (name, score)
+    Return up to 'limit' fuzzy suggestions [(name, score), ...] based ONLY on name similarity.
+    DOB and other strict rules are ignored here so users can see likely intended names.
     """
     if df_subset is None or df_subset.empty:
         return []
-
-    # Build candidate list (keep original display names for dedup/display)
-    candidates = df_subset["name"].fillna("").astype(str).tolist()
-    if not candidates:
-        return []
-
-    def best_score(a: str, b: str) -> int:
-        # Fast, robust scoring for suggestions
-        s1 = fuzz.partial_ratio(a, b)
-        s2 = fuzz.token_set_ratio(a, b)
-        s3 = fuzz.token_sort_ratio(a, b)
-        return max(s1, s2, s3)
-
-    # Score all candidates (could be ~tens of thousands, still OK)
-    # If you want to cap runtime, slice candidates[:N] here.
-    scored: List[Tuple[str, int]] = []
-    q = str(search_name or "")
-    for cand in candidates:
-        if not cand:
+    candidates = df_subset["name"].fillna("").tolist()
+    hits = get_best_name_matches(search_name, candidates, limit=limit * 3, threshold=threshold)
+    # Deduplicate by display name, keep highest score, then take top 'limit'
+    seen: Dict[str, float] = {}
+    for cleaned_name, score, idx in hits:
+        display = str(df_subset.iloc[idx].get("name") or cleaned_name)
+        if not display:
             continue
-        sc = best_score(q, cand)
-        if sc >= threshold:
-            scored.append((cand, sc))
+        if display not in seen or score > seen[display]:
+            seen[display] = float(score)
+    return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
-    if not scored:
-        return []
-
-    # Deduplicate by display name keeping highest score
-    best_per_name: Dict[str, int] = {}
-    for nm, sc in scored:
-        prev = best_per_name.get(nm)
-        if prev is None or sc > prev:
-            best_per_name[nm] = sc
-
-    # Sort and take top N
-    top = sorted(best_per_name.items(), key=lambda x: x[1], reverse=True)[:limit]
-    # Cast to int for stable JSON (no numpy types)
-    return [(n, int(s)) for n, s in top]
-
-
-def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="data/opensanctions.parquet", requestor: Optional[str]=None):
+def perform_opensanctions_check(
+    name,
+    dob,
+    entity_type="Person",
+    parquet_path=OSN_PARQUET,
+    requestor: Optional[str] = None,
+):
     import math
 
     df = load_opensanctions_from_parquet(parquet_path)
     if df.empty:
-        # Still provide suggestions from empty => none
         result = _empty_no_match_result()
         _append_search_to_csv(name, result["Check Summary"])
         return result
@@ -449,17 +372,16 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
 
     # Precompute normalized search
     norm_name = _normalize_text(name)
-    # Normalize DOB for strict result logic (unchanged)
-    def normalize_dob(d):
+    def _norm_dob(d):
         try:
             if not d:
                 return None
             return pd.to_datetime(str(d), errors="coerce").strftime("%Y-%m-%d")
         except Exception:
             return None
-    norm_dob = normalize_dob(dob)
+    norm_dob = _norm_dob(dob)
 
-    # ---- NEW: compute suggestions ignoring DOB (from BOTH sanctions+peps in the filtered schema) ----
+    # Split by source type and build pool for suggestions
     st = df.get("source_type")
     if st is not None:
         st_lower = st.astype(str).str.lower()
@@ -470,16 +392,17 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
         sanc_df, pep_df = df, df.iloc[0:0]
         combined_for_suggestions = df
 
-    top_suggestions = _top_name_suggestions(combined_for_suggestions, name, limit=5, threshold=60)
-
-    # ---- Existing strict match logic (unchanged except Top Matches assignment) ----
+    # Suggestions are based only on name similarity and do NOT affect result
+    top_suggestions = _top_name_suggestions(
+        combined_for_suggestions, norm_name, limit=5, threshold=60
+    )
 
     def parse_dob(val):
         try:
             s = str(val)
             if not s or s.lower() in ("nan", "none", "nat"):
                 return None
-            return normalize_dob(s)
+            return _norm_dob(s)
         except Exception:
             return None
 
@@ -500,7 +423,7 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
         if not matches:
             return None, None
 
-        # DOB strictness for the ACTUAL result (unchanged)
+        # DOB strictness for the ACTUAL result
         if norm_dob:
             dob_ok_matches = []
             for _, score, idx in matches:
@@ -533,8 +456,7 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
             "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
             "Score": s_score,
             "Risk Level": "High Risk",
-            # NEW: suggestions shown regardless of strict logic; they do NOT affect the result
-            "Top Matches": top_suggestions,
+            "Top Matches": top_suggestions,  # suggestions only
             "Match Found": True,
             "Check Summary": {
                 "Status": "Fail Sanction",
@@ -559,8 +481,7 @@ def perform_opensanctions_check(name, dob, entity_type="Person", parquet_path="d
             "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
             "Score": p_score,
             "Risk Level": "Medium Risk",
-            # NEW: suggestions independent of strict result
-            "Top Matches": top_suggestions,
+            "Top Matches": top_suggestions,  # suggestions only
             "Match Found": True,
             "Check Summary": {
                 "Status": "Fail PEP",
