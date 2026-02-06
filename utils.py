@@ -309,7 +309,11 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
             results.append((c_clean, score, idx))
             continue
 
-        if overlap < 2 or jaccard < 0.4:
+        # Allow short queries (e.g. "Putin") to match longer names; require overlap >= 1 for single-token search
+        min_overlap = min(2, len(s_tokens))
+        if overlap < min_overlap:
+            continue
+        if len(s_tokens) > 2 and jaccard < 0.4:
             continue
         if abs(len(s_tokens) - len(c_tokens)) > 2:
             score -= 15

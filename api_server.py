@@ -8,6 +8,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from utils import (
@@ -28,15 +29,18 @@ app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=(
+        r"^https?://localhost(:\d+)?/?$|"
+        r"^https?://127\.0\.0\.1(:\d+)?/?$|"
         r"^https://([a-zA-Z0-9-]+\.)*dynamics\.com$|"
         r"^https://([a-zA-Z0-9-]+\.)*crm[0-9]*\.dynamics\.com$|"
         r"^https://make\.powerapps\.com$|"
         r"^https://([a-zA-Z0-9-]+\.)*powerapps(portals)?\.com$|"
-        r"^https://(www\.)?sanctions-check\.co\.uk$"
+        r"^https://(www\.)?sanctions-check\.co\.uk/?$"
     ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
     max_age=86400,
 )
 
@@ -58,13 +62,15 @@ class RefreshRequest(BaseModel):
 # ---------------------------
 # Routes
 # ---------------------------
-@app.get("/", response_class=PlainTextResponse)
-async def root():
-    return "Sanctions/PEP Screening API is running."
-
 @app.get("/health", response_class=PlainTextResponse)
 async def health():
     return "ok"
+
+@app.options("/opcheck")
+@app.options("/refresh_opensanctions")
+async def cors_preflight():
+    """Ensure CORS preflight (OPTIONS) returns 200 so browsers allow the request."""
+    return {}
 
 @app.post("/opcheck")
 async def check_opensanctions(data: OpCheckRequest):
@@ -149,3 +155,10 @@ async def refresh_opensanctions(body: RefreshRequest):
             status_code=500,
             content={"status": "error", "message": str(e)},
         )
+
+# Serve built frontend from frontend/dist (must be last so API routes take precedence).
+# Backend works unchanged if dist is missing (e.g. API-only deployments).
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+_frontend_dist = os.path.join(_app_dir, "frontend", "dist")
+if os.path.isdir(_frontend_dist):
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

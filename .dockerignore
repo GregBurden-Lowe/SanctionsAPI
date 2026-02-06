@@ -1,0 +1,30 @@
+# Git and IDE
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# Python
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+
+# Frontend (we build in Docker; avoid copying local node_modules/build)
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.env.local
+
+# Data (don’t bake local parquet/csv into image; use volume or refresh in container)
+data/
+
+# Env and docs (optional; uncomment if you don’t want in image)
+# .env
+# .env.local
+# README.md
+# tests/

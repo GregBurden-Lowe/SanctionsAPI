@@ -8,9 +8,10 @@ python-dateutil>=2.9
 beautifulsoup4>=4.12
 typing-extensions>=4.12 ; python_version < "3.12"
 
-# Data handling (only if utils.py actually uses them)
+# Data handling (utils.py: parquet + pandas)
 pandas>=2.2.2
 numpy>=1.26.4
+pyarrow>=18.0.0
 
 # PDF generation (only if API itself produces PDFs)
 fpdf2>=2.7.9

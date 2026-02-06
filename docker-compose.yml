@@ -1,0 +1,17 @@
+# Run full app (backend + frontend) with persistent data. Good for local or a single server.
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # Optional: Power Automate audit (set on the server)
+      # - POWER_AUTOMATE_FLOW_URL=https://...
+    volumes:
+      # Persist parquet and search log across restarts
+      - sanctions-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  sanctions-data:
