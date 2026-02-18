@@ -47,6 +47,12 @@ async def seed_default_user(conn) -> None:
 
 
 def hash_password(password: str) -> str:
+    """Bcrypt limits input to 72 bytes; truncate to avoid ValueError."""
+    if not isinstance(password, str):
+        password = str(password)
+    pwd_bytes = password.encode("utf-8")
+    if len(pwd_bytes) > 72:
+        password = pwd_bytes[:72].decode("utf-8", errors="replace")
     return _pwd_ctx.hash(password)
 
 
