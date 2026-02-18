@@ -15,6 +15,16 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+
+class SPAStaticFiles(StaticFiles):
+    """Serve static files but fall back to index.html for missing paths so SPA client-side routing works on refresh."""
+
+    def lookup_path(self, path: str):
+        full_path, stat_result = super().lookup_path(path)
+        if stat_result is None:
+            return super().lookup_path("index.html")
+        return full_path, stat_result
+
 from utils import (
     perform_opensanctions_check,
     refresh_opensanctions_data,
@@ -720,8 +730,8 @@ async def refresh_opensanctions(body: RefreshRequest):
         )
 
 # Serve built frontend from frontend/dist (must be last so API routes take precedence).
-# Backend works unchanged if dist is missing (e.g. API-only deployments).
+# SPA fallback: unknown paths (e.g. /admin/users) serve index.html so refresh/navigation works.
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 _frontend_dist = os.path.join(_app_dir, "frontend", "dist")
 if os.path.isdir(_frontend_dist):
-    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")
+    app.mount("/", SPAStaticFiles(directory=_frontend_dist, html=True), name="frontend")
