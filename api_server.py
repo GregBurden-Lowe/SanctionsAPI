@@ -70,7 +70,8 @@ async def lifespan(app: FastAPI):
                 await auth_db.seed_default_user(conn)
             logger.info("screening_db + auth_db: schema ensured")
         except Exception as e:
-            logger.warning("schema ensure failed: %s", e)
+            import traceback
+            logger.warning("schema ensure failed: %s\n%s", e, traceback.format_exc())
     yield
     await screening_db.close_pool()
 

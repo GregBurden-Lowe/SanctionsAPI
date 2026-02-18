@@ -19,7 +19,7 @@ pyarrow>=18.0.0
 
 # GUI authentication (JWT + password hashing)
 PyJWT>=2.8
-passlib[bcrypt]>=1.7
+passlib[argon2]>=1.7
 
 # PDF generation (only if API itself produces PDFs)
 fpdf2>=2.7.9

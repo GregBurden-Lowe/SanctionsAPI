@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import logging
 from typing import Optional, List, Any
-from passlib.context import CryptContext
+
+from security import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 DEFAULT_USER_EMAIL = "Greg.Burden-Lowe@Legalprotectiongroup.co.uk"
 DEFAULT_USER_PASSWORD = "Admin"
@@ -33,7 +33,6 @@ async def ensure_auth_schema(conn) -> None:
 
 async def seed_default_user(conn) -> None:
     """Insert default admin user if not already present (ON CONFLICT DO NOTHING so we never overwrite)."""
-    # Always hash the literal "Admin" so we never pass a long/env value to bcrypt (72-byte limit)
     password_hash = hash_password("Admin")
     await conn.execute(
         """
@@ -45,20 +44,6 @@ async def seed_default_user(conn) -> None:
         password_hash,
     )
     logger.info("auth_db: default user ensured (email=%s)", DEFAULT_USER_EMAIL)
-
-
-def hash_password(password: str) -> str:
-    """Bcrypt limits input to 72 bytes; truncate to avoid ValueError."""
-    if not isinstance(password, str):
-        password = str(password)
-    pwd_bytes = password.encode("utf-8")
-    if len(pwd_bytes) > 72:
-        password = pwd_bytes[:72].decode("utf-8", errors="replace")
-    return _pwd_ctx.hash(password)
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain, hashed)
 
 
 async def get_user_by_email(conn, email: str) -> Optional[dict]:
