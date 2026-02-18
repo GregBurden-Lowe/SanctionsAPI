@@ -115,7 +115,12 @@ async def get_valid_screening(conn, entity_key: str) -> Optional[Dict[str, Any]]
     )
     if row is None:
         return None
-    return dict(row["result_json"])
+    rj = row["result_json"]
+    if isinstance(rj, str):
+        return json.loads(rj)
+    if isinstance(rj, dict):
+        return rj
+    return dict(rj) if hasattr(rj, "items") else rj
 
 
 async def upsert_screening(
@@ -334,5 +339,11 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
             row["entity_key"],
         )
         if entity_row:
-            out["result"] = dict(entity_row["result_json"])
+            rj = entity_row["result_json"]
+            if isinstance(rj, str):
+                out["result"] = json.loads(rj)
+            elif isinstance(rj, dict):
+                out["result"] = rj
+            else:
+                out["result"] = dict(rj) if hasattr(rj, "items") else rj
     return out
