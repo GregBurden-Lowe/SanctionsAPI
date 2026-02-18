@@ -36,6 +36,18 @@ export function LoginPage() {
     }
   }
 
+  const signupPasswordError = ((): string | null => {
+    if (!signupPassword) return null
+    if (signupPassword.length < 8) return 'At least 8 characters'
+    if (!/[A-Z]/.test(signupPassword)) return 'One uppercase letter'
+    if (!/[a-z]/.test(signupPassword)) return 'One lowercase letter'
+    if (!/[0-9]/.test(signupPassword)) return 'One number'
+    if (!/[!@#$%^&*()_+\-=[\]{}|;:,.<>?/`~"\\]/.test(signupPassword)) return 'One special character'
+    const weak = new Set(['password', 'password1', 'password12', 'password123', 'admin', 'admin123', 'letmein', 'welcome', 'qwerty', 'abc123'])
+    if (weak.has(signupPassword.toLowerCase())) return 'Choose a stronger password'
+    return null
+  })()
+
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault()
     setSignupError(null)
@@ -44,8 +56,8 @@ export function LoginPage() {
       setSignupError('Please enter your email address.')
       return
     }
-    if (!signupPassword || signupPassword.length < 6) {
-      setSignupError('Password must be at least 6 characters.')
+    if (signupPasswordError) {
+      setSignupError(`Password: ${signupPasswordError}.`)
       return
     }
     if (signupPassword !== signupConfirm) {
@@ -79,7 +91,10 @@ export function LoginPage() {
             </CardHeader>
             <CardBody>
               <p className="text-sm text-text-secondary mb-4">
-                Create an account with your company email (approved domains only). You will be asked to change your password on first sign-in.
+                Create an account with your company email (approved domains only).
+              </p>
+              <p className="text-xs text-text-muted mb-4">
+                Password: at least 8 characters, with uppercase, lowercase, a number and a special character (e.g. !@#$%).
               </p>
               <form onSubmit={handleSignup} className="space-y-4">
                 <Input
@@ -97,6 +112,7 @@ export function LoginPage() {
                   value={signupPassword}
                   onChange={(e) => setSignupPassword(e.target.value)}
                   disabled={signingUp}
+                  error={signupPasswordError ?? undefined}
                 />
                 <Input
                   label="Confirm password"

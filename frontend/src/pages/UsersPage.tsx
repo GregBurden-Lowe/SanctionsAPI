@@ -12,6 +12,20 @@ import {
 } from '@/components'
 import { listUsers, createUser, importUsers, updateUser, type ApiUser, type ImportUserItem } from '@/api/client'
 
+const PASSWORD_HINT = 'At least 8 characters, with uppercase, lowercase, a number and a special character (e.g. !@#$%).'
+
+function validatePassword(pw: string): string | null {
+  if (!pw) return null
+  if (pw.length < 8) return 'At least 8 characters'
+  if (!/[A-Z]/.test(pw)) return 'One uppercase letter'
+  if (!/[a-z]/.test(pw)) return 'One lowercase letter'
+  if (!/[0-9]/.test(pw)) return 'One number'
+  if (!/[!@#$%^&*()_+\-=[\]{}|;:,.<>?/`~"\\]/.test(pw)) return 'One special character'
+  const weak = new Set(['password', 'password1', 'password12', 'password123', 'admin', 'admin123', 'letmein', 'welcome', 'qwerty', 'abc123'])
+  if (weak.has(pw.toLowerCase())) return 'Choose a stronger password'
+  return null
+}
+
 export function UsersPage() {
   const [users, setUsers] = useState<ApiUser[]>([])
   const [loading, setLoading] = useState(true)
@@ -60,8 +74,13 @@ export function UsersPage() {
       setCreateError('Email is required.')
       return
     }
+    const pwdErr = validatePassword(createPassword)
     if (!createPassword) {
       setCreateError('Password is required.')
+      return
+    }
+    if (pwdErr) {
+      setCreateError(`Password: ${pwdErr}.`)
       return
     }
     setCreating(true)
@@ -157,8 +176,13 @@ export function UsersPage() {
 
   const handleResetPasswordSubmit = async () => {
     if (!resetUser) return
-    if (!resetPassword || resetPassword.length < 6) {
-      setResetError('Password must be at least 6 characters.')
+    const pwdErr = validatePassword(resetPassword)
+    if (!resetPassword) {
+      setResetError('Password is required.')
+      return
+    }
+    if (pwdErr) {
+      setResetError(`Password: ${pwdErr}.`)
       return
     }
     setResetError(null)
@@ -191,6 +215,7 @@ export function UsersPage() {
             <p className="text-sm text-text-secondary mb-4">
               Add a new user. They will sign in with their email and the password you set.
             </p>
+            <p className="text-xs text-text-muted mb-4">{PASSWORD_HINT}</p>
             <form onSubmit={handleCreate} className="space-y-4">
               <Input
                 label="Email"
@@ -207,6 +232,7 @@ export function UsersPage() {
                 value={createPassword}
                 onChange={(e) => setCreatePassword(e.target.value)}
                 disabled={creating}
+                error={validatePassword(createPassword) ?? undefined}
               />
               <div className="flex items-center gap-2">
                 <input
@@ -351,6 +377,7 @@ export function UsersPage() {
                     <p className="text-text-primary">
                       Set a new temporary password for <strong>{resetUser.email}</strong>. They will be required to change it on next sign-in.
                     </p>
+                    <p className="text-xs text-text-muted">{PASSWORD_HINT}</p>
                     <Input
                       label="New temporary password"
                       type="password"
@@ -358,6 +385,7 @@ export function UsersPage() {
                       value={resetPassword}
                       onChange={(e) => setResetPassword(e.target.value)}
                       disabled={resetting}
+                      error={validatePassword(resetPassword) ?? undefined}
                     />
                     {resetError && <ErrorBox message={resetError} />}
                   </div>

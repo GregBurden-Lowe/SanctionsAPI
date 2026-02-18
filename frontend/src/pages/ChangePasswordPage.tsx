@@ -5,6 +5,18 @@ import { useAuth } from '@/context/AuthContext'
 
 const pageClass = 'min-h-screen bg-app text-text-primary flex items-center justify-center p-6'
 
+function validatePassword(pw: string): string | null {
+  if (!pw) return null
+  if (pw.length < 8) return 'At least 8 characters'
+  if (!/[A-Z]/.test(pw)) return 'One uppercase letter'
+  if (!/[a-z]/.test(pw)) return 'One lowercase letter'
+  if (!/[0-9]/.test(pw)) return 'One number'
+  if (!/[!@#$%^&*()_+\-=[\]{}|;:,.<>?/`~"\\]/.test(pw)) return 'One special character'
+  const weak = new Set(['password', 'password1', 'password12', 'password123', 'admin', 'admin123', 'letmein', 'welcome', 'qwerty', 'abc123'])
+  if (weak.has(pw.toLowerCase())) return 'Choose a stronger password'
+  return null
+}
+
 export function ChangePasswordPage() {
   const { changePassword, user } = useAuth()
   const navigate = useNavigate()
@@ -21,8 +33,9 @@ export function ChangePasswordPage() {
       setError('New password and confirmation do not match.')
       return
     }
-    if (newPassword.length < 6) {
-      setError('New password must be at least 6 characters.')
+    const pwdErr = validatePassword(newPassword)
+    if (pwdErr) {
+      setError(`New password: ${pwdErr}.`)
       return
     }
     setLoading(true)
@@ -48,6 +61,9 @@ export function ChangePasswordPage() {
               ? 'You must set a new password before continuing.'
               : 'Enter your current password and choose a new password.'}
           </p>
+          <p className="text-xs text-text-muted mb-4">
+            New password: at least 8 characters, with uppercase, lowercase, a number and a special character (e.g. !@#$%).
+          </p>
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input
               label="Current password"
@@ -64,6 +80,7 @@ export function ChangePasswordPage() {
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               disabled={loading}
+              error={validatePassword(newPassword) ?? undefined}
             />
             <Input
               label="Confirm new password"

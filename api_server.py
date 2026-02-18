@@ -286,6 +286,9 @@ async def auth_change_password(data: ChangePasswordRequest, payload: dict = Depe
             raise HTTPException(status_code=401, detail="User not found")
         if not auth_db.verify_password(data.current_password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Current password is incorrect")
+        err = _validate_signup_password(data.new_password)
+        if err:
+            raise HTTPException(status_code=400, detail=err)
         await auth_db.update_password(conn, str(user["id"]), data.new_password)
     token = _create_access_token(email, is_admin=user["is_admin"], must_change_password=False)
     return {
@@ -308,10 +311,38 @@ ALLOWED_SIGNUP_DOMAINS = frozenset({
     "devonbayinsurance.ai",
 })
 
+# Weak passwords to reject (lowercase)
+_WEAK_PASSWORDS = frozenset({
+    "password", "password1", "password12", "password123", "admin", "admin123",
+    "letmein", "welcome", "monkey", "qwerty", "abc123", "password!", "password1!",
+    "iloveyou", "sunshine", "princess", "football", "shadow", "master", "login",
+})
+
+
+def _validate_signup_password(password: str) -> Optional[str]:
+    """Return an error message if password is weak, else None."""
+    if not password or len(password) < 8:
+        return "Password must be at least 8 characters."
+    if password.lower() in _WEAK_PASSWORDS:
+        return "Choose a stronger password that is not easily guessed."
+    has_upper = any(c.isupper() for c in password)
+    has_lower = any(c.islower() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    has_special = any(c in "!@#$%^&*()_+-=[]{}|;:',.<>?/`~\"\\" for c in password)
+    if not has_upper:
+        return "Password must include at least one uppercase letter."
+    if not has_lower:
+        return "Password must include at least one lowercase letter."
+    if not has_digit:
+        return "Password must include at least one number."
+    if not has_special:
+        return "Password must include at least one special character (e.g. !@#$%)."
+    return None
+
 
 @app.post("/auth/signup")
 async def auth_signup(data: SignupRequest):
-    """Self-signup for users with an allowed company email domain. New users must change password at first logon."""
+    """Self-signup for users with an allowed company email domain. Users set their own password so no change required at first logon."""
     pool = await screening_db.get_pool()
     if pool is None:
         raise HTTPException(status_code=503, detail="Signup unavailable (configure DATABASE_URL)")
@@ -326,15 +357,16 @@ async def auth_signup(data: SignupRequest):
             status_code=400,
             detail="Signup is only available for approved company email domains.",
         )
-    if not data.password or len(data.password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    err = _validate_signup_password(data.password)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     try:
         async with pool.acquire() as conn:
             user = await auth_db.create_user(
                 conn,
                 email,
                 data.password,
-                must_change_password=True,
+                must_change_password=False,
                 is_admin=False,
             )
         token = _create_access_token(
@@ -385,6 +417,9 @@ async def auth_create_user(data: CreateUserRequest):
     email = data.email.strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
+    err = _validate_signup_password(data.password)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     try:
         async with pool.acquire() as conn:
             user = await auth_db.create_user(
@@ -410,8 +445,10 @@ async def auth_update_user(user_id: str, body: UpdateUserRequest):
         raise HTTPException(status_code=503, detail="Unavailable")
     if body.is_admin is None and not body.new_password:
         raise HTTPException(status_code=400, detail="Provide is_admin and/or new_password")
-    if body.new_password and len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if body.new_password:
+        err = _validate_signup_password(body.new_password)
+        if err:
+            raise HTTPException(status_code=400, detail=err)
     try:
         async with pool.acquire() as conn:
             await auth_db.update_user(
