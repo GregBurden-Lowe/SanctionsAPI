@@ -157,8 +157,7 @@ class ImportUsersRequest(BaseModel):
 
 
 class SignupRequest(BaseModel):
-    email: str = Field(..., description="User email (must be from an allowed domain)")
-    password: str = Field(..., description="Password")
+    email: str = Field(..., description="User email (must be from an allowed domain); temp password is emailed via Resend")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -314,12 +313,44 @@ async def auth_change_password(data: ChangePasswordRequest, payload: dict = Depe
 
 
 # Self-signup only allowed for these email domains (lowercase)
+# outlook.com = temporary for testing email delivery; remove before production
 ALLOWED_SIGNUP_DOMAINS = frozenset({
     "legalprotectiongroup.co.uk",
     "devonbaysolutions.co.uk",
     "devonbayadjusting.co.uk",
     "devonbayinsurance.ai",
+    "outlook.com",
 })
+
+# Resend: env RESEND_API_KEY (required for signup), RESEND_FROM e.g. "Sanctions Screening <noreply@yourdomain.com>"
+def _send_temp_password_email(to_email: str, temp_password: str) -> None:
+    """Send temporary password via Resend. Raises on failure."""
+    api_key = os.environ.get("RESEND_API_KEY", "").strip()
+    from_addr = os.environ.get("RESEND_FROM", "").strip() or "Sanctions Screening <onboarding@resend.dev>"
+    if not api_key:
+        raise ValueError("RESEND_API_KEY is not configured")
+    import resend
+    resend.api_key = api_key
+    subject = "Your temporary password for Sanctions Screening"
+    body = f"""You requested access to Sanctions Screening. Use this temporary password to sign in (you will be asked to set a new password):
+
+{temp_password}
+
+Sign in at your usual screening URL with your email and this password, then change your password when prompted.
+"""
+    params = {
+        "from": from_addr,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    resend.Emails.send(params)
+
+
+def _generate_temp_password() -> str:
+    """Generate a random password that satisfies our strength rules (for first-login change)."""
+    part = secrets.token_urlsafe(10)
+    return part + "aA1!"  # ensure lower, upper, digit, special
 
 # Weak passwords to reject (lowercase)
 _WEAK_PASSWORDS = frozenset({
@@ -352,10 +383,12 @@ def _validate_signup_password(password: str) -> Optional[str]:
 
 @app.post("/auth/signup")
 async def auth_signup(data: SignupRequest):
-    """Self-signup for users with an allowed company email domain. Users set their own password so no change required at first logon."""
+    """Request access: whitelist email only. A temporary password is emailed via Resend; user must sign in and change it."""
     pool = await screening_db.get_pool()
     if pool is None:
         raise HTTPException(status_code=503, detail="Signup unavailable (configure DATABASE_URL)")
+    if not os.environ.get("RESEND_API_KEY", "").strip():
+        raise HTTPException(status_code=503, detail="Signup unavailable (email not configured)")
     email = data.email.strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
@@ -367,38 +400,28 @@ async def auth_signup(data: SignupRequest):
             status_code=400,
             detail="Signup is only available for approved company email domains.",
         )
-    err = _validate_signup_password(data.password)
-    if err:
-        raise HTTPException(status_code=400, detail=err)
+    temp_password = _generate_temp_password()
     try:
         async with pool.acquire() as conn:
             user = await auth_db.create_user(
                 conn,
                 email,
-                data.password,
-                must_change_password=False,
+                temp_password,
+                must_change_password=True,
                 is_admin=False,
             )
-        token = _create_access_token(
-            user["email"],
-            is_admin=user["is_admin"],
-            must_change_password=user["must_change_password"],
-        )
-        return {
-            "access_token": token,
-            "token_type": "bearer",
-            "user": {
-                "username": user["email"],
-                "email": user["email"],
-                "must_change_password": user["must_change_password"],
-                "is_admin": user["is_admin"],
-            },
-        }
+        import asyncio
+        await asyncio.to_thread(_send_temp_password_email, email, temp_password)
     except Exception as e:
         err = str(e).lower()
         if "unique" in err or "duplicate" in err or "exists" in err:
             raise HTTPException(status_code=400, detail="An account with this email already exists")
+        if "resend" in err or "RESEND" in str(e):
+            raise HTTPException(status_code=502, detail="Failed to send email. Please try again or contact support.")
         raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "message": "Check your email for a temporary password. Sign in with your email and that password; you will then be asked to set a new password.",
+    }
 
 
 @app.get("/auth/me")

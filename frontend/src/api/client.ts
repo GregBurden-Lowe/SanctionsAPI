@@ -110,11 +110,11 @@ export async function importUsers(users: ImportUserItem[]): Promise<Response> {
   })
 }
 
-export async function signup(email: string, password: string): Promise<Response> {
+export async function signup(email: string): Promise<Response> {
   return fetch(resolve('/auth/signup'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email }),
   })
 }
 

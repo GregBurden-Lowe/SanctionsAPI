@@ -21,6 +21,9 @@ pyarrow>=18.0.0
 PyJWT>=2.8
 passlib[argon2]>=1.7
 
+# Signup: send temporary password by email (whitelist domains only)
+resend>=2.0
+
 # PDF generation (only if API itself produces PDFs)
 fpdf2>=2.7.9
 reportlab>=4.2

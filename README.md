@@ -77,6 +77,8 @@ When **DATABASE_URL** is set, the website requires sign-in. Users are stored in 
 
 Admins can create more users from **Admin → Users**: set email, initial password, and optionally “Require password change at first logon”. The **Users** link in the sidebar is visible only to admin users.
 
+**Sign up (request access):** Users with an approved company email domain can use **Sign up** on the login page. They enter only their email; a **temporary password is sent by email** (via [Resend](https://resend.com)). They sign in with that password and are then required to set a new password. Set **RESEND_API_KEY** and **RESEND_FROM** (see optional env vars) to enable signup.
+
 If **DATABASE_URL** is not set, the website does not require login (anyone can use the app in the browser).
 
 ## Connecting the database
@@ -116,6 +118,8 @@ Optional env vars (when using the DB):
 | `SCREENING_JOBS_RETENTION_DAYS` | Worker deletes completed/failed jobs older than this (default `7`). |
 | `SCREENING_CLEANUP_EVERY_N_LOOPS` | Worker runs cleanup every N loops (default `50`). |
 | `SCREENING_WORKER_POLL_SECONDS` | Worker sleep when no job is available (default `5`). |
+| `RESEND_API_KEY` | API key for [Resend](https://resend.com) to email temporary passwords on signup. If unset, the signup form returns 503. |
+| `RESEND_FROM` | Sender for signup emails, e.g. `Sanctions Screening <noreply@yourdomain.com>`. Defaults to Resend onboarding address. |
 
 For the internal bulk API, see `docs/INTERNAL_SCREENING_API.md` (API key and/or IP allowlist required).
 

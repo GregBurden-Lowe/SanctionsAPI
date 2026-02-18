@@ -14,10 +14,9 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [signupMode, setSignupMode] = useState(false)
   const [signupEmail, setSignupEmail] = useState('')
-  const [signupPassword, setSignupPassword] = useState('')
-  const [signupConfirm, setSignupConfirm] = useState('')
   const [signingUp, setSigningUp] = useState(false)
   const [signupError, setSignupError] = useState<string | null>(null)
+  const [signupSuccess, setSignupSuccess] = useState(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -36,46 +35,23 @@ export function LoginPage() {
     }
   }
 
-  const signupPasswordError = ((): string | null => {
-    if (!signupPassword) return null
-    if (signupPassword.length < 8) return 'At least 8 characters'
-    if (!/[A-Z]/.test(signupPassword)) return 'One uppercase letter'
-    if (!/[a-z]/.test(signupPassword)) return 'One lowercase letter'
-    if (!/[0-9]/.test(signupPassword)) return 'One number'
-    if (!/[!@#$%^&*()_+\-=[\]{}|;:,.<>?/`~"\\]/.test(signupPassword)) return 'One special character'
-    const weak = new Set(['password', 'password1', 'password12', 'password123', 'admin', 'admin123', 'letmein', 'welcome', 'qwerty', 'abc123'])
-    if (weak.has(signupPassword.toLowerCase())) return 'Choose a stronger password'
-    return null
-  })()
-
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault()
     setSignupError(null)
+    setSignupSuccess(false)
     const email = signupEmail.trim().toLowerCase()
     if (!email) {
       setSignupError('Please enter your email address.')
       return
     }
-    if (signupPasswordError) {
-      setSignupError(`Password: ${signupPasswordError}.`)
-      return
-    }
-    if (signupPassword !== signupConfirm) {
-      setSignupError('Passwords do not match.')
-      return
-    }
     setSigningUp(true)
     try {
-      const res = await signup(email, signupPassword)
+      const res = await signup(email)
       const data = await res.json()
-      if (!res.ok) throw new Error(data.detail ?? 'Signup failed')
-      const token = data.access_token
-      const user = data.user ?? { username: email, email, must_change_password: true, is_admin: false }
-      if (!token || !user.email) throw new Error('Invalid signup response')
-      setAuth(token, user)
-      navigate(user.must_change_password ? '/change-password' : '/', { replace: true })
+      if (!res.ok) throw new Error(data.detail ?? 'Request failed')
+      setSignupSuccess(true)
     } catch (err) {
-      setSignupError(err instanceof Error ? err.message : 'Signup failed')
+      setSignupError(err instanceof Error ? err.message : 'Request failed')
     } finally {
       setSigningUp(false)
     }
@@ -90,50 +66,50 @@ export function LoginPage() {
               <CardTitle>Sign up</CardTitle>
             </CardHeader>
             <CardBody>
-              <p className="text-sm text-text-secondary mb-4">
-                Create an account with your company email (approved domains only).
-              </p>
-              <p className="text-xs text-text-muted mb-4">
-                Password: at least 8 characters, with uppercase, lowercase, a number and a special character (e.g. !@#$%).
-              </p>
-              <form onSubmit={handleSignup} className="space-y-4">
-                <Input
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={signupEmail}
-                  onChange={(e) => setSignupEmail(e.target.value)}
-                  disabled={signingUp}
-                />
-                <Input
-                  label="Password"
-                  type="password"
-                  autoComplete="new-password"
-                  value={signupPassword}
-                  onChange={(e) => setSignupPassword(e.target.value)}
-                  disabled={signingUp}
-                  error={signupPasswordError ?? undefined}
-                />
-                <Input
-                  label="Confirm password"
-                  type="password"
-                  autoComplete="new-password"
-                  value={signupConfirm}
-                  onChange={(e) => setSignupConfirm(e.target.value)}
-                  disabled={signingUp}
-                />
-                {signupError && <ErrorBox message={signupError} />}
-                <Button type="submit" className="w-full" disabled={signingUp}>
-                  {signingUp ? 'Creating account…' : 'Sign up'}
-                </Button>
-                <button
-                  type="button"
-                  onClick={() => { setSignupMode(false); setSignupError(null) }}
-                  className="w-full text-sm text-brand hover:underline"
-                >
-                  Back to sign in
-                </button>
-              </form>
+              {signupSuccess ? (
+                <div className="space-y-4">
+                  <p className="text-sm text-semantic-success font-medium">
+                    Check your email for a temporary password.
+                  </p>
+                  <p className="text-sm text-text-secondary">
+                    Sign in with your email and that password; you will then be asked to set a new password.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => { setSignupMode(false); setSignupSuccess(false); setSignupEmail('') }}
+                    className="w-full text-sm text-brand hover:underline"
+                  >
+                    Back to sign in
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm text-text-secondary mb-4">
+                    Request access with your company email (approved domains only). A temporary password will be sent to your inbox.
+                  </p>
+                  <form onSubmit={handleSignup} className="space-y-4">
+                    <Input
+                      label="Email"
+                      type="email"
+                      autoComplete="email"
+                      value={signupEmail}
+                      onChange={(e) => setSignupEmail(e.target.value)}
+                      disabled={signingUp}
+                    />
+                    {signupError && <ErrorBox message={signupError} />}
+                    <Button type="submit" className="w-full" disabled={signingUp}>
+                      {signingUp ? 'Sending…' : 'Request access'}
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={() => { setSignupMode(false); setSignupError(null) }}
+                      className="w-full text-sm text-brand hover:underline"
+                    >
+                      Back to sign in
+                    </button>
+                  </form>
+                </>
+              )}
             </CardBody>
           </>
         ) : (
