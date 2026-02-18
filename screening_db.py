@@ -6,9 +6,10 @@ from __future__ import annotations
 import os
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal
 from typing import Optional, Any, Dict, List
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -281,19 +282,26 @@ async def search_screened_entities(
                 d[key] = d[key].isoformat()
         if d.get("date_of_birth") is not None:
             d["date_of_birth"] = d["date_of_birth"].isoformat()
-        # NUMERIC/Decimal and JSONB may contain non-JSON types; ensure serializable
         if "score" in d and d["score"] is not None:
             d["score"] = float(d["score"])
         if "result_json" in d and d["result_json"] is not None:
             d["result_json"] = _to_json_safe(dict(d["result_json"]))
-        out.append(d)
+        out.append(_to_json_safe(d))
     return out
 
 
 def _to_json_safe(obj: Any) -> Any:
-    """Convert Decimals and other non-JSON types so FastAPI can serialize the response."""
-    if isinstance(obj, Decimal):
+    """Convert non-JSON-serializable types so FastAPI can serialize the response."""
+    if obj is None:
+        return None
+    if isinstance(obj, (Decimal,)):
         return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, UUID):
+        return str(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
     if isinstance(obj, dict):
         return {k: _to_json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

@@ -642,11 +642,15 @@ async def get_opcheck_screened(
         raise HTTPException(status_code=503, detail="Search unavailable (configure DATABASE_URL)")
     limit = max(1, min(100, limit))
     offset = max(0, offset)
-    async with pool.acquire() as conn:
-        items = await screening_db.search_screened_entities(
-            conn, name=(name or "").strip() or None, entity_key=(entity_key or "").strip() or None, limit=limit, offset=offset,
-        )
-    return {"items": items}
+    try:
+        async with pool.acquire() as conn:
+            items = await screening_db.search_screened_entities(
+                conn, name=(name or "").strip() or None, entity_key=(entity_key or "").strip() or None, limit=limit, offset=offset,
+            )
+        return {"items": items}
+    except Exception as e:
+        logger.exception("GET /opcheck/screened failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Search failed: {e!s}")
 
 
 # ---------------------------
