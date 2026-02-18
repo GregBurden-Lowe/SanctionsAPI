@@ -187,7 +187,7 @@ export function SearchDatabasePage() {
               <span className="font-medium">Last screened</span> {formatDate(detailRow.last_screened_at)}
             </p>
             <ResultCard
-              result={detailRow.result_json}
+              result={{ ...detailRow.result_json, entity_key: detailRow.entity_key }}
               searchDetails={{
                 searchName: detailRow.display_name,
                 entityType: detailRow.entity_type,

@@ -140,6 +140,9 @@ export function generateScreeningPdf(result: OpCheckResponse, search: SearchDeta
       y
     ) + GAP_IN_SECTION
   y = rowKV(doc, 'Requestor', search.requestor || '—', MARGIN, y) + GAP_IN_SECTION
+  if (result.entity_key) {
+    y = rowKV(doc, 'Entity key', result.entity_key, MARGIN, y) + GAP_IN_SECTION
+  }
   y += GAP_BETWEEN_SECTIONS
 
   // —— 3. SCREENING OUTCOME (isolated block, clear hierarchy)
@@ -236,12 +239,13 @@ export function generateScreeningPdf(result: OpCheckResponse, search: SearchDeta
   }
 
   // —— 9. SYSTEM METADATA FOOTER (every page)
+  const refLine = result.entity_key ? `Entity key: ${result.entity_key}` : `Ref: ${docRef}`
   const addFooter = (pageY: number) => {
     doc.setFontSize(FONT_FOOTER)
     doc.setFont('helvetica', 'normal')
     doc.setTextColor(80, 80, 80)
     doc.text(`Generated: ${generatedAt}`, MARGIN, pageY)
-    doc.text(`Ref: ${docRef}`, MARGIN, pageY + LINE_SMALL)
+    doc.text(refLine, MARGIN, pageY + LINE_SMALL)
     doc.setTextColor(0, 0, 0)
   }
   const pageCount = doc.getNumberOfPages()
