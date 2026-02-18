@@ -7,7 +7,7 @@ import { signup } from '@/api/client'
 const pageClass = 'min-h-screen bg-app text-text-primary flex items-center justify-center p-6'
 
 export function LoginPage() {
-  const { login, loading, setAuth } = useAuth()
+  const { login, loading } = useAuth()
   const navigate = useNavigate()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
