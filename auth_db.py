@@ -29,6 +29,16 @@ async def ensure_auth_schema(conn) -> None:
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS access_requests (
+            id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            email        TEXT NOT NULL,
+            requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests (email)
+    """)
 
 
 async def seed_default_user(conn) -> None:
@@ -76,6 +86,35 @@ async def update_password(conn, user_id: str, new_password: str) -> None:
         "UPDATE users SET password_hash = $1, must_change_password = false WHERE id = $2",
         new_hash,
         user_id,
+    )
+
+
+async def update_user(
+    conn,
+    user_id: str,
+    *,
+    is_admin: Optional[bool] = None,
+    new_password: Optional[str] = None,
+) -> None:
+    """Update user: set is_admin and/or set a new password (with must_change_password=true)."""
+    updates = []
+    args = []
+    n = 1
+    if is_admin is not None:
+        updates.append(f"is_admin = ${n}")
+        args.append(is_admin)
+        n += 1
+    if new_password is not None:
+        updates.append(f"password_hash = ${n}")
+        args.append(hash_password(new_password))
+        n += 1
+        updates.append("must_change_password = true")
+    if not updates:
+        return
+    args.append(user_id)
+    await conn.execute(
+        f"UPDATE users SET {', '.join(updates)} WHERE id = ${n}",
+        *args,
     )
 
 
@@ -129,3 +168,46 @@ async def create_user(
         "is_admin": row["is_admin"],
         "created_at": row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
     }
+
+
+async def create_access_request(conn, email: str) -> None:
+    """Record an access request (email only)."""
+    email = email.strip().lower()
+    if not email:
+        raise ValueError("Email required")
+    await conn.execute(
+        "INSERT INTO access_requests (email) VALUES ($1)",
+        email,
+    )
+
+
+async def list_access_requests(conn) -> List[dict]:
+    """Return pending access requests (id, email, requested_at)."""
+    rows = await conn.fetch(
+        "SELECT id, email, requested_at FROM access_requests ORDER BY requested_at"
+    )
+    return [
+        {
+            "id": str(r["id"]),
+            "email": r["email"],
+            "requested_at": r["requested_at"].isoformat() if hasattr(r["requested_at"], "isoformat") else str(r["requested_at"]),
+        }
+        for r in rows
+    ]
+
+
+async def grant_access_request(conn, request_id: str, password: str) -> dict:
+    """
+    Create user from access request (email + temp password, must_change_password=True),
+    then delete all access requests for that email. Returns created user. Raises if email already exists.
+    """
+    row = await conn.fetchrow(
+        "SELECT id, email FROM access_requests WHERE id = $1",
+        request_id,
+    )
+    if row is None:
+        raise ValueError("Access request not found")
+    email = row["email"]
+    user = await create_user(conn, email, password, must_change_password=True, is_admin=False)
+    await conn.execute("DELETE FROM access_requests WHERE email = $1", email)
+    return user

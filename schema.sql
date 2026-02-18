@@ -65,3 +65,12 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+
+-- Pending access requests (email only); admin grants by creating user with temp password.
+CREATE TABLE IF NOT EXISTS access_requests (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email        TEXT NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests (email);

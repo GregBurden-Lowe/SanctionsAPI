@@ -2,15 +2,22 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Input, Card, CardHeader, CardTitle, CardBody, ErrorBox } from '@/components'
 import { useAuth } from '@/context/AuthContext'
+import { signup } from '@/api/client'
 
 const pageClass = 'min-h-screen bg-app text-text-primary flex items-center justify-center p-6'
 
 export function LoginPage() {
-  const { login, loading } = useAuth()
+  const { login, loading, setAuth } = useAuth()
   const navigate = useNavigate()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [signupMode, setSignupMode] = useState(false)
+  const [signupEmail, setSignupEmail] = useState('')
+  const [signupPassword, setSignupPassword] = useState('')
+  const [signupConfirm, setSignupConfirm] = useState('')
+  const [signingUp, setSigningUp] = useState(false)
+  const [signupError, setSignupError] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -29,39 +36,131 @@ export function LoginPage() {
     }
   }
 
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSignupError(null)
+    const email = signupEmail.trim().toLowerCase()
+    if (!email) {
+      setSignupError('Please enter your email address.')
+      return
+    }
+    if (!signupPassword || signupPassword.length < 6) {
+      setSignupError('Password must be at least 6 characters.')
+      return
+    }
+    if (signupPassword !== signupConfirm) {
+      setSignupError('Passwords do not match.')
+      return
+    }
+    setSigningUp(true)
+    try {
+      const res = await signup(email, signupPassword)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail ?? 'Signup failed')
+      const token = data.access_token
+      const user = data.user ?? { username: email, email, must_change_password: true, is_admin: false }
+      if (!token || !user.email) throw new Error('Invalid signup response')
+      setAuth(token, user)
+      navigate(user.must_change_password ? '/change-password' : '/', { replace: true })
+    } catch (err) {
+      setSignupError(err instanceof Error ? err.message : 'Signup failed')
+    } finally {
+      setSigningUp(false)
+    }
+  }
+
   return (
     <div className={pageClass}>
       <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Sign in</CardTitle>
-        </CardHeader>
-        <CardBody>
-          <p className="text-sm text-text-secondary mb-4">
-            Sign in to use Sanctions &amp; PEP Screening.
-          </p>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <Input
-              label="Email"
-              type="email"
-              autoComplete="email"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              disabled={loading}
-            />
-            <Input
-              label="Password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={loading}
-            />
-            {error && <ErrorBox message={error} />}
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
-        </CardBody>
+        {signupMode ? (
+          <>
+            <CardHeader>
+              <CardTitle>Sign up</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <p className="text-sm text-text-secondary mb-4">
+                Create an account with your company email (approved domains only). You will be asked to change your password on first sign-in.
+              </p>
+              <form onSubmit={handleSignup} className="space-y-4">
+                <Input
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={signupEmail}
+                  onChange={(e) => setSignupEmail(e.target.value)}
+                  disabled={signingUp}
+                />
+                <Input
+                  label="Password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={signupPassword}
+                  onChange={(e) => setSignupPassword(e.target.value)}
+                  disabled={signingUp}
+                />
+                <Input
+                  label="Confirm password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={signupConfirm}
+                  onChange={(e) => setSignupConfirm(e.target.value)}
+                  disabled={signingUp}
+                />
+                {signupError && <ErrorBox message={signupError} />}
+                <Button type="submit" className="w-full" disabled={signingUp}>
+                  {signingUp ? 'Creating account…' : 'Sign up'}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => { setSignupMode(false); setSignupError(null) }}
+                  className="w-full text-sm text-brand hover:underline"
+                >
+                  Back to sign in
+                </button>
+              </form>
+            </CardBody>
+          </>
+        ) : (
+          <>
+            <CardHeader>
+              <CardTitle>Sign in</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <p className="text-sm text-text-secondary mb-4">
+                Sign in to use Sanctions &amp; PEP Screening.
+              </p>
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <Input
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={loading}
+                />
+                <Input
+                  label="Password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={loading}
+                />
+                {error && <ErrorBox message={error} />}
+                <Button type="submit" className="w-full" disabled={loading}>
+                  {loading ? 'Signing in…' : 'Sign in'}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setSignupMode(true)}
+                  className="w-full text-sm text-brand hover:underline"
+                >
+                  Sign up
+                </button>
+              </form>
+            </CardBody>
+          </>
+        )}
       </Card>
     </div>
   )

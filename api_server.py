@@ -5,6 +5,7 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 import os
 import logging
+import secrets
 
 import jwt
 
@@ -129,6 +130,25 @@ class CreateUserRequest(BaseModel):
     email: str = Field(..., description="User email")
     password: str = Field(..., description="Initial password")
     require_password_change: bool = Field(True, description="Require password change at first logon")
+
+
+class UpdateUserRequest(BaseModel):
+    is_admin: Optional[bool] = Field(None, description="Set user type (admin or standard user)")
+    new_password: Optional[str] = Field(None, description="Reset password; user must change at next logon")
+
+
+class ImportUserItem(BaseModel):
+    email: str = Field(..., description="User email")
+    password: Optional[str] = Field(None, description="Initial password; if missing, a random one is set (user must change at first logon)")
+
+
+class ImportUsersRequest(BaseModel):
+    users: List[ImportUserItem] = Field(..., max_length=500, description="List of users to import")
+
+
+class SignupRequest(BaseModel):
+    email: str = Field(..., description="User email (must be from an allowed domain)")
+    password: str = Field(..., description="Password")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -280,6 +300,65 @@ async def auth_change_password(data: ChangePasswordRequest, payload: dict = Depe
     }
 
 
+# Self-signup only allowed for these email domains (lowercase)
+ALLOWED_SIGNUP_DOMAINS = frozenset({
+    "legalprotectiongroup.co.uk",
+    "devonbaysolutions.co.uk",
+    "devonbayadjusting.co.uk",
+    "devonbayinsurance.ai",
+})
+
+
+@app.post("/auth/signup")
+async def auth_signup(data: SignupRequest):
+    """Self-signup for users with an allowed company email domain. New users must change password at first logon."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Signup unavailable (configure DATABASE_URL)")
+    email = data.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    domain = email.split("@")[-1]
+    if domain not in ALLOWED_SIGNUP_DOMAINS:
+        raise HTTPException(
+            status_code=400,
+            detail="Signup is only available for approved company email domains.",
+        )
+    if not data.password or len(data.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    try:
+        async with pool.acquire() as conn:
+            user = await auth_db.create_user(
+                conn,
+                email,
+                data.password,
+                must_change_password=True,
+                is_admin=False,
+            )
+        token = _create_access_token(
+            user["email"],
+            is_admin=user["is_admin"],
+            must_change_password=user["must_change_password"],
+        )
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "username": user["email"],
+                "email": user["email"],
+                "must_change_password": user["must_change_password"],
+                "is_admin": user["is_admin"],
+            },
+        }
+    except Exception as e:
+        err = str(e).lower()
+        if "unique" in err or "duplicate" in err or "exists" in err:
+            raise HTTPException(status_code=400, detail="An account with this email already exists")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/auth/me")
 async def auth_me(payload: dict = Depends(get_current_user)):
     """Return current user from JWT."""
@@ -323,13 +402,73 @@ async def auth_create_user(data: CreateUserRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.patch("/auth/users/{user_id}", dependencies=[Depends(require_admin)])
+async def auth_update_user(user_id: str, body: UpdateUserRequest):
+    """Update a user: set role (admin/user) and/or reset password (admin only)."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    if body.is_admin is None and not body.new_password:
+        raise HTTPException(status_code=400, detail="Provide is_admin and/or new_password")
+    if body.new_password and len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    try:
+        async with pool.acquire() as conn:
+            await auth_db.update_user(
+                conn,
+                user_id,
+                is_admin=body.is_admin,
+                new_password=body.new_password.strip() if body.new_password else None,
+            )
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/auth/users/import", dependencies=[Depends(require_admin)])
+async def auth_import_users(body: ImportUsersRequest):
+    """Import multiple users (admin only). All imported users have require password change at first logon. Max 500 per request."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    created = 0
+    skipped = 0
+    errors: List[dict] = []
+    async with pool.acquire() as conn:
+        for item in body.users:
+            email = (item.email or "").strip().lower()
+            if not email:
+                errors.append({"email": item.email or "", "error": "Email required"})
+                continue
+            password = (item.password or "").strip() or secrets.token_urlsafe(16)
+            try:
+                await auth_db.create_user(
+                    conn,
+                    email,
+                    password,
+                    must_change_password=True,
+                    is_admin=False,
+                )
+                created += 1
+            except Exception as e:
+                err = str(e).lower()
+                if "unique" in err or "duplicate" in err or "exists" in err:
+                    skipped += 1
+                else:
+                    errors.append({"email": email, "error": str(e)})
+    return {"created": created, "skipped": skipped, "errors": errors}
+
+
 @app.options("/opcheck")
 @app.options("/refresh_opensanctions")
 @app.options("/auth/config")
 @app.options("/auth/login")
 @app.options("/auth/me")
 @app.options("/auth/change-password")
+@app.options("/auth/signup")
 @app.options("/auth/users")
+@app.options("/auth/users/import")
+@app.options("/auth/users/{user_id}")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():

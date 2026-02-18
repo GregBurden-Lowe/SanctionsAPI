@@ -75,3 +75,45 @@ export async function createUser(params: {
     body: JSON.stringify(params),
   })
 }
+
+export async function updateUser(
+  userId: string,
+  params: { is_admin?: boolean; new_password?: string }
+): Promise<Response> {
+  const body: { is_admin?: boolean; new_password?: string } = {}
+  if (params.is_admin !== undefined) body.is_admin = params.is_admin
+  if (params.new_password !== undefined && params.new_password) body.new_password = params.new_password
+  if (Object.keys(body).length === 0) return new Response(null, { status: 400 })
+  return fetch(resolve(`/auth/users/${userId}`), {
+    method: 'PATCH',
+    headers: defaultHeaders(),
+    body: JSON.stringify(body),
+  })
+}
+
+export interface ImportUserItem {
+  email: string
+  password?: string | null
+}
+
+export interface ImportUsersResult {
+  created: number
+  skipped: number
+  errors: Array<{ email: string; error: string }>
+}
+
+export async function importUsers(users: ImportUserItem[]): Promise<Response> {
+  return fetch(resolve('/auth/users/import'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ users }),
+  })
+}
+
+export async function signup(email: string, password: string): Promise<Response> {
+  return fetch(resolve('/auth/signup'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+}
