@@ -287,50 +287,51 @@ export function UsersPage() {
             ) : users.length === 0 ? (
               <p className="text-sm text-text-secondary">No users yet.</p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="py-2 pr-4 font-medium text-text-primary">Email</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Type</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Must change password</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Created</th>
-                      <th className="py-2 font-medium text-text-primary">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map((u) => (
-                      <tr key={u.id} className="border-b border-border">
-                        <td className="py-2 pr-4 text-text-secondary">{u.email}</td>
-                        <td className="py-2 pr-4">
-                          <select
-                            value={u.is_admin ? 'admin' : 'user'}
-                            onChange={(e) => handleRoleChange(u, e.target.value === 'admin')}
-                            disabled={updatingRoleId === u.id}
-                            className="h-8 rounded border border-border bg-surface px-2 text-sm text-text-primary outline-none focus:border-brand"
-                          >
-                            <option value="user">User</option>
-                            <option value="admin">Admin</option>
-                          </select>
-                        </td>
-                        <td className="py-2 pr-4 text-text-secondary">{u.must_change_password ? 'Yes' : 'No'}</td>
-                        <td className="py-2 pr-4 text-text-muted">{new Date(u.created_at).toLocaleDateString()}</td>
-                        <td className="py-2">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => { setResetUser(u); setResetPassword(''); setResetError(null) }}
-                          >
-                            Reset password
-                          </Button>
-                        </td>
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="py-2 pr-4 font-medium text-text-primary">Email</th>
+                        <th className="py-2 pr-4 font-medium text-text-primary">Type</th>
+                        <th className="py-2 pr-4 font-medium text-text-primary">Must change password</th>
+                        <th className="py-2 pr-4 font-medium text-text-primary">Created</th>
+                        <th className="py-2 font-medium text-text-primary">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <Modal
+                    </thead>
+                    <tbody>
+                      {users.map((u) => (
+                        <tr key={u.id} className="border-b border-border">
+                          <td className="py-2 pr-4 text-text-secondary">{u.email}</td>
+                          <td className="py-2 pr-4">
+                            <select
+                              value={u.is_admin ? 'admin' : 'user'}
+                              onChange={(e) => handleRoleChange(u, e.target.value === 'admin')}
+                              disabled={updatingRoleId === u.id}
+                              className="h-8 rounded border border-border bg-surface px-2 text-sm text-text-primary outline-none focus:border-brand"
+                            >
+                              <option value="user">User</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </td>
+                          <td className="py-2 pr-4 text-text-secondary">{u.must_change_password ? 'Yes' : 'No'}</td>
+                          <td className="py-2 pr-4 text-text-muted">{new Date(u.created_at).toLocaleDateString()}</td>
+                          <td className="py-2">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => { setResetUser(u); setResetPassword(''); setResetError(null) }}
+                            >
+                              Reset password
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <Modal
                 isOpen={resetUser !== null}
                 onClose={() => { setResetUser(null); setResetPassword(''); setResetError(null) }}
                 title="Reset password"
@@ -362,6 +363,7 @@ export function UsersPage() {
                   </div>
                 )}
               </Modal>
+              </>
             )}
           </CardBody>
         </Card>
