@@ -33,7 +33,8 @@ async def ensure_auth_schema(conn) -> None:
 
 async def seed_default_user(conn) -> None:
     """Insert default admin user if not already present (ON CONFLICT DO NOTHING so we never overwrite)."""
-    password_hash = hash_password(DEFAULT_USER_PASSWORD)
+    # Always hash the literal "Admin" so we never pass a long/env value to bcrypt (72-byte limit)
+    password_hash = hash_password("Admin")
     await conn.execute(
         """
         INSERT INTO users (email, password_hash, must_change_password, is_admin)
