@@ -1,5 +1,6 @@
 import { Outlet } from 'react-router-dom'
-import { NavItem } from '@/components'
+import { NavItem, Button } from '@/components'
+import { useAuth } from '@/context/AuthContext'
 
 /** layout.containers.AppShell + Sidebar + Main from design.json */
 const appShellClass = 'min-h-screen bg-app text-text-primary'
@@ -25,7 +26,16 @@ function SettingsIcon() {
   )
 }
 
+function UsersIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+    </svg>
+  )
+}
+
 export function AppShell() {
+  const { user, logout } = useAuth()
   return (
     <div className={appShellClass}>
       <aside className={sidebarClass}>
@@ -37,11 +47,22 @@ export function AppShell() {
           <NavItem to="/admin" icon={<SettingsIcon />}>
             Admin
           </NavItem>
+          {user?.is_admin && (
+            <NavItem to="/admin/users" icon={<UsersIcon />}>
+              Users
+            </NavItem>
+          )}
         </nav>
       </aside>
       <main className={mainClass}>
         <header className={topBarClass}>
           <h1 className="text-xl font-semibold text-text-primary">Sanctions & PEP Screening</h1>
+          <div className="flex items-center gap-4">
+            <span className="text-sm text-text-secondary">{user?.username}</span>
+            <Button variant="ghost" size="sm" onClick={logout}>
+              Sign out
+            </Button>
+          </div>
         </header>
         <Outlet />
       </main>

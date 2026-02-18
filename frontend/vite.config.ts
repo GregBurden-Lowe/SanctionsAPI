@@ -13,6 +13,7 @@ export default defineConfig({
       '/health': { target: 'http://127.0.0.1:8000', changeOrigin: true },
       '/opcheck': { target: 'http://127.0.0.1:8000', changeOrigin: true },
       '/refresh_opensanctions': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/auth': { target: 'http://127.0.0.1:8000', changeOrigin: true },
     },
   },
 })

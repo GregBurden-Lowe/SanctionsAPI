@@ -1,4 +1,4 @@
-# utils.py — lean, low-RAM OpenSanctions + PEPs utils with Power Automate hook
+# utils.py — lean, low-RAM OpenSanctions + PEPs utils
 
 import os
 import csv
@@ -7,7 +7,6 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Optional, List, Tuple, Dict, Any
 
-import threading
 import requests
 import pandas as pd
 import pyarrow as pa
@@ -260,10 +259,6 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
 def clear_osn_cache():
     get_opensanctions_df.cache_clear()
 
-# Backward-compat helper
-def load_opensanctions_from_parquet(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
-    return get_opensanctions_df(parquet_path)
-
 # =============================================================================
 # Matching
 # =============================================================================
@@ -278,6 +273,25 @@ def _normalize_dob(dob: Optional[str]) -> Optional[str]:
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return None
+
+
+def derive_entity_key(display_name: str, entity_type: str, dob: Optional[str]) -> str:
+    """
+    Stable key for one logical entity. Identity is based on:
+    - normalized name (Unicode-normalized, punctuation stripped, lowercased)
+    - entity type (Person / Organization)
+    - DOB if provided (YYYY-MM-DD)
+
+    Same inputs => same key. Used for screening cache and job queue.
+    Note: entities with only name (no DOB) may collide across different real-world persons;
+    this is an accepted business trade-off for simplicity and deterministic reuse.
+    """
+    import hashlib
+    norm_name = _normalize_text(display_name or "")
+    et = (entity_type or "Person").strip().lower()
+    dob_str = _normalize_dob(dob) if dob else ""
+    payload = f"{norm_name}|{et}|{dob_str}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def get_best_name_matches(search_name: str, candidates: List[str], limit=50, threshold=80):
     """Robust fuzzy match with simple heuristics."""
@@ -358,7 +372,7 @@ def perform_opensanctions_check(
 ):
     import math
 
-    df = load_opensanctions_from_parquet(parquet_path)
+    df = get_opensanctions_df(parquet_path)
     if df.empty:
         result = _empty_no_match_result()
         _append_search_to_csv(name, result["Check Summary"])
@@ -501,72 +515,3 @@ def perform_opensanctions_check(
     result["Top Matches"] = top_suggestions
     _append_search_to_csv(name, result["Check Summary"])
     return result
-
-# =============================================================================
-# Power Automate audit hook
-# =============================================================================
-
-def send_audit_to_power_automate(
-    payload: Dict[str, Any],
-    flow_url: Optional[str] = None,
-    timeout: int = 8,
-    retries: int = 1,
-) -> Tuple[bool, str]:
-    """
-    POST 'payload' to a Power Automate HTTP trigger.
-
-    Returns: (ok, message)
-      ok=True  -> delivered (2xx)
-      ok=False -> not delivered; message contains status or exception
-
-    Reads FLOW URL from env POWER_AUTOMATE_FLOW_URL unless 'flow_url' is provided.
-    Safe to call inline; it won't raise.
-    """
-    url = (flow_url or os.getenv("POWER_AUTOMATE_FLOW_URL", "")).strip()
-    if not url:
-        return (False, "POWER_AUTOMATE_FLOW_URL not set")
-
-    headers = {"Content-Type": "application/json"}
-
-    for attempt in range(retries + 1):
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            if 200 <= resp.status_code < 300:
-                return (True, f"Delivered {resp.status_code}")
-            transient = (resp.status_code == 429) or (500 <= resp.status_code < 600)
-            if attempt < retries and transient:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            body_snip = (resp.text or "")[:200]
-            return (False, f"HTTP {resp.status_code}: {body_snip}")
-        except requests.RequestException as e:
-            if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            return (False, f"Exception: {e.__class__.__name__}: {e}")
-
-def post_to_power_automate_async(
-    payload: Dict[str, Any],
-    flow_url: Optional[str] = None,
-    timeout: int = 8,
-    retries: int = 1,
-) -> None:
-    """
-    Spawn a daemon thread to call send_audit_to_power_automate(payload, ...).
-    Never raises; returns immediately.
-    """
-    def _worker():
-        try:
-            ok, msg = send_audit_to_power_automate(
-                payload=payload,
-                flow_url=flow_url,
-                timeout=timeout,
-                retries=retries,
-            )
-            print(f"[Audit->PA] ok={ok} msg={msg}")
-        except Exception as e:
-            # absolutely don't let background failures crash anything
-            print(f"[Audit->PA] unexpected error: {e}")
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()

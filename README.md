@@ -2,6 +2,17 @@
 
 FastAPI backend for OpenSanctions/PEP screening with an optional Vite + React frontend. The API contract is stable for integration with Dynamics, Power Apps, and other internal systems.
 
+## Repository structure
+
+| Path | Contents |
+|------|----------|
+| **/** | Backend entrypoints (`api_server.py`, `screening_worker.py`), core modules (`utils.py`, `screening_db.py`), schema (`schema.sql`), Docker & config |
+| **[docs/](docs/)** | Architecture and API docs (persistence, internal screening API) |
+| **[frontend/](frontend/)** | Vite + React UI (screening, admin, design tokens) |
+| **[tests/](tests/)** | API contract tests |
+
+Quick links: [Connecting the database](#connecting-the-database) · [API contract](#api-contract-frozen) · [Docker](#docker-recommended-for-production--digitalocean)
+
 ## Local development
 
 ### Backend
@@ -31,8 +42,8 @@ npm run dev
 
 | Variable | Description |
 |----------|-------------|
-| `POWER_AUTOMATE_FLOW_URL` | Power Automate HTTP trigger URL for audit payloads. If unset, audit is skipped. |
-| `POWER_AUTOMATE_SYNC_TEST` | Set to `1` to send audit synchronously (for debugging). Default is async. |
+| `DATABASE_URL` | PostgreSQL connection URL for screening persistence, job queue, and GUI user accounts. If unset, screening runs synchronously with no cache or queue; the website does not require login. See [Connecting the database](#connecting-the-database) below. |
+| `GUI_JWT_SECRET` | Secret used to sign JWT tokens (default: `SECRET_KEY` or a dev fallback). Set a strong value in production. |
 
 ### Environment variables (frontend)
 
@@ -52,7 +63,61 @@ VITE_API_BASE_URL=https://sanctions-check.co.uk npm run dev
 
 Then open http://localhost:5173. All API calls go to the live server. The backend CORS config already allows `localhost` and `127.0.0.1`, so this works without changes on the server.
 
-You can also put the URL in a `.env` file in `frontend/` (see `frontend/.env.example`):
+You can also put the URL in a `.env` file in `frontend/` (see `frontend/.env.example`).
+
+## GUI authentication
+
+Authentication applies **only to the website** (browser). All API routes (e.g. **POST /opcheck**, **POST /refresh_opensanctions**) remain unchanged and do **not** require any login or token—Dynamics, Power Apps, scripts, and other API callers can use them as before.
+
+When **DATABASE_URL** is set, the website requires sign-in. Users are stored in the database. A default admin user is created automatically:
+
+- **Email:** `Greg.Burden-Lowe@Legalprotectiongroup.co.uk`
+- **Password:** `Admin`
+- **First logon:** the user must change their password before using the app.
+
+Admins can create more users from **Admin → Users**: set email, initial password, and optionally “Require password change at first logon”. The **Users** link in the sidebar is visible only to admin users.
+
+If **DATABASE_URL** is not set, the website does not require login (anyone can use the app in the browser).
+
+## Connecting the database
+
+To enable screening persistence (12‑month cache) and the job queue:
+
+1. **Create a PostgreSQL database** (local, managed, or Docker).
+
+2. **Set `DATABASE_URL`** to a valid connection string, for example:
+   ```bash
+   export DATABASE_URL="postgresql://user:password@localhost:5432/sanctions"
+   ```
+   Or in a `.env` file in the project root (do not commit secrets):
+   ```
+   DATABASE_URL=postgresql://user:password@localhost:5432/sanctions
+   ```
+   The API uses **asyncpg**; the URL format is the same as for `psycopg2` (e.g. `postgresql://...` or `postgres://...`).
+
+3. **Start the API** as usual. On first request (or startup), the API creates the tables (`screened_entities`, `screening_jobs`) if they do not exist. You can also run the schema once by hand:
+   ```bash
+   psql "$DATABASE_URL" -f schema.sql
+   ```
+
+4. **Run the background worker** (separate process) so queued jobs are processed:
+   ```bash
+   python screening_worker.py
+   ```
+   The worker needs the same codebase and `DATABASE_URL`; it uses **psycopg2**. Run 1–2 worker instances (e.g. in systemd or Docker).
+
+**Without `DATABASE_URL`:** the API still works: every `/opcheck` runs screening synchronously and returns the result; there is no cache or queue.
+
+Optional env vars (when using the DB):
+
+| Variable | Description |
+|----------|-------------|
+| `OPCHECK_QUEUE_THRESHOLD` | When pending+running jobs ≥ this, `/opcheck` enqueues instead of running sync (default `5`). |
+| `SCREENING_JOBS_RETENTION_DAYS` | Worker deletes completed/failed jobs older than this (default `7`). |
+| `SCREENING_CLEANUP_EVERY_N_LOOPS` | Worker runs cleanup every N loops (default `50`). |
+| `SCREENING_WORKER_POLL_SECONDS` | Worker sleep when no job is available (default `5`). |
+
+For the internal bulk API, see `docs/INTERNAL_SCREENING_API.md` (API key and/or IP allowlist required).
 
 ```
 VITE_API_BASE_URL=https://sanctions-check.co.uk
@@ -111,28 +176,102 @@ After first deploy, **load sanctions data** via the app: open the app → **Admi
 
 ### Deploy on DigitalOcean
 
-**Option A: App Platform (container)**
+You need a **PostgreSQL database** (for screening cache, job queue, and GUI users). Use a [DigitalOcean Managed Database](https://docs.digitalocean.com/products/databases/postgresql/) or any Postgres host, then set `DATABASE_URL` when deploying.
 
-1. Connect the repo; choose **Web Service** and **Dockerfile** as the build method.
-2. Set **HTTP Port** to `8000` (or the port your Dockerfile `EXPOSE`s).
-3. Add env vars if needed: `POWER_AUTOMATE_FLOW_URL`, `POWER_AUTOMATE_SYNC_TEST`.
-4. Deploy. After first boot, run a data refresh (Admin page or API) so screening works.
+**Option A: App Platform (easiest)**
+
+1. In [DigitalOcean Control Panel](https://cloud.digitalocean.com/) go to **Apps** → **Create App** → connect your GitHub repo.
+2. Choose **Web Service** and set the **Source** to use the **Dockerfile** (not a buildpack).
+3. Set **HTTP Port** to `8000`.
+4. **Environment variables** (App → Settings → App-Level Environment Variables):
+   - **DATABASE_URL** — PostgreSQL connection string (e.g. from a DO Managed Database; use the “Connection string” or `postgresql://user:password@host:port/database?sslmode=require`).
+   - **GUI_JWT_SECRET** — A long random secret for signing login tokens (e.g. `openssl rand -hex 32`). Required in production.
+5. Deploy. After the first deploy:
+   - Open the app URL → sign in with the default user (see [GUI authentication](#gui-authentication)) and change the password if prompted.
+   - Go to **Admin** → **Refresh OpenSanctions data** so screening has data (this can take a few minutes).
+6. (Optional) Add your domain under **Settings** → **Domains** and point DNS to the app.
 
 **Option B: Droplet (or any VM)**
 
-1. On the server: clone the repo, then `docker build -t sanctions-api .`
-2. Run with a volume and optional env:
+1. Create a Droplet (e.g. Ubuntu) and ensure you have a PostgreSQL database (managed DB or install Postgres on the Droplet / another server).
+2. On the Droplet, install Docker: `curl -fsSL https://get.docker.com | sh`
+3. Clone the repo and build:
+   ```bash
+   git clone https://github.com/GregBurden-Lowe/SanctionsAPI.git
+   cd SanctionsAPI
+   docker build -t sanctions-api .
+   ```
+4. Run the container with a volume and env vars:
    ```bash
    docker run -d -p 8000:8000 \
      -v sanctions-data:/app/data \
-     -e POWER_AUTOMATE_FLOW_URL="https://..." \
+     -e DATABASE_URL="postgresql://user:password@host:5432/dbname?sslmode=require" \
+     -e GUI_JWT_SECRET="your-long-random-secret" \
      --restart unless-stopped \
      sanctions-api
    ```
-3. Put Nginx (or another reverse proxy) in front for SSL and proxy to `localhost:8000`.
-4. Run a refresh (Admin or `POST /refresh_opensanctions`) once to populate data.
+5. Put Nginx (or Caddy) in front for SSL and proxy to `http://127.0.0.1:8000`. Example Nginx server block:
+   ```nginx
+   server {
+     listen 80;
+     server_name your-domain.com;
+     location / {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+     }
+   }
+   ```
+   Then enable SSL (e.g. `certbot --nginx`) and reload Nginx.
+6. After first boot: open the app, sign in (default user), change password if required, then **Admin** → **Refresh OpenSanctions data**.
 
-The container listens on `0.0.0.0` and uses the `PORT` env (default 8000) so it works with platform-assigned ports.
+The container listens on `0.0.0.0` and uses the `PORT` env (default 8000), so it works with platform-assigned ports on App Platform.
+
+### Replacing an existing DigitalOcean deployment
+
+If you already have the API running (e.g. NSSM on a Droplet, or an older App Platform app) and want to switch to the Dockerised stack:
+
+**1. Back up before changing anything**
+
+- Note **environment variables** (e.g. `DATABASE_URL`) from the current app or server.
+- Note how your **domain** is pointed (e.g. sanctions-check.co.uk → App Platform or Droplet IP).
+- If you have **parquet data** on the server you care about, copy the `data/` folder (or at least `opensanctions.parquet`) off the server; the new container can start fresh and you’ll run a data refresh, or you can mount that data into the container later.
+
+**2. Tear down or repurpose the old setup**
+
+- **App Platform:** In the DO control panel, delete the old app (or the service that runs the API). Your repo and any new app you create are separate.
+- **Droplet (current API + Nginx):** Either:
+  - **Option A — Replace in place:** Stop the current API (e.g. stop the NSSM service or the process on port 4512). You’ll reuse the same Droplet and Nginx; Nginx will keep pointing at a port you’ll use for Docker (e.g. 8000).
+  - **Option B — Fresh Droplet:** Create a new Droplet, set up Docker and Nginx there, then point the domain at the new Droplet and decommission the old one when ready.
+
+**3. Deploy the Dockerised app**
+
+- **App Platform:** Create a new **Web Service**, connect this repo, set **Source** to the Dockerfile. Set **HTTP Port** to `8000`. Add the env vars you backed up. Deploy. Then point your domain (e.g. sanctions-check.co.uk) at the new app’s URL in DO, or use DO’s “Add Domain” for the app.
+- **Droplet (same or new):**  
+  - Install Docker (and Docker Compose if you prefer): `curl -fsSL https://get.docker.com | sh`.  
+  - Clone this repo: `git clone https://github.com/GregBurden-Lowe/SanctionsAPI.git && cd SanctionsAPI`.  
+  - Build and run:
+    ```bash
+    docker build -t sanctions-api .
+    docker run -d -p 8000:8000 \
+      -v sanctions-data:/app/data \
+      -e DATABASE_URL="postgresql://..." \
+      --restart unless-stopped \
+      sanctions-api
+    ```
+  - Configure Nginx to proxy to `http://127.0.0.1:8000` (same as before, but port 8000 instead of 4512). Reload Nginx.  
+  - If the domain was already pointing at this Droplet, SSL and DNS stay the same.
+
+**4. After first boot**
+
+- Open the app (via your domain or the app URL). Sign in with the default user (see [GUI authentication](#gui-authentication)); change the password when prompted.
+- Go to **Admin** → **Refresh OpenSanctions data** (or `POST /refresh_opensanctions` with `{"include_peps": true}`) so screening has data. This can take a few minutes.
+
+**5. Sanity check**
+
+- Visit `https://your-domain/health` → should return `ok`.
+- Run a screening from the UI to confirm the API responds correctly.
 
 ## API contract safety tests
 
