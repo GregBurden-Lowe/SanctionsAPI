@@ -285,7 +285,12 @@ async def search_screened_entities(
         if "score" in d and d["score"] is not None:
             d["score"] = float(d["score"])
         if "result_json" in d and d["result_json"] is not None:
-            d["result_json"] = _to_json_safe(dict(d["result_json"]))
+            rj = d["result_json"]
+            if isinstance(rj, str):
+                rj = json.loads(rj)
+            elif not isinstance(rj, dict):
+                rj = dict(rj) if hasattr(rj, "items") else rj
+            d["result_json"] = _to_json_safe(rj)
         out.append(_to_json_safe(d))
     return out
 
