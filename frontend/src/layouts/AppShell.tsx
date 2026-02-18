@@ -26,6 +26,14 @@ function SettingsIcon() {
   )
 }
 
+function SearchIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+    </svg>
+  )
+}
+
 function UsersIcon() {
   return (
     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -43,6 +51,9 @@ export function AppShell() {
         <nav className="flex flex-col gap-1" aria-label="Primary">
           <NavItem to="/" icon={<HomeIcon />}>
             Screening
+          </NavItem>
+          <NavItem to="/search" icon={<SearchIcon />}>
+            Search database
           </NavItem>
           <NavItem to="/admin" icon={<SettingsIcon />}>
             Admin

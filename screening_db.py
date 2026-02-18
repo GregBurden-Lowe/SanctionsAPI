@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +232,60 @@ async def enqueue_job(
     return str(row["job_id"])
 
 
+async def search_screened_entities(
+    conn,
+    name: Optional[str] = None,
+    entity_key: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """
+    Search screened_entities by name (partial ILIKE) and/or entity_key (exact).
+    At least one of name or entity_key must be provided by the caller.
+    Returns list of row dicts with ISO date/timestamp strings.
+    """
+    conditions = []
+    args: List[Any] = []
+    n = 0
+    if entity_key:
+        n += 1
+        conditions.append(f"entity_key = ${n}")
+        args.append(entity_key.strip())
+    if name and name.strip():
+        n += 1
+        pattern = f"%{name.strip()}%"
+        conditions.append(f"(display_name ILIKE ${n} OR normalized_name ILIKE ${n})")
+        args.append(pattern)
+    if not conditions:
+        return []
+    limit = max(1, min(100, limit))
+    offset = max(0, offset)
+    args.extend([limit, offset])
+    where_sql = " AND ".join(conditions)
+    query = f"""
+        SELECT entity_key, display_name, normalized_name, date_of_birth, entity_type,
+               last_screened_at, screening_valid_until, status, risk_level, confidence, score,
+               uk_sanctions_flag, pep_flag, result_json, last_requestor, updated_at
+        FROM screened_entities
+        WHERE {where_sql}
+        ORDER BY last_screened_at DESC
+        LIMIT ${n + 1} OFFSET ${n + 2}
+    """
+    rows = await conn.fetch(query, *args)
+    out = []
+    for r in rows:
+        d = dict(r)
+        for key in ("last_screened_at", "screening_valid_until", "updated_at"):
+            if d.get(key) is not None:
+                d[key] = d[key].isoformat()
+        if d.get("date_of_birth") is not None:
+            d["date_of_birth"] = d["date_of_birth"].isoformat()
+        if "result_json" in d and d["result_json"] is not None:
+            d["result_json"] = dict(d["result_json"])
+        out.append(d)
+    return out
+
+
 async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
     """
     Return { status, entity_key?, result?, error_message? }.
@@ -243,7 +297,7 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
     )
     if row is None:
         return None
-    out = {"status": row["status"], "job_id": job_id}
+    out = {"status": row["status"], "job_id": job_id, "entity_key": row["entity_key"]}
     if row["error_message"]:
         out["error_message"] = row["error_message"]
     if row["status"] == "completed":

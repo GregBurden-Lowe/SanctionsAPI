@@ -117,3 +117,20 @@ export async function signup(email: string, password: string): Promise<Response>
     body: JSON.stringify({ email, password }),
   })
 }
+
+export interface SearchScreenedParams {
+  name?: string
+  entity_key?: string
+  limit?: number
+  offset?: number
+}
+
+export async function searchScreened(params: SearchScreenedParams): Promise<Response> {
+  const sp = new URLSearchParams()
+  if (params.name != null && params.name !== '') sp.set('name', params.name)
+  if (params.entity_key != null && params.entity_key !== '') sp.set('entity_key', params.entity_key)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return fetch(resolve(`/opcheck/screened${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
+}

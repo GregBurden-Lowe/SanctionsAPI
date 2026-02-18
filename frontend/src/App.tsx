@@ -6,6 +6,7 @@ import { AdminPage } from '@/pages/AdminPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { ChangePasswordPage } from '@/pages/ChangePasswordPage'
 import { UsersPage } from '@/pages/UsersPage'
+import { SearchDatabasePage } from '@/pages/SearchDatabasePage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -38,6 +39,7 @@ export default function App() {
             }
           >
             <Route index element={<ScreeningPage />} />
+            <Route path="search" element={<SearchDatabasePage />} />
             <Route path="admin" element={<AdminPage />} />
             <Route path="admin/users" element={<UsersPage />} />
           </Route>

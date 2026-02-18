@@ -27,7 +27,7 @@ export interface CheckSummary {
 /** Top Matches: backend may return [name, score] tuples or { name, score } */
 export type TopMatch = [string, number] | { name: string; score: number }
 
-/** OpCheck response — keys and casing are frozen */
+/** OpCheck response — keys and casing are frozen. entity_key is set when DB is used. */
 export interface OpCheckResponse {
   'Sanctions Name': string | null;
   'Birth Date': string | null;
@@ -42,6 +42,27 @@ export interface OpCheckResponse {
   'Top Matches': TopMatch[];
   'Match Found': boolean;
   'Check Summary': CheckSummary;
+  entity_key?: string;
+}
+
+/** One row from GET /opcheck/screened (stored screening). */
+export interface ScreenedEntity {
+  entity_key: string;
+  display_name: string;
+  normalized_name: string;
+  date_of_birth: string | null;
+  entity_type: string;
+  last_screened_at: string;
+  screening_valid_until: string;
+  status: string;
+  risk_level: string;
+  confidence: string;
+  score: number;
+  uk_sanctions_flag: boolean;
+  pep_flag: boolean;
+  result_json: OpCheckResponse;
+  last_requestor: string | null;
+  updated_at: string;
 }
 
 export interface RefreshRequest {

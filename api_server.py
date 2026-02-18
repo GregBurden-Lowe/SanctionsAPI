@@ -507,6 +507,7 @@ async def auth_import_users(body: ImportUsersRequest):
 
 
 @app.options("/opcheck")
+@app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
 @app.options("/auth/config")
 @app.options("/auth/login")
@@ -576,7 +577,7 @@ async def check_opensanctions(data: OpCheckRequest):
         if cached is not None:
             # Reuse always first, regardless of load
             logger.info("screening reused (valid) entity_key=%s", entity_key[:16])
-            return cached
+            return { **cached, "entity_key": entity_key }
 
         # Queue pressure check: under threshold => sync; at or over => enqueue (graceful load protection)
         count = await screening_db.get_pending_running_count(conn)
@@ -610,7 +611,7 @@ async def check_opensanctions(data: OpCheckRequest):
             conn, entity_key=entity_key, display_name=name, normalized_name=_normalize_text(name),
             date_of_birth=dob, entity_type=entity_type, requestor=requestor, result=results,
         )
-    return results
+    return { **results, "entity_key": entity_key }
 
 
 @app.get("/opcheck/jobs/{job_id}")
@@ -624,6 +625,29 @@ async def get_opcheck_job(job_id: str):
     if out is None:
         return JSONResponse(status_code=404, content={"error": "not_found", "message": "Job not found"})
     return out
+
+
+@app.get("/opcheck/screened", dependencies=[Depends(get_current_user)])
+async def get_opcheck_screened(
+    name: Optional[str] = None,
+    entity_key: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Search screened_entities by name (partial) and/or entity_key (exact). Requires at least one. Auth required."""
+    if not (name or entity_key) or (not (name or "").strip() and not (entity_key or "").strip()):
+        raise HTTPException(status_code=400, detail="Provide at least one of name or entity_key")
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Search unavailable (configure DATABASE_URL)")
+    limit = max(1, min(100, limit))
+    offset = max(0, offset)
+    async with pool.acquire() as conn:
+        items = await screening_db.search_screened_entities(
+            conn, name=(name or "").strip() or None, entity_key=(entity_key or "").strip() or None, limit=limit, offset=offset,
+        )
+    return {"items": items}
+
 
 # ---------------------------
 # Internal queue-ingestion API (enqueue only; no screening, no results)

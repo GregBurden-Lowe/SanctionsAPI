@@ -220,7 +220,7 @@ function getResultGuidance(result: OpCheckResponse): { heading: string; body: st
   }
 }
 
-function ResultCard({
+export function ResultCard({
   result,
   searchDetails,
 }: {
@@ -315,6 +315,23 @@ function ResultCard({
           {summary?.Date && (
             <p className="text-xs text-text-muted mt-3 pt-2 border-t border-border">
               <span className="font-medium">Checked at</span> {summary.Date}
+            </p>
+          )}
+          {result.entity_key && (
+            <p className="text-xs text-text-muted mt-3 pt-2 border-t border-border flex items-center gap-2 flex-wrap">
+              <span className="font-medium">Reference</span>
+              <code className="text-text-primary font-mono text-xs bg-surface px-1.5 py-0.5 rounded break-all">
+                {result.entity_key}
+              </code>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-xs"
+                onClick={() => navigator.clipboard.writeText(result.entity_key!).then(() => { /* optional: toast */ })}
+              >
+                Copy
+              </Button>
             </p>
           )}
           <div className="mt-4 pt-2 border-t border-border">
