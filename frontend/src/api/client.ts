@@ -29,6 +29,7 @@ export interface OpCheckParams {
   dob?: string | null
   entity_type?: string
   requestor?: string | null
+  search_backend?: 'original' | 'postgres_beta'
 }
 
 export async function opcheck(params: OpCheckParams): Promise<Response> {
@@ -40,6 +41,7 @@ export async function opcheck(params: OpCheckParams): Promise<Response> {
       dob: params.dob ?? null,
       entity_type: params.entity_type ?? 'Person',
       requestor: params.requestor ?? null,
+      search_backend: params.search_backend ?? 'original',
     }),
   })
 }

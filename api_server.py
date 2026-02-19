@@ -29,6 +29,7 @@ class SPAStaticFiles(StaticFiles):
 
 from utils import (
     perform_opensanctions_check,
+    perform_postgres_watchlist_check,
     refresh_opensanctions_data,
     derive_entity_key,
     _normalize_text,
@@ -236,6 +237,7 @@ class OpCheckRequest(BaseModel):
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
+    search_backend: Optional[str] = Field("original", description="'original' (parquet) or 'postgres_beta'")
 
 class RefreshRequest(BaseModel):
     include_peps: bool = Field(
@@ -821,8 +823,30 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob) or None
     entity_type = (data.entity_type or "Person")
     requestor = data.requestor.strip()
+    search_backend = (data.search_backend or "original").strip().lower()
+    if search_backend not in ("original", "postgres_beta"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_search_backend", "message": "search_backend must be 'original' or 'postgres_beta'."},
+        )
 
     pool = await screening_db.get_pool()
+    if search_backend == "postgres_beta":
+        if pool is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "backend_unavailable", "message": "postgres_beta requires DATABASE_URL and watchlist tables."},
+            )
+        async with pool.acquire() as conn:
+            results = await perform_postgres_watchlist_check(
+                conn,
+                name=name,
+                dob=dob,
+                entity_type=entity_type,
+                requestor=requestor,
+            )
+        return {**results, "entity_key": f"{derive_entity_key(display_name=name, entity_type=entity_type, dob=dob)}-pgb"}
+
     if pool is None:
         # No DB: run check synchronously
         return _run_check_sync(data)

@@ -8,6 +8,7 @@ export interface OpCheckRequest {
   dob?: string | null
   entity_type?: string
   requestor?: string | null
+  search_backend?: 'original' | 'postgres_beta'
 }
 
 /** Backend error response (400/500) */

@@ -40,6 +40,7 @@ export function ScreeningPage() {
   const [name, setName] = useState('')
   const [dob, setDob] = useState('')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>('Person')
+  const [searchBackend, setSearchBackend] = useState<'original' | 'postgres_beta'>('original')
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -65,6 +66,7 @@ export function ScreeningPage() {
         dob: dobTrim || null,
         entity_type: entityType,
         requestor: requestorTrim,
+        search_backend: searchBackend,
       })
       const data = await res.json()
       if (!res.ok) {
@@ -79,6 +81,7 @@ export function ScreeningPage() {
           entityType,
           searchDob: dobTrim,
           requestor: requestorTrim,
+          searchBackend,
         },
       }
       sessionStorage.setItem('screening_last_result', JSON.stringify(payload))
@@ -130,6 +133,23 @@ export function ScreeningPage() {
               placeholder="Who is running this check"
               required
             />
+            <div>
+              <label htmlFor="search_backend" className="block text-xs font-medium text-text-primary mb-1">
+                Search backend
+              </label>
+              <select
+                id="search_backend"
+                value={searchBackend}
+                onChange={(e) => setSearchBackend(e.target.value as 'original' | 'postgres_beta')}
+                className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+              >
+                <option value="original">Original (Parquet)</option>
+                <option value="postgres_beta">Postgres (Beta)</option>
+              </select>
+              <p className="text-xs text-text-muted mt-1">
+                Beta runs against watchlist tables in PostgreSQL and bypasses cache/queue reuse.
+              </p>
+            </div>
             <Button type="submit" className="w-full mt-6" disabled={loading}>
               {loading ? 'Checking…' : 'Check'}
             </Button>
@@ -186,6 +206,12 @@ function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) 
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Requestor</dt>
             <dd className="text-text-primary mt-0.5">{searchDetails.requestor || '—'}</dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-xs font-medium text-text-muted">Search backend</dt>
+            <dd className="text-text-primary mt-0.5">
+              {searchDetails.searchBackend === 'postgres_beta' ? 'Postgres (Beta)' : 'Original (Parquet)'}
+            </dd>
           </div>
         </dl>
       </CardBody>

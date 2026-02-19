@@ -175,6 +175,7 @@ export interface SearchDetails {
   entityType: string
   searchDob: string
   requestor: string
+  searchBackend?: string
 }
 
 /**

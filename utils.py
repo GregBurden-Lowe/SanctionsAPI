@@ -518,3 +518,174 @@ def perform_opensanctions_check(
     result["Top Matches"] = top_suggestions
     _append_search_to_csv(name, result["Check Summary"])
     return result
+
+
+async def perform_postgres_watchlist_check(
+    conn,
+    name: str,
+    dob: Optional[str],
+    entity_type: str = "Person",
+    requestor: Optional[str] = None,
+    candidate_limit: int = 400,
+) -> Dict[str, Any]:
+    """
+    Beta matcher using watchlist_entities in PostgreSQL.
+    Designed for side-by-side rollout with parquet path.
+    """
+    import math
+
+    exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
+    if not exists:
+        raise ValueError("watchlist_entities table is not available")
+
+    norm_name = _normalize_text(name or "")
+    norm_dob = _normalize_dob(dob)
+    et = (entity_type or "Person").strip().lower()
+    source_filter = "person" if et != "organization" else "organization"
+
+    async def _fetch_candidates(source_type: str) -> List[dict]:
+        rows = await conn.fetch(
+            """
+            SELECT
+                name,
+                birth_date::text AS birth_date,
+                dataset,
+                regime,
+                entity_schema,
+                raw_json
+            FROM watchlist_entities
+            WHERE source_type = $1
+              AND (
+                name_norm % $2
+                OR name_norm ILIKE ('%' || $2 || '%')
+              )
+              AND (
+                $3::text IS NULL
+                OR birth_date::text = $3::text
+                OR birth_date IS NULL
+              )
+            ORDER BY similarity(name_norm, $2) DESC
+            LIMIT $4
+            """,
+            source_type,
+            norm_name,
+            norm_dob,
+            max(50, min(2000, int(candidate_limit))),
+        )
+        out: List[dict] = []
+        for r in rows:
+            d = dict(r)
+            schema = str(d.get("entity_schema") or "").lower()
+            if source_filter == "person" and schema and schema != "person":
+                continue
+            if source_filter == "organization" and schema and schema not in ("organization", "legalentity", "company"):
+                continue
+            out.append(d)
+        return out
+
+    sanc_rows = await _fetch_candidates("sanctions")
+    pep_rows = await _fetch_candidates("peps")
+    combined = sanc_rows + pep_rows
+
+    if not combined:
+        result = _empty_no_match_result()
+        _append_search_to_csv(name, result["Check Summary"])
+        return result
+
+    def _parse_dob(val) -> Optional[str]:
+        try:
+            if val is None:
+                return None
+            s = str(val)
+            if not s or s.lower() in ("nan", "none", "nat"):
+                return None
+            return _normalize_dob(s)
+        except Exception:
+            return None
+
+    def _as_safe_str(x) -> str:
+        if x is None:
+            return ""
+        if isinstance(x, float) and math.isnan(x):
+            return ""
+        return str(x)
+
+    def _best_match_from_rows(rows: List[dict], threshold: int = 75):
+        if not rows:
+            return None, None
+        candidates = [_as_safe_str(r.get("name")) for r in rows]
+        matches = get_best_name_matches(norm_name, candidates, limit=50, threshold=threshold)
+        if not matches:
+            return None, None
+        if norm_dob:
+            dob_ok = []
+            for _, score, idx in matches:
+                cand_dob = _parse_dob(rows[idx].get("birth_date"))
+                if cand_dob and cand_dob == norm_dob:
+                    dob_ok.append((_, score, idx))
+            if not dob_ok:
+                return None, None
+            matches = dob_ok
+        _, best_score, best_idx = sorted(matches, key=lambda x: x[1], reverse=True)[0]
+        return rows[best_idx], float(best_score)
+
+    top_suggestions: List[Tuple[str, int]] = []
+    candidate_names = [_as_safe_str(r.get("name")) for r in combined if _as_safe_str(r.get("name"))]
+    if candidate_names:
+        hits = get_best_name_matches(norm_name, candidate_names, limit=15, threshold=60)
+        seen: Dict[str, float] = {}
+        for cleaned_name, score, idx in hits:
+            display = candidate_names[idx] if idx < len(candidate_names) else cleaned_name
+            if display and (display not in seen or score > seen[display]):
+                seen[display] = float(score)
+        top_suggestions = [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:5]]
+
+    s_row, s_score = _best_match_from_rows(sanc_rows)
+    p_row, p_score = _best_match_from_rows(pep_rows)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if s_row is not None:
+        source_label = (_as_safe_str(s_row.get("dataset")).strip() or "Postgres sanctions table")
+        if p_row is not None:
+            source_label = f"{source_label}; Consolidated PEP list"
+        result = {
+            "Sanctions Name": s_row.get("name"),
+            "Birth Date": _parse_dob(s_row.get("birth_date")),
+            "Regime": s_row.get("regime") or s_row.get("dataset"),
+            "Position": ((s_row.get("raw_json") or {}).get("positions") if isinstance(s_row.get("raw_json"), dict) else None),
+            "Topics": [],
+            "Is PEP": bool(p_row is not None),
+            "Is Sanctioned": True,
+            "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
+            "Score": s_score,
+            "Risk Level": "High Risk",
+            "Top Matches": top_suggestions,
+            "Match Found": True,
+            "Check Summary": {"Status": "Fail Sanction", "Source": source_label, "Date": now_str},
+        }
+        _append_search_to_csv(name, result["Check Summary"])
+        return result
+
+    if p_row is not None:
+        result = {
+            "Sanctions Name": p_row.get("name"),
+            "Birth Date": _parse_dob(p_row.get("birth_date")),
+            "Regime": p_row.get("regime") or p_row.get("dataset"),
+            "Position": ((p_row.get("raw_json") or {}).get("positions") if isinstance(p_row.get("raw_json"), dict) else None),
+            "Topics": [],
+            "Is PEP": True,
+            "Is Sanctioned": False,
+            "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
+            "Score": p_score,
+            "Risk Level": "Medium Risk",
+            "Top Matches": top_suggestions,
+            "Match Found": True,
+            "Check Summary": {"Status": "Fail PEP", "Source": "Consolidated PEP list", "Date": now_str},
+        }
+        _append_search_to_csv(name, result["Check Summary"])
+        return result
+
+    result = _empty_no_match_result(source_label="Postgres watchlist")
+    result["Top Matches"] = top_suggestions
+    _append_search_to_csv(name, result["Check Summary"])
+    return result
