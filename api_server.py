@@ -36,8 +36,8 @@ from utils import (
 import screening_db
 import auth_db
 
-# Use uvicorn's logger so messages show in `journalctl -u sanctions-api -f`
-logger = logging.getLogger("uvicorn.access")
+# Use uvicorn error logger for app logs (access logger expects HTTP access fields).
+logger = logging.getLogger("uvicorn.error")
 audit_logger = logging.getLogger("sanctions.audit")
 
 
@@ -923,7 +923,7 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
 
 @app.post("/internal/screening/jobs", dependencies=[Depends(require_internal_screening_auth)])
 @limiter.limit("120/minute")
-async def internal_screening_jobs(data: InternalScreeningRequest):
+async def internal_screening_jobs(request: Request, data: InternalScreeningRequest):
     """
     Enqueue a single screening request. Does NOT run screening; never returns screening results.
     Status: reused = previously screened and still valid; already_pending = job already in progress;
@@ -945,7 +945,7 @@ async def internal_screening_jobs(data: InternalScreeningRequest):
 
 @app.post("/internal/screening/jobs/bulk", dependencies=[Depends(require_internal_screening_auth)])
 @limiter.limit("20/minute")
-async def internal_screening_jobs_bulk(body: InternalScreeningBulkRequest):
+async def internal_screening_jobs_bulk(request: Request, body: InternalScreeningBulkRequest):
     """
     Enqueue multiple screening requests. Does NOT run screening; never returns screening results.
     Status per item: reused | already_pending | queued (same meanings as single endpoint).
