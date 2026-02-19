@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import {
   Button,
   Input,
@@ -35,19 +36,19 @@ function formatTopMatch(m: TopMatch): { name: string; score: number } {
 }
 
 export function ScreeningPage() {
+  const navigate = useNavigate()
   const [name, setName] = useState('')
   const [dob, setDob] = useState('')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>('Person')
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<OpCheckResponse | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
-    setResult(null)
     const nameTrim = name.trim()
+    const dobTrim = dob.trim()
     const requestorTrim = requestor.trim()
     if (!nameTrim) {
       setError("Please provide 'name' to run a check.")
@@ -61,7 +62,7 @@ export function ScreeningPage() {
     try {
       const res = await opcheck({
         name: nameTrim,
-        dob: dob.trim() || null,
+        dob: dobTrim || null,
         entity_type: entityType,
         requestor: requestorTrim,
       })
@@ -71,7 +72,17 @@ export function ScreeningPage() {
         setError(err.message ?? err.error ?? 'Check failed.')
         return
       }
-      setResult(data as OpCheckResponse)
+      const payload: ScreeningResultState = {
+        result: data as OpCheckResponse,
+        searchDetails: {
+          searchName: nameTrim,
+          entityType,
+          searchDob: dobTrim,
+          requestor: requestorTrim,
+        },
+      }
+      sessionStorage.setItem('screening_last_result', JSON.stringify(payload))
+      navigate('/results', { state: payload })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Network error.')
     } finally {
@@ -81,7 +92,7 @@ export function ScreeningPage() {
 
   return (
     <div className="px-10 pb-10">
-      <div className={`${result && !loading ? 'max-w-6xl' : 'max-w-2xl'} space-y-6`}>
+      <div className="max-w-2xl space-y-6">
         <SectionHeader title="Run check" />
         <Card>
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -133,7 +144,7 @@ export function ScreeningPage() {
         {loading && (
           <Card>
             <CardHeader>
-              <CardTitle>Result</CardTitle>
+              <CardTitle>Preparing result</CardTitle>
             </CardHeader>
             <CardBody>
               <Skeleton className="h-6 w-48 mb-2" />
@@ -142,18 +153,74 @@ export function ScreeningPage() {
             </CardBody>
           </Card>
         )}
+      </div>
+    </div>
+  )
+}
 
-        {result && !loading && (
-          <ResultCard
-            result={result}
-            searchDetails={{
-              searchName: name,
-              entityType,
-              searchDob: dob,
-              requestor,
-            }}
-          />
-        )}
+type ScreeningResultState = {
+  result: OpCheckResponse
+  searchDetails: SearchDetails
+}
+
+function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Original search details</CardTitle>
+      </CardHeader>
+      <CardBody>
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+          <div className="sm:col-span-2">
+            <dt className="text-xs font-medium text-text-muted">Name or organization</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.searchName || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-xs font-medium text-text-muted">Entity type</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.entityType || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.searchDob?.trim() ? searchDetails.searchDob : 'Not provided'}</dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-xs font-medium text-text-muted">Requestor</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.requestor || '—'}</dd>
+          </div>
+        </dl>
+      </CardBody>
+    </Card>
+  )
+}
+
+export function ScreeningResultPage() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const statePayload = location.state as ScreeningResultState | undefined
+  let payload = statePayload
+  if (!payload) {
+    const raw = sessionStorage.getItem('screening_last_result')
+    if (raw) {
+      try {
+        payload = JSON.parse(raw) as ScreeningResultState
+      } catch {
+        payload = undefined
+      }
+    }
+  }
+  if (!payload?.result || !payload?.searchDetails) return <Navigate to="/" replace />
+
+  return (
+    <div className="px-10 pb-10">
+      <div className="max-w-6xl space-y-6">
+        <SectionHeader title="Screening result" />
+        <div className="flex justify-end">
+          <Button type="button" variant="ghost" onClick={() => navigate('/')}>
+            Run another check
+          </Button>
+        </div>
+        <SearchDetailsCard searchDetails={payload.searchDetails} />
+        <ResultCard result={payload.result} searchDetails={payload.searchDetails} />
       </div>
     </div>
   )
@@ -281,10 +348,10 @@ export function ResultCard({
     },
   ] as const
 
-  const handleDownloadPdf = () => {
+  const handleDownloadPdf = async () => {
     setPdfError(null)
     try {
-      generateScreeningPdf(result, searchDetails)
+      await generateScreeningPdf(result, searchDetails)
     } catch (err) {
       setPdfError(err instanceof Error ? err.message : 'Failed to generate PDF')
     }

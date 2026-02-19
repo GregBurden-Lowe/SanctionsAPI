@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from '@/context/AuthContext'
 import { AppShell } from '@/layouts/AppShell'
-import { ScreeningPage } from '@/pages/ScreeningPage'
+import { ScreeningPage, ScreeningResultPage } from '@/pages/ScreeningPage'
 import { AdminPage } from '@/pages/AdminPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { ChangePasswordPage } from '@/pages/ChangePasswordPage'
@@ -53,6 +53,7 @@ export default function App() {
             }
           >
             <Route index element={<ScreeningPage />} />
+            <Route path="results" element={<ScreeningResultPage />} />
             <Route path="search" element={<SearchDatabasePage />} />
             <Route
               path="admin"

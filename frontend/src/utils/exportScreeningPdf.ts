@@ -1,34 +1,10 @@
 /**
- * Generate an audit PDF from a screening result and search details.
- * Layout and structure signal system-generated compliance artefact.
- * Frontend-only; uses existing result data. No backend calls.
+ * Generate a landscape PDF that visually mirrors the results-page card layout.
+ * The visual body is rendered as an image; entity key is added as real text so it can be copied.
  */
 import { jsPDF } from 'jspdf'
-import type { OpCheckResponse } from '@/types/api'
-
-const MARGIN = 20
-const MARGIN_LEFT_APPENDIX = 26
-const PAGE_WIDTH = 210
-const PAGE_HEIGHT = 297
-const MAX_WIDTH = PAGE_WIDTH - MARGIN * 2
-const LABEL_WIDTH = 48
-const VALUE_X = MARGIN + LABEL_WIDTH
-const VALUE_MAX_W = PAGE_WIDTH - VALUE_X - MARGIN
-const LINE_SMALL = 4.5
-const LINE_BODY = 5
-const LINE_LARGE = 6
-const GAP_IN_SECTION = 4
-const GAP_BETWEEN_SECTIONS = 14
-const GAP_AFTER_OUTCOME = 18
-const FONT_DOC_TITLE = 14
-const FONT_OUTCOME = 12
-const FONT_SECTION_TITLE = 10
-const FONT_BODY = 10
-const FONT_LABEL = 9
-const FONT_APPENDIX_TITLE = 9
-const FONT_APPENDIX_BODY = 8
-const FONT_FOOTER = 7
-const FOOTER_Y = PAGE_HEIGHT - 14
+import html2canvas from 'html2canvas'
+import type { OpCheckResponse, TopMatch } from '@/types/api'
 
 const UK_PATTERNS = ['uk', 'hmt', 'ofsi', 'hm treasury', 'uk fcdo', 'uk financial sanctions']
 
@@ -50,21 +26,148 @@ function parseSources(source: string | undefined): { list: string[]; hasUK: bool
   return { list: items, hasUK, otherCount }
 }
 
-function getGuidanceText(result: OpCheckResponse): string {
-  if (result['Is Sanctioned'])
-    return 'This result indicates a sanctions match. Further verification is required before proceeding.'
-  if (result['Is PEP'])
-    return 'This individual is identified as a Politically Exposed Person. This does not prevent proceeding, but should be recorded for audit purposes.'
-  return 'No match was found against sanctions or PEP lists. No further action required.'
+function formatTopMatch(m: TopMatch): { name: string; score: number } {
+  if (Array.isArray(m) && m.length >= 2) return { name: m[0], score: m[1] }
+  if (m && typeof m === 'object' && 'name' in m) {
+    return { name: (m as { name: string }).name, score: (m as { score: number }).score ?? 0 }
+  }
+  return { name: String(m), score: 0 }
 }
 
-/** Stable ref ID from check data (deterministic per check). */
-function refId(searchName: string, requestor: string, checkDate: string): string {
-  const s = `${searchName}|${requestor}|${checkDate}`
-  let h = 0
-  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
-  const hex = Math.abs(h).toString(16).slice(0, 6)
-  return `ref-${(checkDate || '').replace(/\s/g, '')}-${hex}`
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function getGuidanceText(result: OpCheckResponse): string {
+  if (result['Is Sanctioned']) {
+    return 'Potential sanctions match. Additional verification is required before proceeding.'
+  }
+  if (result['Is PEP']) {
+    return 'PEP indicator found. Continue with enhanced due diligence and record rationale.'
+  }
+  return 'No sanctions or PEP match found under current rules.'
+}
+
+function statusTone(result: OpCheckResponse): string {
+  if (result['Is Sanctioned']) return '#ff5600'
+  if (result['Is PEP']) return '#000ce1'
+  return '#00a05a'
+}
+
+function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): string {
+  const summary = result['Check Summary']
+  const { list: sourceList, hasUK, otherCount } = parseSources(summary?.Source)
+  const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch).slice(0, 8)
+  const tone = statusTone(result)
+  const checkedAt = summary?.Date || '—'
+  const sourceSummary = `${hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No'}${otherCount > 0 ? ` · Other lists: ${otherCount}` : ''}`
+
+  const matchesHtml = topMatches.length
+    ? topMatches
+        .map(
+          (m) => `
+            <div class="row">
+              <div class="row-title">${escapeHtml(m.name)}</div>
+              <div class="chip">Score ${m.score}</div>
+            </div>
+          `,
+        )
+        .join('')
+    : `<div class="muted">No similarity suggestions.</div>`
+
+  const sourceListHtml = sourceList.length
+    ? `<ul class="source-list">${sourceList.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`
+    : `<div class="muted">No source list details provided.</div>`
+
+  return `
+  <div class="page">
+    <div class="hero">
+      <div class="hero-left">
+        <div class="overline">SCREENING RESULT</div>
+        <div class="headline">${escapeHtml(summary?.Status || 'Unknown')}</div>
+        <div class="sub">${escapeHtml(getGuidanceText(result))}</div>
+      </div>
+      <div class="hero-right">
+        <div class="pill tone">Risk ${escapeHtml(result['Risk Level'] || '—')}</div>
+        <div class="pill">Confidence ${escapeHtml(result.Confidence || '—')}</div>
+        <div class="pill">Score ${escapeHtml(String(result.Score ?? '—'))}</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Original search details</h3>
+        <div class="kv"><span>Name or organization</span><b>${escapeHtml(search.searchName || '—')}</b></div>
+        <div class="kv"><span>Entity type</span><b>${escapeHtml(search.entityType || '—')}</b></div>
+        <div class="kv"><span>Date of birth</span><b>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</b></div>
+        <div class="kv"><span>Requestor</span><b>${escapeHtml(search.requestor || '—')}</b></div>
+      </div>
+
+      <div class="card">
+        <h3>Decision summary</h3>
+        <div class="kv"><span>Checked at</span><b>${escapeHtml(checkedAt)}</b></div>
+        <div class="kv"><span>Source summary</span><b>${escapeHtml(sourceSummary || '—')}</b></div>
+        <div class="kv"><span>Sanctioned</span><b>${result['Is Sanctioned'] ? 'Yes' : 'No'}</b></div>
+        <div class="kv"><span>PEP</span><b>${result['Is PEP'] ? 'Yes' : 'No'}</b></div>
+      </div>
+
+      <div class="card span2">
+        <h3>Name similarity suggestions</h3>
+        <div class="rows">${matchesHtml}</div>
+      </div>
+
+      <div class="card span2">
+        <h3>Sources</h3>
+        ${sourceListHtml}
+      </div>
+    </div>
+  </div>
+  <style>
+    * { box-sizing: border-box; font-family: Inter, system-ui, sans-serif; }
+    .page { width: 1400px; padding: 28px; background: #f4f3ec; color: #17100e; }
+    .hero {
+      display: flex; justify-content: space-between; gap: 20px;
+      background: #ffffff; border: 1px solid rgba(23,16,14,.1); border-radius: 10px;
+      box-shadow: 0 4px 37px rgba(0,0,0,.05); padding: 20px;
+      border-left: 6px solid ${tone};
+    }
+    .overline { font-size: 11px; letter-spacing: .08em; color: #6a6462; font-weight: 700; }
+    .headline { font-size: 34px; line-height: 1.1; font-weight: 700; margin-top: 4px; }
+    .sub { margin-top: 8px; font-size: 14px; color: #6a6462; max-width: 760px; }
+    .hero-right { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; justify-content: flex-end; }
+    .pill { font-size: 12px; padding: 8px 10px; border-radius: 8px; background: #f3f3f3; border: 1px solid rgba(23,16,14,.1); font-weight: 600; }
+    .pill.tone { background: ${tone}22; border-color: ${tone}66; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; margin-top: 16px; }
+    .card {
+      background: #ffffff; border: 1px solid rgba(23,16,14,.1); border-radius: 10px;
+      box-shadow: 0 4px 37px rgba(0,0,0,.05); padding: 16px;
+    }
+    .card.span2 { grid-column: span 2; }
+    h3 { margin: 0 0 12px 0; font-size: 14px; letter-spacing: .04em; color: #6a6462; text-transform: uppercase; }
+    .kv {
+      display: flex; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid rgba(23,16,14,.08);
+      font-size: 14px;
+    }
+    .kv:last-child { border-bottom: 0; }
+    .kv > span { color: #6a6462; }
+    .kv > b { color: #17100e; text-align: right; font-weight: 600; }
+    .rows { display: grid; gap: 8px; }
+    .row {
+      display: flex; justify-content: space-between; gap: 12px; align-items: center;
+      border: 1px solid rgba(23,16,14,.08); border-radius: 8px; padding: 10px;
+      background: #f4f3ec;
+    }
+    .row-title { font-size: 14px; font-weight: 500; color: #17100e; }
+    .chip { font-size: 12px; color: #17100e; padding: 4px 8px; border: 1px solid rgba(23,16,14,.12); border-radius: 999px; background: #fff; }
+    .source-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: #17100e; font-size: 13px; }
+    .muted { color: #6a6462; font-size: 13px; }
+  </style>
+  `
 }
 
 export interface SearchDetails {
@@ -74,187 +177,63 @@ export interface SearchDetails {
   requestor: string
 }
 
-function writeWrapped(doc: jsPDF, text: string, x: number, y: number, maxW: number, lineH: number): number {
-  const lines = doc.splitTextToSize(text, maxW)
-  doc.text(lines, x, y)
-  return y + lines.length * lineH
-}
-
-function ensureSpace(doc: jsPDF, y: number, need: number): number {
-  if (y + need > FOOTER_Y - 10) {
-    doc.addPage()
-    return MARGIN
-  }
-  return y
-}
-
-/** Key/value row: label left, value right (wrapped). Returns new y. */
-function rowKV(
-  doc: jsPDF,
-  label: string,
-  value: string,
-  x: number,
-  y: number
-): number {
-  doc.setFontSize(FONT_LABEL)
-  doc.setFont('helvetica', 'normal')
-  doc.text(label, x, y)
-  doc.setFontSize(FONT_BODY)
-  return writeWrapped(doc, value, VALUE_X, y, VALUE_MAX_W, LINE_BODY)
-}
-
 /**
- * Generate and download the screening result PDF. Throws on error.
+ * Generate and download the screening result PDF.
+ * Landscape page; content rendered as image to mirror UI cards.
+ * Entity key is added as selectable text for later copy/verification.
  */
-export function generateScreeningPdf(result: OpCheckResponse, search: SearchDetails): void {
-  const doc = new jsPDF({ unit: 'mm' })
-  const summary = result['Check Summary']
-  const checkDate = summary?.Date ?? ''
-  const generatedAt = new Date().toISOString()
-  const docRef = refId(search.searchName, search.requestor, checkDate)
-  let y = MARGIN
+export async function generateScreeningPdf(result: OpCheckResponse, search: SearchDetails): Promise<void> {
+  const wrapper = document.createElement('div')
+  wrapper.style.position = 'fixed'
+  wrapper.style.left = '-10000px'
+  wrapper.style.top = '0'
+  wrapper.style.width = '1400px'
+  wrapper.style.zIndex = '-1'
+  wrapper.innerHTML = buildSnapshotHtml(result, search)
+  document.body.appendChild(wrapper)
 
-  // —— 1. HEADER (minimal, no heavy title)
-  doc.setFontSize(FONT_DOC_TITLE)
-  doc.setFont('helvetica', 'normal')
-  doc.text('Sanctions & PEP Screening Result', MARGIN, y)
-  y += LINE_LARGE + 2
-  doc.setFontSize(FONT_LABEL)
-  doc.text(`Check date / time: ${checkDate}`, MARGIN, y)
-  y += GAP_BETWEEN_SECTIONS
+  try {
+    const canvas = await html2canvas(wrapper.firstElementChild as HTMLElement, {
+      backgroundColor: '#f4f3ec',
+      scale: 2,
+      useCORS: true,
+      logging: false,
+    })
 
-  // —— 2. SEARCH DETAILS (key/value grid)
-  y = ensureSpace(doc, y, 32)
-  doc.setFontSize(FONT_SECTION_TITLE)
-  doc.setFont('helvetica', 'normal')
-  doc.text('Search details', MARGIN, y)
-  y += LINE_BODY + GAP_IN_SECTION
-  y = rowKV(doc, 'Name searched', search.searchName || '—', MARGIN, y) + GAP_IN_SECTION
-  y = rowKV(doc, 'Entity type', search.entityType || '—', MARGIN, y) + GAP_IN_SECTION
-  y =
-    rowKV(
-      doc,
-      'Date of birth',
-      search.searchDob?.trim() ? search.searchDob : 'Not provided',
-      MARGIN,
-      y
-    ) + GAP_IN_SECTION
-  y = rowKV(doc, 'Requestor', search.requestor || '—', MARGIN, y) + GAP_IN_SECTION
-  if (result.entity_key) {
-    y = rowKV(doc, 'Entity key', result.entity_key, MARGIN, y) + GAP_IN_SECTION
-  }
-  y += GAP_BETWEEN_SECTIONS
+    const imgData = canvas.toDataURL('image/png')
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true })
 
-  // —— 3. SCREENING OUTCOME (isolated block, clear hierarchy)
-  y = ensureSpace(doc, y, 40)
-  const outcome = summary?.Status ?? 'Unknown'
-  y += 6
-  doc.setFontSize(FONT_OUTCOME)
-  doc.setFont('helvetica', 'normal')
-  doc.text('Outcome', MARGIN, y)
-  y += LINE_LARGE + 2
-  doc.text(outcome, MARGIN, y)
-  y += LINE_LARGE + GAP_AFTER_OUTCOME
+    const pageW = doc.internal.pageSize.getWidth()
+    const pageH = doc.internal.pageSize.getHeight()
+    const margin = 8
+    const footerBand = 14
+    const maxW = pageW - margin * 2
+    const maxH = pageH - margin * 2 - footerBand
 
-  // —— 4. RESULT METRICS (key/value grid, subordinate to outcome)
-  doc.setFontSize(FONT_SECTION_TITLE)
-  doc.text('Result metrics', MARGIN, y)
-  y += LINE_BODY + GAP_IN_SECTION
-  y = rowKV(doc, 'Risk level', result['Risk Level'], MARGIN, y) + GAP_IN_SECTION
-  y = rowKV(doc, 'Confidence', result.Confidence, MARGIN, y) + GAP_IN_SECTION
-  y = rowKV(doc, 'Score', String(result.Score), MARGIN, y) + GAP_IN_SECTION
-  y += GAP_BETWEEN_SECTIONS
+    const imgW = canvas.width
+    const imgH = canvas.height
+    const ratio = Math.min(maxW / imgW, maxH / imgH)
+    const renderW = imgW * ratio
+    const renderH = imgH * ratio
+    const x = (pageW - renderW) / 2
+    const y = margin
 
-  // —— 5. INTERPRETATION (linear text only)
-  y = ensureSpace(doc, y, 22)
-  doc.setFontSize(FONT_SECTION_TITLE)
-  doc.text('Interpretation', MARGIN, y)
-  y += LINE_BODY + GAP_IN_SECTION
-  doc.setFontSize(FONT_BODY)
-  y = writeWrapped(doc, getGuidanceText(result), MARGIN, y, MAX_WIDTH, LINE_BODY) + GAP_BETWEEN_SECTIONS
+    doc.addImage(imgData, 'PNG', x, y, renderW, renderH, undefined, 'FAST')
 
-  // —— 6. MATCHED SUBJECT (if applicable, key/value grid)
-  if (result['Match Found']) {
-    y = ensureSpace(doc, y, 28)
-    doc.setFontSize(FONT_SECTION_TITLE)
-    doc.text('Matched subject details', MARGIN, y)
-    y += LINE_BODY + GAP_IN_SECTION
-    if (result['Sanctions Name']) {
-      y = rowKV(doc, 'Matched name', result['Sanctions Name'], MARGIN, y) + GAP_IN_SECTION
-    }
-    if (result.Regime) {
-      y = rowKV(doc, 'Regime', result.Regime, MARGIN, y) + GAP_IN_SECTION
-    }
-    if (result['Birth Date']) {
-      y = rowKV(doc, 'Date of birth', result['Birth Date'], MARGIN, y) + GAP_IN_SECTION
-    }
-    y += GAP_BETWEEN_SECTIONS
-  }
-
-  // —— 7. SANCTIONS SOURCES (prioritised summary)
-  const { list: sourceList, hasUK, otherCount } = parseSources(summary?.Source)
-  if (sourceList.length > 0) {
-    y = ensureSpace(doc, y, 24)
-    doc.setFontSize(FONT_SECTION_TITLE)
-    doc.text('Sanctions sources', MARGIN, y)
-    y += LINE_BODY + GAP_IN_SECTION
-    doc.setFontSize(FONT_BODY)
-    y = rowKV(doc, 'UK sanctions', hasUK ? 'Yes' : 'No', MARGIN, y) + GAP_IN_SECTION
-    if (otherCount > 0) {
-      y =
-        rowKV(
-          doc,
-          'Other lists',
-          otherCount === 1 ? '1*' : `${otherCount}*`,
-          MARGIN,
-          y
-        ) + 2
-      doc.setFontSize(FONT_LABEL)
-      doc.text('* Listed in Reference below.', MARGIN, y)
-      y += LINE_BODY
-    }
-    y += GAP_BETWEEN_SECTIONS
-  }
-
-  // —— 8. REFERENCE (appendix: separated, smaller, indented)
-  if (sourceList.length > 0) {
-    y = ensureSpace(doc, y, 20)
-    y += 8
-  }
-  if (sourceList.length > 0) {
-    y = ensureSpace(doc, y, 15)
-    doc.setDrawColor(0, 0, 0)
-    doc.setLineWidth(0.2)
-    doc.line(MARGIN, y - 2, PAGE_WIDTH - MARGIN, y - 2)
-    y += 6
-    doc.setFontSize(FONT_APPENDIX_TITLE)
+    const keyText = result.entity_key?.trim() ? `Entity key: ${result.entity_key}` : 'Entity key: not available'
+    const checkedAt = result['Check Summary']?.Date || '—'
     doc.setFont('helvetica', 'normal')
-    doc.text('Reference — sanction list sources', MARGIN_LEFT_APPENDIX, y)
-    y += LINE_SMALL + 4
-    doc.setFontSize(FONT_APPENDIX_BODY)
-    for (const item of sourceList) {
-      y = ensureSpace(doc, y, LINE_SMALL + 1)
-      y = writeWrapped(doc, item, MARGIN_LEFT_APPENDIX, y, PAGE_WIDTH - MARGIN_LEFT_APPENDIX - MARGIN, LINE_SMALL) + 1
-    }
-  }
-
-  // —— 9. SYSTEM METADATA FOOTER (every page)
-  const refLine = result.entity_key ? `Entity key: ${result.entity_key}` : `Ref: ${docRef}`
-  const addFooter = (pageY: number) => {
-    doc.setFontSize(FONT_FOOTER)
-    doc.setFont('helvetica', 'normal')
-    doc.setTextColor(80, 80, 80)
-    doc.text(`Generated: ${generatedAt}`, MARGIN, pageY)
-    doc.text(refLine, MARGIN, pageY + LINE_SMALL)
+    doc.setFontSize(9)
+    doc.setTextColor(60, 60, 60)
+    doc.text(`Checked at: ${checkedAt}`, margin, pageH - 8)
+    doc.text(keyText, pageW / 2, pageH - 8, { align: 'center' })
+    doc.text(`Generated: ${new Date().toISOString()}`, pageW - margin, pageH - 8, { align: 'right' })
     doc.setTextColor(0, 0, 0)
-  }
-  const pageCount = doc.getNumberOfPages()
-  for (let p = 1; p <= pageCount; p++) {
-    doc.setPage(p)
-    addFooter(FOOTER_Y)
-  }
 
-  const safeName = search.searchName.replace(/[^a-zA-Z0-9\s-]/g, '').slice(0, 40) || 'screening'
-  const filename = `screening-result-${safeName.replace(/\s+/g, '-')}-${Date.now()}.pdf`
-  doc.save(filename)
+    const safeName = search.searchName.replace(/[^a-zA-Z0-9\s-]/g, '').slice(0, 40) || 'screening'
+    const filename = `screening-result-${safeName.replace(/\s+/g, '-')}-${Date.now()}.pdf`
+    doc.save(filename)
+  } finally {
+    document.body.removeChild(wrapper)
+  }
 }
