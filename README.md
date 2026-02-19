@@ -43,7 +43,14 @@ npm run dev
 | Variable | Description |
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection URL for screening persistence, job queue, and GUI user accounts. If unset, screening runs synchronously with no cache or queue; the website does not require login. See [Connecting the database](#connecting-the-database) below. |
-| `GUI_JWT_SECRET` | Secret used to sign JWT tokens (default: `SECRET_KEY` or a dev fallback). Set a strong value in production. |
+| `GUI_JWT_SECRET` | Secret used to sign JWT tokens (min 32 characters when using the database). Required in production; app will not start if missing or weak. |
+| `ALLOW_WEAK_JWT_SECRET` | Set to `true` for local dev only to allow a short or default secret. Do not use in production. |
+| `REFRESH_OPENSANCTIONS_API_KEY` | Optional. When set, **POST /refresh_opensanctions** can be called with this key via header `X-Refresh-Opensanctions-Key` or `Authorization: Bearer <key>` (for scripts/cron). When unset, only admin JWT can be used. |
+| `TRUSTED_PROXY_IPS` | Comma-separated IPs of trusted reverse proxies (e.g. `127.0.0.1,::1`). Only when the direct client is in this set is `X-Forwarded-For` used for client IP (rate limiting and internal screening). Default: `127.0.0.1,::1`. |
+
+**Rate limiting** (per client IP): `/auth/login` 5/min, `/auth/signup` 3/min, `POST /opcheck` 60/min, `GET /opcheck/jobs/{job_id}` 60/min, `POST /refresh_opensanctions` 2/min. Exceeding returns 429. The client IP is taken from the direct connection unless behind a trusted proxy (see below).
+
+**Trusted proxy:** When the app is behind a reverse proxy (e.g. Nginx), set `TRUSTED_PROXY_IPS` to the proxy’s IP(s), e.g. `127.0.0.1,::1` or your Nginx host. Only then is `X-Forwarded-For` used for client IP (rate limiting and internal screening allowlist). Otherwise the direct connection IP is used to avoid spoofing. Prefer **INTERNAL_SCREENING_API_KEY** for `/internal/screening/*`; IP allowlist is secondary and only safe when traffic comes via a trusted proxy.
 
 ### Environment variables (frontend)
 
@@ -67,13 +74,15 @@ You can also put the URL in a `.env` file in `frontend/` (see `frontend/.env.exa
 
 ## GUI authentication
 
-Authentication applies **only to the website** (browser). All API routes (e.g. **POST /opcheck**, **POST /refresh_opensanctions**) remain unchanged and do **not** require any login or token—Dynamics, Power Apps, scripts, and other API callers can use them as before.
+Authentication for the website uses the same JWT. **POST /opcheck** remains unauthenticated for Dynamics, Power Apps, and scripts. **POST /refresh_opensanctions** requires either admin JWT (e.g. from the website **Admin → Refresh**) or an API key (see `REFRESH_OPENSANCTIONS_API_KEY` below).
 
-When **DATABASE_URL** is set, the website requires sign-in. Users are stored in the database. A default admin user is created automatically:
+When **DATABASE_URL** is set, the website requires sign-in. Users are stored in the database.
 
-- **Email:** `Greg.Burden-Lowe@Legalprotectiongroup.co.uk`
-- **Password:** `Admin`
-- **First logon:** the user must change their password before using the app.
+- **Production:** Leave **SEED_DEFAULT_ADMIN** unset so no default user is created. Create the first admin via the database (insert into `users`) or a one-off script.
+- **Development / first-time setup:** Set `SEED_DEFAULT_ADMIN=true` (or `1`/`yes`) to seed a default admin user:
+  - **Email:** `Greg.Burden-Lowe@Legalprotectiongroup.co.uk`
+  - **Password:** `Admin`
+  - **First logon:** the user must change their password before using the app.
 
 Admins can create more users from **Admin → Users**: set email, initial password, and optionally “Require password change at first logon”. The **Users** link in the sidebar is visible only to admin users.
 
@@ -116,6 +125,7 @@ Optional env vars (when using the DB):
 |----------|-------------|
 | `OPCHECK_QUEUE_THRESHOLD` | When pending+running jobs ≥ this, `/opcheck` enqueues instead of running sync (default `5`). |
 | `SCREENING_JOBS_RETENTION_DAYS` | Worker deletes completed/failed jobs older than this (default `7`). |
+| `SCREENED_ENTITIES_RETENTION_MONTHS` | When set (e.g. `12`), worker deletes `screened_entities` rows older than N months. Unset/`0` = no automatic purge. See `docs/data-retention.md`. |
 | `SCREENING_CLEANUP_EVERY_N_LOOPS` | Worker runs cleanup every N loops (default `50`). |
 | `SCREENING_WORKER_POLL_SECONDS` | Worker sleep when no job is available (default `5`). |
 | `RESEND_API_KEY` | API key for [Resend](https://resend.com) to email temporary passwords on signup. If unset, the signup form returns 503. |

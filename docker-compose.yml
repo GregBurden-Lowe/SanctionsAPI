@@ -1,12 +1,18 @@
 # Run full app (backend + frontend) with persistent data. Good for local or a single server.
+# Put DATABASE_URL, GUI_JWT_SECRET, RESEND_API_KEY, RESEND_FROM (and any other env vars) in a .env file in this directory.
 services:
   app:
     build: .
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - PORT=8000
-      # Optional: - DATABASE_URL=postgresql://...
+      - DATABASE_URL=${DATABASE_URL}
+      - GUI_JWT_SECRET=${GUI_JWT_SECRET}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - RESEND_FROM=${RESEND_FROM}
     volumes:
       # Persist parquet and search log across restarts
       - sanctions-data:/app/data

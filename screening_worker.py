@@ -26,9 +26,10 @@ def main():
 
     poll_interval = max(2, int(os.environ.get("SCREENING_WORKER_POLL_SECONDS", "5")))
     retention_days = max(1, int(os.environ.get("SCREENING_JOBS_RETENTION_DAYS", "7")))
+    screened_retention_months = int(os.environ.get("SCREENED_ENTITIES_RETENTION_MONTHS", "0"))
     cleanup_every_n = max(1, int(os.environ.get("SCREENING_CLEANUP_EVERY_N_LOOPS", "50")))
-    logger.info("Starting worker (poll every %s s, retention %s days, cleanup every %s loops)",
-                poll_interval, retention_days, cleanup_every_n)
+    logger.info("Starting worker (poll every %s s, job retention %s days, screened_entities retention %s months, cleanup every %s loops)",
+                poll_interval, retention_days, screened_retention_months or "off", cleanup_every_n)
 
     loop_count = 0
     while True:
@@ -208,6 +209,17 @@ def main():
                             (retention_days,),
                         )
                         deleted = cur.rowcount
+                        if screened_retention_months >= 1:
+                            cur.execute(
+                                """
+                                DELETE FROM screened_entities
+                                WHERE last_screened_at < NOW() - (%s::text || ' months')::interval
+                                """,
+                                (screened_retention_months,),
+                            )
+                            screened_deleted = cur.rowcount
+                            if screened_deleted:
+                                logger.info("screened_entities retention deleted %s old row(s)", screened_deleted)
                     cleanup_conn.close()
                     if deleted:
                         logger.info("queue cleanup deleted %s old job(s)", deleted)

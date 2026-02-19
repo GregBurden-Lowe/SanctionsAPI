@@ -17,6 +17,9 @@ pandas>=2.2.2
 numpy>=1.26.4
 pyarrow>=18.0.0
 
+# Rate limiting
+slowapi>=0.1.9
+
 # GUI authentication (JWT + password hashing)
 PyJWT>=2.8
 passlib[argon2]>=1.7

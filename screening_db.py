@@ -319,6 +319,27 @@ def _to_json_safe(obj: Any) -> Any:
     return obj
 
 
+async def purge_screened_entities_older_than(conn, months: int) -> int:
+    """
+    Delete screened_entities rows where last_screened_at is older than the given number of months.
+    Returns the number of rows deleted. Use SCREENED_ENTITIES_RETENTION_MONTHS (env) to drive retention.
+    """
+    if months < 1:
+        return 0
+    result = await conn.execute(
+        """
+        DELETE FROM screened_entities
+        WHERE last_screened_at < NOW() - ($1::text || ' months')::interval
+        """,
+        months,
+    )
+    # asyncpg execute returns "DELETE N"
+    try:
+        return int(result.split()[-1]) if result else 0
+    except (ValueError, IndexError):
+        return 0
+
+
 async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
     """
     Return { status, entity_key?, result?, error_message? }.

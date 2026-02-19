@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 
 class SPAStaticFiles(StaticFiles):
@@ -36,12 +38,69 @@ import auth_db
 
 # Use uvicorn's logger so messages show in `journalctl -u sanctions-api -f`
 logger = logging.getLogger("uvicorn.access")
+audit_logger = logging.getLogger("sanctions.audit")
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Client IP for rate limiting; uses X-Forwarded-For only when behind trusted proxy (see _client_ip)."""
+    return _client_ip(request) or "unknown"
+
+
+def audit_log(
+    event_type: str,
+    *,
+    actor: Optional[str] = None,
+    action: str,
+    resource: Optional[str] = None,
+    outcome: str = "success",
+    ip: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> None:
+    """Structured audit log: timestamp, actor, action, resource, outcome. Do not log passwords or tokens."""
+    import json
+    payload = {
+        "event": event_type,
+        "action": action,
+        "outcome": outcome,
+        "ts": datetime.utcnow().isoformat() + "Z",
+    }
+    if actor:
+        payload["actor"] = actor
+    if resource:
+        payload["resource"] = resource
+    if ip:
+        payload["ip"] = ip
+    if extra:
+        payload["extra"] = extra
+    audit_logger.info("%s", json.dumps(payload))
+
 
 # ---------------------------
 # GUI authentication (JWT; users in DB)
 # ---------------------------
 _JWT_ALGORITHM = "HS256"
 _JWT_SECRET = os.environ.get("GUI_JWT_SECRET", "").strip() or os.environ.get("SECRET_KEY", "change-me-in-production")
+
+_DEV_DEFAULT_SECRETS = frozenset({"", "change-me-in-production", "dev", "secret", "test"})
+
+
+def _validate_jwt_secret() -> None:
+    """When DB is enabled, require a strong JWT secret; otherwise fail closed. Set ALLOW_WEAK_JWT_SECRET=true for local dev only."""
+    if os.environ.get("ALLOW_WEAK_JWT_SECRET", "").strip().lower() in ("1", "true", "yes"):
+        return
+    raw = (os.environ.get("GUI_JWT_SECRET") or os.environ.get("SECRET_KEY") or "").strip()
+    if not raw or len(raw) < 32:
+        raise RuntimeError(
+            "GUI_JWT_SECRET must be set and at least 32 characters when using the database. "
+            "Set GUI_JWT_SECRET to a strong random value (e.g. openssl rand -hex 32). "
+            "For local dev only you may set ALLOW_WEAK_JWT_SECRET=true."
+        )
+    if raw.lower() in _DEV_DEFAULT_SECRETS:
+        raise RuntimeError(
+            "GUI_JWT_SECRET must not be a known dev default when using the database. "
+            "Set GUI_JWT_SECRET to a strong random value. "
+            "For local dev only you may set ALLOW_WEAK_JWT_SECRET=true."
+        )
 
 
 def _create_access_token(email: str, is_admin: bool, must_change_password: bool) -> str:
@@ -74,11 +133,15 @@ async def lifespan(app: FastAPI):
     """Create DB pool and ensure schema when DATABASE_URL is set."""
     pool = await screening_db.get_pool()
     if pool is not None:
+        _validate_jwt_secret()
         try:
             async with pool.acquire() as conn:
                 await screening_db.ensure_schema(conn)
                 await auth_db.ensure_auth_schema(conn)
-                await auth_db.seed_default_user(conn)
+                if os.environ.get("SEED_DEFAULT_ADMIN", "").strip().lower() in ("1", "true", "yes"):
+                    await auth_db.seed_default_user(conn)
+                else:
+                    logger.info("auth_db: default admin seeding skipped (set SEED_DEFAULT_ADMIN=true to enable)")
             logger.info("screening_db + auth_db: schema ensured")
         except Exception as e:
             import traceback
@@ -88,6 +151,36 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0", lifespan=lifespan)
+limiter = Limiter(key_func=_rate_limit_key)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+_GENERIC_ERROR_MESSAGE = "An error occurred. Please try again or contact support."
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Preserve status; sanitise detail so we do not leak stack traces or internal messages. Keep 422 validation detail as-is."""
+    detail = exc.detail
+    if exc.status_code != 422 and isinstance(detail, str) and (
+        "traceback" in detail.lower()
+        or "exception" in detail.lower()
+        or "error:" in detail.lower()
+        or len(detail) > 200
+    ):
+        detail = _GENERIC_ERROR_MESSAGE
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Log full exception and return generic 500 to the client."""
+    logger.exception("Unhandled exception: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": _GENERIC_ERROR_MESSAGE},
+    )
+
 
 # ---------------------------
 # CORS (Dynamics/Dataverse + Power Apps + your domain)
@@ -173,12 +266,29 @@ class InternalScreeningBulkRequest(BaseModel):
     requests: List[InternalScreeningRequest] = Field(..., max_length=500)
 
 
-def _internal_screening_client_ip(request: Request) -> str:
-    """Client IP: X-Forwarded-For first proxy or direct client."""
+def _trusted_proxy_ips() -> frozenset:
+    """Parse TRUSTED_PROXY_IPS (comma-separated). Only when direct client is in this set do we trust X-Forwarded-For."""
+    raw = os.environ.get("TRUSTED_PROXY_IPS", "127.0.0.1,::1").strip()
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _client_ip(request: Request) -> str:
+    """
+    Client IP for auth and rate limiting. Use X-Forwarded-For only when the direct
+    client (request.client.host) is in TRUSTED_PROXY_IPS; otherwise a client could spoof it.
+    """
+    direct = (request.client.host if request.client else "") or ""
+    if direct not in _trusted_proxy_ips():
+        return direct
     forwarded = request.headers.get("x-forwarded-for", "").strip()
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    return direct
+
+
+def _internal_screening_client_ip(request: Request) -> str:
+    """Client IP for internal screening allowlist; uses trusted proxy when applicable."""
+    return _client_ip(request)
 
 
 async def require_internal_screening_auth(request: Request) -> None:
@@ -234,6 +344,32 @@ async def require_admin(request: Request) -> dict:
     return payload
 
 
+async def require_refresh_opensanctions_auth(request: Request) -> None:
+    """
+    Require either (a) valid JWT with is_admin=True, or (b) REFRESH_OPENSANCTIONS_API_KEY
+    via header X-Refresh-Opensanctions-Key or Authorization: Bearer <key>.
+    """
+    # (a) JWT admin
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.startswith("Bearer "):
+        token = auth_header.replace("Bearer ", "", 1).strip()
+        payload = _decode_token(token)
+        if payload and payload.get("is_admin"):
+            return
+    # (b) API key
+    refresh_key = os.environ.get("REFRESH_OPENSANCTIONS_API_KEY", "").strip()
+    if refresh_key:
+        provided = request.headers.get("x-refresh-opensanctions-key", "").strip()
+        if not provided and auth_header.startswith("Bearer "):
+            provided = auth_header.replace("Bearer ", "", 1).strip()
+        if provided == refresh_key:
+            return
+    raise HTTPException(
+        status_code=401,
+        detail="Refresh requires admin login or X-Refresh-Opensanctions-Key / REFRESH_OPENSANCTIONS_API_KEY",
+    )
+
+
 # ---------------------------
 # Routes
 # ---------------------------
@@ -250,7 +386,8 @@ async def auth_config():
 
 
 @app.post("/auth/login")
-async def auth_login(data: LoginRequest):
+@limiter.limit("5/minute")
+async def auth_login(request: Request, data: LoginRequest):
     """
     GUI login: email + password. Returns JWT. Users are stored in DB (seed user: see auth_db).
     Requires DATABASE_URL.
@@ -259,10 +396,13 @@ async def auth_login(data: LoginRequest):
     if pool is None:
         raise HTTPException(status_code=503, detail="Login unavailable (configure DATABASE_URL)")
     email = data.username.strip().lower()
+    client_ip = _client_ip(request)
     async with pool.acquire() as conn:
         user = await auth_db.verify_user(conn, email, data.password)
     if user is None:
+        audit_log("auth", action="login", actor=email, outcome="failure", ip=client_ip)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    audit_log("auth", action="login", actor=email, outcome="success", ip=client_ip)
     token = _create_access_token(
         user["email"],
         is_admin=user["is_admin"],
@@ -281,7 +421,7 @@ async def auth_login(data: LoginRequest):
 
 
 @app.post("/auth/change-password")
-async def auth_change_password(data: ChangePasswordRequest, payload: dict = Depends(get_current_user)):
+async def auth_change_password(request: Request, data: ChangePasswordRequest, payload: dict = Depends(get_current_user)):
     """
     Change password (e.g. after first logon). Requires current password. Returns new JWT.
     """
@@ -289,16 +429,20 @@ async def auth_change_password(data: ChangePasswordRequest, payload: dict = Depe
     if pool is None:
         raise HTTPException(status_code=503, detail="Unavailable")
     email = payload["sub"]
+    client_ip = _client_ip(request)
     async with pool.acquire() as conn:
         user = await auth_db.get_user_by_email(conn, email)
         if user is None:
+            audit_log("auth", action="change_password", actor=email, outcome="failure", ip=client_ip, extra={"reason": "user_not_found"})
             raise HTTPException(status_code=401, detail="User not found")
         if not auth_db.verify_password(data.current_password, user["password_hash"]):
+            audit_log("auth", action="change_password", actor=email, outcome="failure", ip=client_ip, extra={"reason": "wrong_password"})
             raise HTTPException(status_code=401, detail="Current password is incorrect")
         err = _validate_signup_password(data.new_password)
         if err:
             raise HTTPException(status_code=400, detail=err)
         await auth_db.update_password(conn, str(user["id"]), data.new_password)
+    audit_log("auth", action="change_password", actor=email, outcome="success", ip=client_ip)
     token = _create_access_token(email, is_admin=user["is_admin"], must_change_password=False)
     return {
         "access_token": token,
@@ -382,7 +526,8 @@ def _validate_signup_password(password: str) -> Optional[str]:
 
 
 @app.post("/auth/signup")
-async def auth_signup(data: SignupRequest):
+@limiter.limit("3/minute")
+async def auth_signup(request: Request, data: SignupRequest):
     """Request access: whitelist email only. A temporary password is emailed via Resend; user must sign in and change it."""
     pool = await screening_db.get_pool()
     if pool is None:
@@ -390,12 +535,14 @@ async def auth_signup(data: SignupRequest):
     if not os.environ.get("RESEND_API_KEY", "").strip():
         raise HTTPException(status_code=503, detail="Signup unavailable (email not configured)")
     email = data.email.strip().lower()
+    client_ip = _client_ip(request)
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
     if "@" not in email:
         raise HTTPException(status_code=400, detail="Invalid email address")
     domain = email.split("@")[-1]
     if domain not in ALLOWED_SIGNUP_DOMAINS:
+        audit_log("auth", action="signup", actor=email, outcome="failure", ip=client_ip, extra={"reason": "domain_not_allowed"})
         raise HTTPException(
             status_code=400,
             detail="Signup is only available for approved company email domains.",
@@ -412,13 +559,18 @@ async def auth_signup(data: SignupRequest):
             )
         import asyncio
         await asyncio.to_thread(_send_temp_password_email, email, temp_password)
+        audit_log("auth", action="signup", actor=email, outcome="success", ip=client_ip)
     except Exception as e:
         err = str(e).lower()
         if "unique" in err or "duplicate" in err or "exists" in err:
+            audit_log("auth", action="signup", actor=email, outcome="failure", ip=client_ip, extra={"reason": "already_exists"})
             raise HTTPException(status_code=400, detail="An account with this email already exists")
         if "resend" in err or "RESEND" in str(e):
+            audit_log("auth", action="signup", actor=email, outcome="failure", ip=client_ip, extra={"reason": "email_send_failed"})
             raise HTTPException(status_code=502, detail="Failed to send email. Please try again or contact support.")
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("Signup failed: %s", e)
+        audit_log("auth", action="signup", actor=email, outcome="failure", ip=client_ip)
+        raise HTTPException(status_code=400, detail=_GENERIC_ERROR_MESSAGE)
     return {
         "message": "Check your email for a temporary password. Sign in with your email and that password; you will then be asked to set a new password.",
     }
@@ -431,18 +583,19 @@ async def auth_me(payload: dict = Depends(get_current_user)):
 
 
 @app.get("/auth/users", dependencies=[Depends(require_admin)])
-async def auth_list_users():
+async def auth_list_users(request: Request, payload: dict = Depends(require_admin)):
     """List all users (admin only). Requires DATABASE_URL."""
     pool = await screening_db.get_pool()
     if pool is None:
         raise HTTPException(status_code=503, detail="Unavailable")
     async with pool.acquire() as conn:
         users = await auth_db.list_users(conn)
+    audit_log("admin", action="users_list", actor=payload.get("sub"), outcome="success", ip=_client_ip(request))
     return {"users": users}
 
 
 @app.post("/auth/users", dependencies=[Depends(require_admin)])
-async def auth_create_user(data: CreateUserRequest):
+async def auth_create_user(request: Request, data: CreateUserRequest, payload: dict = Depends(require_admin)):
     """Create a new user (admin only). Requires DATABASE_URL."""
     pool = await screening_db.get_pool()
     if pool is None:
@@ -462,16 +615,20 @@ async def auth_create_user(data: CreateUserRequest):
                 must_change_password=data.require_password_change,
                 is_admin=False,
             )
+        audit_log("admin", action="user_create", actor=payload.get("sub"), resource=email, outcome="success", ip=_client_ip(request))
         return user
     except Exception as e:
         err = str(e).lower()
         if "unique" in err or "duplicate" in err or "exists" in err:
+            audit_log("admin", action="user_create", actor=payload.get("sub"), resource=email, outcome="failure", ip=_client_ip(request), extra={"reason": "already_exists"})
             raise HTTPException(status_code=400, detail="A user with this email already exists")
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("Create user failed: %s", e)
+        audit_log("admin", action="user_create", actor=payload.get("sub"), resource=email, outcome="failure", ip=_client_ip(request))
+        raise HTTPException(status_code=400, detail=_GENERIC_ERROR_MESSAGE)
 
 
 @app.patch("/auth/users/{user_id}", dependencies=[Depends(require_admin)])
-async def auth_update_user(user_id: str, body: UpdateUserRequest):
+async def auth_update_user(request: Request, user_id: str, body: UpdateUserRequest, payload: dict = Depends(require_admin)):
     """Update a user: set role (admin/user) and/or reset password (admin only)."""
     pool = await screening_db.get_pool()
     if pool is None:
@@ -490,13 +647,16 @@ async def auth_update_user(user_id: str, body: UpdateUserRequest):
                 is_admin=body.is_admin,
                 new_password=body.new_password.strip() if body.new_password else None,
             )
+        audit_log("admin", action="user_update", actor=payload.get("sub"), resource=user_id, outcome="success", ip=_client_ip(request))
         return {"status": "ok"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("Update user failed: %s", e)
+        audit_log("admin", action="user_update", actor=payload.get("sub"), resource=user_id, outcome="failure", ip=_client_ip(request))
+        raise HTTPException(status_code=400, detail=_GENERIC_ERROR_MESSAGE)
 
 
 @app.post("/auth/users/import", dependencies=[Depends(require_admin)])
-async def auth_import_users(body: ImportUsersRequest):
+async def auth_import_users(request: Request, body: ImportUsersRequest, payload: dict = Depends(require_admin)):
     """Import multiple users (admin only). All imported users have require password change at first logon. Max 500 per request."""
     pool = await screening_db.get_pool()
     if pool is None:
@@ -525,7 +685,9 @@ async def auth_import_users(body: ImportUsersRequest):
                 if "unique" in err or "duplicate" in err or "exists" in err:
                     skipped += 1
                 else:
-                    errors.append({"email": email, "error": str(e)})
+                    logger.exception("Import user %s failed: %s", email, e)
+                    errors.append({"email": email, "error": "Create failed"})
+    audit_log("admin", action="user_import", actor=payload.get("sub"), outcome="success", ip=_client_ip(request), extra={"created": created, "skipped": skipped, "errors_count": len(errors)})
     return {"created": created, "skipped": skipped, "errors": errors}
 
 
@@ -565,7 +727,8 @@ def _opcheck_queue_threshold() -> int:
 
 
 @app.post("/opcheck")
-async def check_opensanctions(data: OpCheckRequest):
+@limiter.limit("60/minute")
+async def check_opensanctions(request: Request, data: OpCheckRequest):
     """
     Screen an entity. With DB: 200 = result (reused or completed synchronously); 202 = queued due to load.
     Reuse always first. When no cache: if queue pressure is below threshold, run sync (200); else enqueue (202).
@@ -638,7 +801,8 @@ async def check_opensanctions(data: OpCheckRequest):
 
 
 @app.get("/opcheck/jobs/{job_id}")
-async def get_opcheck_job(job_id: str):
+@limiter.limit("60/minute")
+async def get_opcheck_job(request: Request, job_id: str):
     """Return job status; when completed, include the screening result."""
     pool = await screening_db.get_pool()
     if pool is None:
@@ -652,6 +816,8 @@ async def get_opcheck_job(job_id: str):
 
 @app.get("/opcheck/screened", dependencies=[Depends(get_current_user)])
 async def get_opcheck_screened(
+    request: Request,
+    payload: dict = Depends(get_current_user),
     name: Optional[str] = None,
     entity_key: Optional[str] = None,
     limit: int = 50,
@@ -670,10 +836,11 @@ async def get_opcheck_screened(
             items = await screening_db.search_screened_entities(
                 conn, name=(name or "").strip() or None, entity_key=(entity_key or "").strip() or None, limit=limit, offset=offset,
             )
+        audit_log("data_access", action="screened_search", actor=payload.get("sub"), resource="opcheck/screened", outcome="success", ip=_client_ip(request), extra={"count": len(items)})
         return {"items": items}
     except Exception as e:
         logger.exception("GET /opcheck/screened failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Search failed: {e!s}")
+        raise HTTPException(status_code=500, detail="Search failed. Please try again or contact support.")
 
 
 # ---------------------------
@@ -764,20 +931,21 @@ async def internal_screening_jobs_bulk(body: InternalScreeningBulkRequest):
     return {"results": results}
 
 
-@app.post("/refresh_opensanctions")
-async def refresh_opensanctions(body: RefreshRequest):
+@app.post("/refresh_opensanctions", dependencies=[Depends(require_refresh_opensanctions_auth)])
+@limiter.limit("2/minute")
+async def refresh_opensanctions(request: Request, body: RefreshRequest):
     """
     Download latest consolidated sanctions (and optionally PEPs), write to parquet.
-    This clears cached DataFrame in utils so new data is used immediately.
-    No authentication required (API contract unchanged). GUI login only affects access to the website.
+    Requires admin JWT or REFRESH_OPENSANCTIONS_API_KEY (header X-Refresh-Opensanctions-Key or Authorization: Bearer <key>).
     """
     try:
         refresh_opensanctions_data(include_peps=body.include_peps)
         return {"status": "ok", "include_peps": body.include_peps}
     except Exception as e:
+        logger.exception("Refresh OpenSanctions failed: %s", e)
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": str(e)},
+            content={"status": "error", "message": _GENERIC_ERROR_MESSAGE},
         )
 
 # Serve built frontend from frontend/dist (must be last so API routes take precedence).
