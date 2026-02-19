@@ -266,7 +266,7 @@ async def sync_watchlist_entities_postgres(
                 regime,
                 raw_json
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9::jsonb)
         """
         with open(path, mode="r", encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
