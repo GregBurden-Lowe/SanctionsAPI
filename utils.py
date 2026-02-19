@@ -5,7 +5,7 @@ import csv
 import time
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, date
 from functools import lru_cache
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -216,8 +216,8 @@ def refresh_opensanctions_data(include_peps: bool = True):
     clear_osn_cache()
 
 
-def _parse_birth_date_for_db(raw_value: str) -> Optional[str]:
-    """Keep only strict YYYY-MM-DD dates; partial dates are stored as NULL."""
+def _parse_birth_date_for_db(raw_value: str) -> Optional[date]:
+    """Keep only strict YYYY-MM-DD dates as Python date objects; partial dates are NULL."""
     value = str(raw_value or "").strip()
     if not value:
         return None
@@ -225,8 +225,7 @@ def _parse_birth_date_for_db(raw_value: str) -> Optional[str]:
         value = value.split(";", 1)[0].strip()
     if len(value) == 10:
         try:
-            datetime.strptime(value, "%Y-%m-%d")
-            return value
+            return datetime.strptime(value, "%Y-%m-%d").date()
         except ValueError:
             return None
     return None
