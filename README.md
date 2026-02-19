@@ -44,11 +44,14 @@ npm run dev
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection URL for screening persistence, job queue, and GUI user accounts. If unset, screening runs synchronously with no cache or queue; the website does not require login. See [Connecting the database](#connecting-the-database) below. |
 | `GUI_JWT_SECRET` | Secret used to sign JWT tokens (min 32 characters when using the database). Required in production; app will not start if missing or weak. |
-| `ALLOW_WEAK_JWT_SECRET` | Set to `true` for local dev only to allow a short or default secret. Do not use in production. |
+| `ALLOW_WEAK_JWT_SECRET` | Set to `true` for local dev/test only to allow a short or default secret. Ignored/rejected outside dev/test environment modes. |
 | `REFRESH_OPENSANCTIONS_API_KEY` | Optional. When set, **POST /refresh_opensanctions** can be called with this key via header `X-Refresh-Opensanctions-Key` or `Authorization: Bearer <key>` (for scripts/cron). When unset, only admin JWT can be used. |
 | `TRUSTED_PROXY_IPS` | Comma-separated IPs of trusted reverse proxies (e.g. `127.0.0.1,::1`). Only when the direct client is in this set is `X-Forwarded-For` used for client IP (rate limiting and internal screening). Default: `127.0.0.1,::1`. |
+| `RATE_LIMIT_STORAGE_URL` | Optional shared backend for rate limiting (recommended for multi-instance deploys), e.g. `redis://:password@redis-host:6379/0`. If unset, in-memory per-process limiting is used. |
 
-**Rate limiting** (per client IP): `/auth/login` 5/min, `/auth/signup` 3/min, `POST /opcheck` 60/min, `GET /opcheck/jobs/{job_id}` 60/min, `POST /refresh_opensanctions` 2/min. Exceeding returns 429. The client IP is taken from the direct connection unless behind a trusted proxy (see below).
+**Rate limiting** (per client IP): `/auth/login` 5/min, `/auth/signup` 3/min, `POST /opcheck` 60/min, `GET /opcheck/jobs/{job_id}` 60/min, `POST /refresh_opensanctions` 2/min, `POST /internal/screening/jobs` 120/min, `POST /internal/screening/jobs/bulk` 20/min. Exceeding returns 429. The client IP is taken from the direct connection unless behind a trusted proxy (see below).
+
+**Login backoff** (per account): after repeated failed logins in a 15-minute window, `/auth/login` applies a soft delay (5 fails: 30s, 8 fails: 2m, 10+ fails: 10m) and returns `429` with `Retry-After`.
 
 **Trusted proxy:** When the app is behind a reverse proxy (e.g. Nginx), set `TRUSTED_PROXY_IPS` to the proxy’s IP(s), e.g. `127.0.0.1,::1` or your Nginx host. Only then is `X-Forwarded-For` used for client IP (rate limiting and internal screening allowlist). Otherwise the direct connection IP is used to avoid spoofing. Prefer **INTERNAL_SCREENING_API_KEY** for `/internal/screening/*`; IP allowlist is secondary and only safe when traffic comes via a trusted proxy.
 

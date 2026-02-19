@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 from typing import Optional, List, Any
 
 from security import hash_password, verify_password
@@ -38,6 +40,19 @@ async def ensure_auth_schema(conn) -> None:
     """)
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests (email)
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS auth_login_attempts (
+            id           BIGSERIAL PRIMARY KEY,
+            email        TEXT NOT NULL,
+            attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            success      BOOLEAN NOT NULL DEFAULT false,
+            client_ip    TEXT
+        )
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_email_time
+        ON auth_login_attempts (email, attempted_at DESC)
     """)
 
 
@@ -77,6 +92,68 @@ async def verify_user(conn, email: str, password: str) -> Optional[dict]:
     out = {k: v for k, v in user.items() if k != "password_hash"}
     out["id"] = str(out["id"])
     return out
+
+
+def _login_backoff_seconds_for_failures(failed_count: int) -> int:
+    """Soft backoff policy for repeated failed logins (no hard lockout)."""
+    if failed_count >= 10:
+        return 600
+    if failed_count >= 8:
+        return 120
+    if failed_count >= 5:
+        return 30
+    return 0
+
+
+async def get_login_backoff_remaining_seconds(conn, email: str) -> int:
+    """
+    Return remaining backoff in seconds for this account based on failed attempts
+    in the last 15 minutes. 0 means no delay.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT
+            COUNT(*)::int AS failed_count,
+            MAX(attempted_at) AS last_failed_at
+        FROM auth_login_attempts
+        WHERE email = $1
+          AND success = false
+          AND attempted_at > NOW() - INTERVAL '15 minutes'
+        """,
+        email.strip().lower(),
+    )
+    if not row:
+        return 0
+    failed_count = int(row.get("failed_count") or 0)
+    delay = _login_backoff_seconds_for_failures(failed_count)
+    last_failed_at = row.get("last_failed_at")
+    if delay <= 0 or last_failed_at is None:
+        return 0
+    remaining = math.ceil((last_failed_at.timestamp() + delay) - time.time())
+    return max(0, remaining)
+
+
+async def record_login_attempt(conn, email: str, success: bool, client_ip: Optional[str] = None) -> None:
+    """Record login attempt outcome and prune old rows for this account."""
+    email_norm = email.strip().lower()
+    await conn.execute(
+        """
+        INSERT INTO auth_login_attempts (email, success, client_ip)
+        VALUES ($1, $2, $3)
+        """,
+        email_norm,
+        bool(success),
+        (client_ip or "").strip() or None,
+    )
+    # Keep table size bounded for each account.
+    await conn.execute(
+        """
+        DELETE FROM auth_login_attempts
+        WHERE email = $1
+          AND attempted_at < NOW() - INTERVAL '30 days'
+        """,
+        email_norm,
+    )
 
 
 async def update_password(conn, user_id: str, new_password: str) -> None:

@@ -203,7 +203,7 @@ Both internal routes use a FastAPI dependency that enforces:
   - Client sends it via header **`X-Internal-Screening-Key`** or **`Authorization: Bearer <key>`**.
   - If the env var is set, the provided value must match; otherwise **401** (invalid or missing API key).
 - **IP allowlist** (optional): from environment **`INTERNAL_SCREENING_IP_ALLOWLIST`** (comma-separated list of IPs).
-  - Client IP is taken from **`X-Forwarded-For`** (first value) or, if absent, **`request.client.host`**.
+  - Client IP is taken from **`X-Forwarded-For`** (first value) only when the direct client IP is in **`TRUSTED_PROXY_IPS`**; otherwise `request.client.host` is used to prevent header spoofing.
   - If the env var is set, the client IP must be in the list; otherwise **403** (client IP not allowed).
 
 If **both** API key and IP allowlist are set, **both** must pass. If **neither** is set, the internal API is treated as disabled and returns **503** with a message that no API key or IP allowlist is configured.
@@ -246,6 +246,7 @@ Routes are registered with:
 |---------------------|--------|
 | `INTERNAL_SCREENING_API_KEY` | Static secret; client sends via `X-Internal-Screening-Key` or `Authorization: Bearer <key>`. At least one of this or IP allowlist must be set. |
 | `INTERNAL_SCREENING_IP_ALLOWLIST` | Comma-separated allowed client IPs (e.g. `10.0.0.1,192.168.1.100`). |
+| `TRUSTED_PROXY_IPS` | Comma-separated direct proxy IPs that are allowed to supply `X-Forwarded-For` (default `127.0.0.1,::1`). |
 
 ---
 

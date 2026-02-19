@@ -84,9 +84,28 @@ _JWT_SECRET = os.environ.get("GUI_JWT_SECRET", "").strip() or os.environ.get("SE
 _DEV_DEFAULT_SECRETS = frozenset({"", "change-me-in-production", "dev", "secret", "test"})
 
 
+def _is_dev_mode() -> bool:
+    """Best-effort environment check for local/dev/test usage."""
+    env = (
+        os.environ.get("APP_ENV")
+        or os.environ.get("ENVIRONMENT")
+        or os.environ.get("PYTHON_ENV")
+        or os.environ.get("FASTAPI_ENV")
+        or ""
+    ).strip().lower()
+    return env in ("dev", "development", "local", "test", "testing")
+
+
 def _validate_jwt_secret() -> None:
     """When DB is enabled, require a strong JWT secret; otherwise fail closed. Set ALLOW_WEAK_JWT_SECRET=true for local dev only."""
-    if os.environ.get("ALLOW_WEAK_JWT_SECRET", "").strip().lower() in ("1", "true", "yes"):
+    allow_weak = os.environ.get("ALLOW_WEAK_JWT_SECRET", "").strip().lower() in ("1", "true", "yes")
+    if allow_weak and not _is_dev_mode():
+        raise RuntimeError(
+            "ALLOW_WEAK_JWT_SECRET is enabled but environment is not marked as dev/test. "
+            "Disable ALLOW_WEAK_JWT_SECRET for staging/production."
+        )
+    if allow_weak and _is_dev_mode():
+        logger.warning("ALLOW_WEAK_JWT_SECRET enabled in dev/test mode")
         return
     raw = (os.environ.get("GUI_JWT_SECRET") or os.environ.get("SECRET_KEY") or "").strip()
     if not raw or len(raw) < 32:
@@ -151,7 +170,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0", lifespan=lifespan)
-limiter = Limiter(key_func=_rate_limit_key)
+_RATE_LIMIT_STORAGE_URL = os.environ.get("RATE_LIMIT_STORAGE_URL", "").strip()
+if _RATE_LIMIT_STORAGE_URL:
+    limiter = Limiter(key_func=_rate_limit_key, storage_uri=_RATE_LIMIT_STORAGE_URL)
+    logger.info("rate limiting: using shared backend")
+else:
+    limiter = Limiter(key_func=_rate_limit_key)
+    logger.warning("rate limiting: using in-memory backend (single-process only)")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -398,7 +423,23 @@ async def auth_login(request: Request, data: LoginRequest):
     email = data.username.strip().lower()
     client_ip = _client_ip(request)
     async with pool.acquire() as conn:
+        remaining = await auth_db.get_login_backoff_remaining_seconds(conn, email)
+        if remaining > 0:
+            audit_log(
+                "auth",
+                action="login",
+                actor=email,
+                outcome="failure",
+                ip=client_ip,
+                extra={"reason": "account_backoff", "retry_after_seconds": remaining},
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"detail": f"Too many failed login attempts. Try again in {remaining} seconds."},
+                headers={"Retry-After": str(remaining)},
+            )
         user = await auth_db.verify_user(conn, email, data.password)
+        await auth_db.record_login_attempt(conn, email, success=(user is not None), client_ip=client_ip)
     if user is None:
         audit_log("auth", action="login", actor=email, outcome="failure", ip=client_ip)
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -881,6 +922,7 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
 
 
 @app.post("/internal/screening/jobs", dependencies=[Depends(require_internal_screening_auth)])
+@limiter.limit("120/minute")
 async def internal_screening_jobs(data: InternalScreeningRequest):
     """
     Enqueue a single screening request. Does NOT run screening; never returns screening results.
@@ -902,6 +944,7 @@ async def internal_screening_jobs(data: InternalScreeningRequest):
 
 
 @app.post("/internal/screening/jobs/bulk", dependencies=[Depends(require_internal_screening_auth)])
+@limiter.limit("20/minute")
 async def internal_screening_jobs_bulk(body: InternalScreeningBulkRequest):
     """
     Enqueue multiple screening requests. Does NOT run screening; never returns screening results.

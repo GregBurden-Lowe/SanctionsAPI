@@ -43,7 +43,7 @@ function UsersIcon() {
 }
 
 export function AppShell() {
-  const { user, logout } = useAuth()
+  const { user, logout, loginRequired } = useAuth()
   return (
     <div className={appShellClass}>
       <aside className={sidebarClass}>
@@ -55,9 +55,11 @@ export function AppShell() {
           <NavItem to="/search" icon={<SearchIcon />}>
             Search database
           </NavItem>
-          <NavItem to="/admin" icon={<SettingsIcon />}>
-            Admin
-          </NavItem>
+          {(!loginRequired || user?.is_admin) && (
+            <NavItem to="/admin" icon={<SettingsIcon />}>
+              Admin
+            </NavItem>
+          )}
           {user?.is_admin && (
             <NavItem to="/admin/users" icon={<UsersIcon />}>
               Users

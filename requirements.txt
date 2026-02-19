@@ -19,6 +19,7 @@ pyarrow>=18.0.0
 
 # Rate limiting
 slowapi>=0.1.9
+redis>=5.0
 
 # GUI authentication (JWT + password hashing)
 PyJWT>=2.8

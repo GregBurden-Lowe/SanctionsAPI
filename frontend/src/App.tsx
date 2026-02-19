@@ -23,6 +23,20 @@ function ChangePasswordGate() {
   return <ChangePasswordPage />
 }
 
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { checked, loginRequired, token, user } = useAuth()
+  if (!checked) {
+    return (
+      <div className="min-h-screen bg-app flex items-center justify-center">
+        <p className="text-text-secondary">Loading…</p>
+      </div>
+    )
+  }
+  if (loginRequired && !token) return <Navigate to="/login" replace />
+  if (loginRequired && !user?.is_admin) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -40,8 +54,22 @@ export default function App() {
           >
             <Route index element={<ScreeningPage />} />
             <Route path="search" element={<SearchDatabasePage />} />
-            <Route path="admin" element={<AdminPage />} />
-            <Route path="admin/users" element={<UsersPage />} />
+            <Route
+              path="admin"
+              element={
+                <AdminRoute>
+                  <AdminPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="admin/users"
+              element={
+                <AdminRoute>
+                  <UsersPage />
+                </AdminRoute>
+              }
+            />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
