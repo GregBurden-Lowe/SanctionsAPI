@@ -458,18 +458,22 @@ def perform_opensanctions_check(
         best_row = df_subset.iloc[best_idx]
         return best_row, float(best_score)
 
-    # Try sanctions first
+    # Evaluate both lists; sanctions remains the controlling outcome when both match.
     s_row, s_score = best_match_from(sanc_df)
+    p_row, p_score = best_match_from(pep_df)
+
     if s_row is not None:
         dataset_label = as_safe_str(s_row.get("dataset")).strip()
         source_label = dataset_label or "OpenSanctions – Sanctions"
+        if p_row is not None:
+            source_label = f"{source_label}; Consolidated PEP list"
         result = {
             "Sanctions Name": s_row.get("name"),
             "Birth Date": parse_dob(s_row.get("birth_date")),
             "Regime": _derive_regime_like_row(s_row),
             "Position": s_row.get("positions"),
             "Topics": [],
-            "Is PEP": False,
+            "Is PEP": bool(p_row is not None),
             "Is Sanctioned": True,
             "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
             "Score": s_score,
@@ -485,8 +489,7 @@ def perform_opensanctions_check(
         _append_search_to_csv(name, result["Check Summary"])
         return result
 
-    # Otherwise, try PEPs
-    p_row, p_score = best_match_from(pep_df)
+    # No sanctions hit: return PEP outcome if matched.
     if p_row is not None:
         result = {
             "Sanctions Name": p_row.get("name"),
