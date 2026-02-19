@@ -1,3 +1,73 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  :root {
+    --color-background: 244 243 236;
+    --color-foreground: 23 16 14;
+    --color-card: 255 255 255;
+    --color-card-foreground: 23 16 14;
+    --color-popover: 255 255 255;
+    --color-popover-foreground: 23 16 14;
+    --color-primary: 255 86 0;
+    --color-primary-foreground: 255 255 255;
+    --color-secondary: 243 243 243;
+    --color-secondary-foreground: 23 16 14;
+    --color-accent: 0 12 225;
+    --color-accent-foreground: 255 255 255;
+    --color-muted: 243 243 243;
+    --color-muted-foreground: 106 100 98;
+    --color-destructive: 231 54 54;
+    --color-destructive-foreground: 255 255 255;
+    --color-border: 23 16 14;
+    --color-border-alpha: 0.1;
+    --color-input: 23 16 14;
+    --color-input-alpha: 0.1;
+    --color-ring: 0 12 225;
+    --color-chart-1: 255 86 0;
+    --color-chart-2: 0 12 225;
+    --color-chart-3: 0 218 0;
+    --color-chart-4: 244 243 236;
+    --color-chart-5: 23 16 14;
+  }
+
+  .dark {
+    --color-background: 23 16 14;
+    --color-foreground: 244 243 236;
+    --color-card: 8 14 28;
+    --color-card-foreground: 244 243 236;
+    --color-popover: 8 14 28;
+    --color-popover-foreground: 244 243 236;
+    --color-primary: 255 86 0;
+    --color-primary-foreground: 23 16 14;
+    --color-secondary: 58 52 50;
+    --color-secondary-foreground: 247 247 248;
+    --color-accent: 0 12 225;
+    --color-accent-foreground: 255 255 255;
+    --color-muted: 86 80 78;
+    --color-muted-foreground: 221 219 224;
+    --color-destructive: 231 54 54;
+    --color-destructive-foreground: 255 255 255;
+    --color-border: 255 255 255;
+    --color-border-alpha: 0.2;
+    --color-input: 255 255 255;
+    --color-input-alpha: 0.2;
+    --color-ring: 0 12 225;
+    --color-chart-1: 255 86 0;
+    --color-chart-2: 0 12 225;
+    --color-chart-3: 0 218 0;
+    --color-chart-4: 244 243 236;
+    --color-chart-5: 23 16 14;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-app text-text-primary font-sans antialiased;
+  }
+}
