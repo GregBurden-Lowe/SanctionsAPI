@@ -81,7 +81,7 @@ export function ScreeningPage() {
 
   return (
     <div className="px-10 pb-10">
-      <div className="max-w-2xl space-y-6">
+      <div className={`${result && !loading ? 'max-w-6xl' : 'max-w-2xl'} space-y-6`}>
         <SectionHeader title="Run check" />
         <Card>
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -243,6 +243,43 @@ export function ResultCard({
   const { list: sourceList, summaryLines: sourceSummaryLines } = parseSourceList(summary?.Source)
   const [showSourcesModal, setShowSourcesModal] = useState(false)
   const [pdfError, setPdfError] = useState<string | null>(null)
+  const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch)
+
+  const statusClasses =
+    semantic === 'success'
+      ? 'bg-semantic-success/15 text-semantic-success border-semantic-success/30'
+      : semantic === 'error'
+        ? 'bg-semantic-error/15 text-semantic-error border-semantic-error/30'
+        : semantic === 'warning'
+          ? 'bg-semantic-warning/15 text-semantic-warning border-semantic-warning/30'
+          : 'bg-semantic-info/15 text-semantic-info border-semantic-info/30'
+
+  const verificationRows = [
+    {
+      title: 'Sanctions status',
+      subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : 'No sanctions match detected',
+      badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',
+      tone: result['Is Sanctioned'] ? 'warn' : 'ok',
+    },
+    {
+      title: 'PEP status',
+      subtitle: result['Is PEP'] ? 'Politically Exposed Person indicator found' : 'No PEP indicator found',
+      badge: result['Is PEP'] ? 'Monitor' : 'Clear',
+      tone: result['Is PEP'] ? 'warn' : 'ok',
+    },
+    {
+      title: 'Confidence',
+      subtitle: `Engine confidence: ${result.Confidence}`,
+      badge: String(result.Score),
+      tone: 'neutral',
+    },
+    {
+      title: 'Source coverage',
+      subtitle: sourceSummaryLines.join(' · '),
+      badge: sourceList.length > 0 ? `${sourceList.length} source${sourceList.length > 1 ? 's' : ''}` : 'No sources',
+      tone: 'neutral',
+    },
+  ] as const
 
   const handleDownloadPdf = () => {
     setPdfError(null)
@@ -254,150 +291,193 @@ export function ResultCard({
   }
 
   return (
-    <Card>
-      <CardBody className="space-y-6">
-        {/* Decision outcome — typography and spacing for authority; subtle colour accent */}
-        <div className={`pl-4 border-l-2 ${borderAccent}`}>
-          <p className="text-xs font-medium text-text-muted uppercase tracking-wide">
-            Screening result
-          </p>
-          <p className="text-2xl font-semibold leading-snug text-text-primary mt-1">
-            {statusLabel}
-          </p>
-        </div>
-
-        {/* Guidance — decision context by result type */}
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-text-muted uppercase tracking-wide">
-            {guidance.heading}
-          </h3>
-          <p className={guidance.className}>{guidance.body}</p>
-        </div>
-
-        {/* Decision summary: risk, confidence, score, source */}
-        <div className="space-y-3">
-          <h3 className="text-xs font-medium text-text-muted uppercase tracking-wide">
-            Decision summary
-          </h3>
-          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
-            <div>
-              <dt className="text-xs font-medium text-text-muted">Risk level</dt>
-              <dd className="text-text-primary font-medium mt-0.5">{result['Risk Level']}</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-medium text-text-muted">Confidence</dt>
-              <dd className="text-text-primary mt-0.5">{result.Confidence}</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-medium text-text-muted">Score</dt>
-              <dd className="text-text-primary mt-0.5">{result.Score}</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-medium text-text-muted">Source</dt>
-              <dd className="text-text-primary mt-0.5 flex flex-col gap-0.5">
-                {sourceSummaryLines.map((line, i) => (
-                  <span key={i} className="text-sm text-text-primary">
-                    {line}
-                  </span>
-                ))}
-                {sourceList.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setShowSourcesModal(true)}
-                    className="text-xs font-medium text-text-primary underline hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-app rounded w-fit mt-0.5"
-                  >
-                    View sources
-                  </button>
-                )}
-              </dd>
-            </div>
-          </dl>
-          {summary?.Date && (
-            <p className="text-xs text-text-muted mt-3 pt-2 border-t border-border">
-              <span className="font-medium">Checked at</span> {summary.Date}
-            </p>
-          )}
-          {result.entity_key && (
-            <p className="text-xs text-text-muted mt-3 pt-2 border-t border-border flex items-center gap-2 flex-wrap">
-              <span className="font-medium">Reference</span>
-              <code className="text-text-primary font-mono text-xs bg-surface px-1.5 py-0.5 rounded break-all">
-                {result.entity_key}
-              </code>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-xs"
-                onClick={() => navigator.clipboard.writeText(result.entity_key!).then(() => { /* optional: toast */ })}
-              >
-                Copy
-              </Button>
-            </p>
-          )}
-          <div className="mt-4 pt-2 border-t border-border">
-            <Button type="button" variant="secondary" onClick={handleDownloadPdf}>
-              Download PDF
-            </Button>
-            {pdfError && (
-              <p className="text-xs text-semantic-error mt-2" role="alert">
-                {pdfError}
+    <div className="space-y-6">
+      <Card className="bg-surface/90">
+        <CardBody className="space-y-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className={`pl-4 border-l-2 ${borderAccent}`}>
+              <p className="text-xs font-medium text-text-muted uppercase tracking-wide">
+                Screening result
               </p>
-            )}
+              <p className="text-3xl font-semibold leading-tight text-text-primary mt-1">
+                {statusLabel}
+              </p>
+              <p className="text-sm text-text-secondary mt-2">{guidance.body}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <span className={`inline-flex items-center rounded-lg border px-3 py-1 text-xs font-semibold ${statusClasses}`}>
+                {result['Risk Level']}
+              </span>
+              <span className="inline-flex items-center rounded-lg border border-border bg-app px-3 py-1 text-xs font-medium text-text-secondary">
+                Confidence {result.Confidence}
+              </span>
+              <span className="inline-flex items-center rounded-lg border border-border bg-app px-3 py-1 text-xs font-medium text-text-secondary">
+                Score {result.Score}
+              </span>
+            </div>
           </div>
+        </CardBody>
+      </Card>
+
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+        <div className="xl:col-span-5 space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Decision summary</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-4 text-sm">
+              <dl className="space-y-3">
+                <div className="flex justify-between gap-4 border-b border-border pb-2">
+                  <dt className="text-text-muted">Risk level</dt>
+                  <dd className="text-text-primary font-medium">{result['Risk Level']}</dd>
+                </div>
+                <div className="flex justify-between gap-4 border-b border-border pb-2">
+                  <dt className="text-text-muted">Confidence</dt>
+                  <dd className="text-text-primary">{result.Confidence}</dd>
+                </div>
+                <div className="flex justify-between gap-4 border-b border-border pb-2">
+                  <dt className="text-text-muted">Score</dt>
+                  <dd className="text-text-primary">{result.Score}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-text-muted">Source summary</dt>
+                  <dd className="text-right text-text-primary">{sourceSummaryLines.join(' · ')}</dd>
+                </div>
+              </dl>
+              {summary?.Date && (
+                <p className="text-xs text-text-muted pt-2 border-t border-border">
+                  <span className="font-medium">Checked at</span> {summary.Date}
+                </p>
+              )}
+              {result.entity_key && (
+                <p className="text-xs text-text-muted pt-2 border-t border-border flex items-center gap-2 flex-wrap">
+                  <span className="font-medium">Reference</span>
+                  <code className="text-text-primary font-mono text-xs bg-app px-1.5 py-0.5 rounded break-all">
+                    {result.entity_key}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs"
+                    onClick={() => navigator.clipboard.writeText(result.entity_key!).then(() => {})}
+                  >
+                    Copy
+                  </Button>
+                </p>
+              )}
+            </CardBody>
+          </Card>
+
+          {result['Match Found'] && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Matched subject</CardTitle>
+              </CardHeader>
+              <CardBody>
+                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                  {result['Sanctions Name'] && (
+                    <div className="sm:col-span-2">
+                      <dt className="text-xs font-medium text-text-muted">Name</dt>
+                      <dd className="text-text-primary mt-0.5">{result['Sanctions Name']}</dd>
+                    </div>
+                  )}
+                  {result.Regime && (
+                    <div>
+                      <dt className="text-xs font-medium text-text-muted">Regime</dt>
+                      <dd className="text-text-secondary mt-0.5">{result.Regime}</dd>
+                    </div>
+                  )}
+                  {result['Birth Date'] && (
+                    <div>
+                      <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
+                      <dd className="text-text-secondary mt-0.5">{result['Birth Date']}</dd>
+                    </div>
+                  )}
+                </dl>
+              </CardBody>
+            </Card>
+          )}
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Actions</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="secondary" onClick={handleDownloadPdf}>
+                  Download PDF
+                </Button>
+                {sourceList.length > 0 && (
+                  <Button type="button" variant="ghost" onClick={() => setShowSourcesModal(true)}>
+                    View sources
+                  </Button>
+                )}
+              </div>
+              {pdfError && (
+                <p className="text-xs text-semantic-error" role="alert">
+                  {pdfError}
+                </p>
+              )}
+            </CardBody>
+          </Card>
         </div>
 
-        {/* Matched subject — only when a match was found */}
-        {result['Match Found'] && (
-          <div className="space-y-3 pt-2 border-t border-border">
-            <h3 className="text-xs font-medium text-text-muted uppercase tracking-wide">
-              Matched subject
-            </h3>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
-              {result['Sanctions Name'] && (
-                <div className="sm:col-span-2">
-                  <dt className="text-xs font-medium text-text-muted">Name</dt>
-                  <dd className="text-text-primary mt-0.5">{result['Sanctions Name']}</dd>
+        <div className="xl:col-span-7 space-y-6">
+          <Card>
+            <CardHeader className="items-center">
+              <CardTitle>Verification board</CardTitle>
+              <span className="text-xs rounded-md border border-border bg-app px-2 py-1 text-text-secondary">
+                {verificationRows.length} checks
+              </span>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              {verificationRows.map((row) => (
+                <div key={row.title} className="flex items-center justify-between gap-4 rounded-lg border border-border bg-app/70 px-3 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-text-primary truncate">{row.title}</p>
+                    <p className="text-xs text-text-secondary mt-0.5">{row.subtitle}</p>
+                  </div>
+                  <span
+                    className={`shrink-0 rounded-md px-2 py-1 text-xs font-semibold ${
+                      row.tone === 'ok'
+                        ? 'bg-semantic-success/15 text-semantic-success'
+                        : row.tone === 'warn'
+                          ? 'bg-semantic-warning/15 text-semantic-warning'
+                          : 'bg-surface text-text-secondary border border-border'
+                    }`}
+                  >
+                    {row.badge}
+                  </span>
                 </div>
-              )}
-              {result.Regime && (
-                <div>
-                  <dt className="text-xs font-medium text-text-muted">Regime</dt>
-                  <dd className="text-text-secondary mt-0.5">{result.Regime}</dd>
-                </div>
-              )}
-              {result['Birth Date'] && (
-                <div>
-                  <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
-                  <dd className="text-text-secondary mt-0.5">{result['Birth Date']}</dd>
-                </div>
-              )}
-            </dl>
-          </div>
-        )}
+              ))}
+            </CardBody>
+          </Card>
 
-        {/* Name similarity suggestions — advisory only */}
-        {hasTopMatches && (
-          <div className="pt-4 border-t border-border space-y-2">
-            <h3 className="text-xs font-medium text-text-muted uppercase tracking-wide">
-              Name similarity suggestions
-            </h3>
-            <p className="text-xs text-text-secondary leading-relaxed">
-              These names are similar to the search term for reference only. They do not affect the screening decision above.
-            </p>
-            <ul className="text-sm text-text-secondary space-y-1 mt-2">
-              {result['Top Matches'].map((m, i) => {
-                const { name: n, score: s } = formatTopMatch(m)
-                return (
-                  <li key={i} className="flex justify-between gap-4">
-                    <span>{n}</span>
-                    {s != null && <span className="text-text-muted shrink-0">{s}</span>}
-                  </li>
-                )
-              })}
-            </ul>
-          </div>
-        )}
-      </CardBody>
+          {hasTopMatches && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Name similarity suggestions</CardTitle>
+              </CardHeader>
+              <CardBody className="space-y-3">
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  Similar names shown for investigator context. They do not change the decision outcome.
+                </p>
+                <div className="space-y-2">
+                  {topMatches.map((item, i) => (
+                    <div key={`${item.name}-${i}`} className="flex items-center justify-between gap-4 rounded-lg border border-border bg-app/70 px-3 py-2">
+                      <span className="text-sm text-text-primary">{item.name}</span>
+                      <span className="text-xs text-text-secondary rounded-md bg-surface border border-border px-2 py-1">
+                        Score {item.score}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </CardBody>
+            </Card>
+          )}
+        </div>
+      </div>
 
       <Modal
         isOpen={showSourcesModal}
@@ -418,6 +498,6 @@ export function ResultCard({
           ))}
         </ul>
       </Modal>
-    </Card>
+    </div>
   )
 }

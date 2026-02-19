@@ -7,7 +7,7 @@ FastAPI backend for OpenSanctions/PEP screening with an optional Vite + React fr
 | Path | Contents |
 |------|----------|
 | **/** | Backend entrypoints (`api_server.py`, `screening_worker.py`), core modules (`utils.py`, `screening_db.py`), schema (`schema.sql`), Docker & config |
-| **[docs/](docs/)** | Architecture and API docs (persistence, internal screening API) |
+| **[docs/](docs/)** | Architecture and API docs (persistence, internal screening API, Nginx hardening) |
 | **[frontend/](frontend/)** | Vite + React UI (screening, admin, design tokens) |
 | **[tests/](tests/)** | API contract tests |
 
@@ -241,6 +241,7 @@ You need a **PostgreSQL database** (for screening cache, job queue, and GUI user
    }
    ```
    Then enable SSL (e.g. `certbot --nginx`) and reload Nginx.
+   For internet-facing hardening (bot path blocking, edge rate limits, real IP headers), see `/docs/NGINX_HARDENING.md`.
 6. After first boot: open the app, sign in (default user), change password if required, then **Admin** → **Refresh OpenSanctions data**.
 
 The container listens on `0.0.0.0` and uses the `PORT` env (default 8000), so it works with platform-assigned ports on App Platform.
