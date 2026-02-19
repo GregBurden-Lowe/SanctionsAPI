@@ -732,6 +732,34 @@ async def auth_import_users(request: Request, body: ImportUsersRequest, payload:
     return {"created": created, "skipped": skipped, "errors": errors}
 
 
+@app.post("/admin/testing/clear-screening-data", dependencies=[Depends(require_admin)])
+async def admin_clear_screening_data(request: Request, payload: dict = Depends(require_admin)):
+    """
+    Testing utility (admin only): clear screening cache + job queue data.
+    Does NOT touch users/auth tables.
+    """
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    async with pool.acquire() as conn:
+        entities_before = await conn.fetchval("SELECT COUNT(*)::int FROM screened_entities")
+        jobs_before = await conn.fetchval("SELECT COUNT(*)::int FROM screening_jobs")
+        await conn.execute("TRUNCATE TABLE screening_jobs, screened_entities")
+    audit_log(
+        "admin",
+        action="clear_screening_data",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"screened_entities_removed": int(entities_before or 0), "screening_jobs_removed": int(jobs_before or 0)},
+    )
+    return {
+        "status": "ok",
+        "screened_entities_removed": int(entities_before or 0),
+        "screening_jobs_removed": int(jobs_before or 0),
+    }
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
@@ -743,6 +771,7 @@ async def auth_import_users(request: Request, body: ImportUsersRequest, payload:
 @app.options("/auth/users")
 @app.options("/auth/users/import")
 @app.options("/auth/users/{user_id}")
+@app.options("/admin/testing/clear-screening-data")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():

@@ -52,6 +52,13 @@ export async function refreshOpensanctions(include_peps: boolean): Promise<Respo
   })
 }
 
+export async function clearScreeningData(): Promise<Response> {
+  return fetch(resolve('/admin/testing/clear-screening-data'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+  })
+}
+
 export interface ApiUser {
   id: string
   email: string
