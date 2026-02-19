@@ -41,16 +41,16 @@ export async function opcheck(params: OpCheckParams): Promise<Response> {
       dob: params.dob ?? null,
       entity_type: params.entity_type ?? 'Person',
       requestor: params.requestor ?? null,
-      search_backend: params.search_backend ?? 'original',
+      search_backend: params.search_backend ?? 'postgres_beta',
     }),
   })
 }
 
-export async function refreshOpensanctions(include_peps: boolean): Promise<Response> {
+export async function refreshOpensanctions(include_peps: boolean, sync_postgres = true): Promise<Response> {
   return fetch(resolve('/refresh_opensanctions'), {
     method: 'POST',
     headers: defaultHeaders(),
-    body: JSON.stringify({ include_peps }),
+    body: JSON.stringify({ include_peps, sync_postgres }),
   })
 }
 

@@ -3,6 +3,8 @@
 import os
 import csv
 import time
+import json
+import hashlib
 from datetime import datetime
 from functools import lru_cache
 from typing import Optional, List, Tuple, Dict, Any
@@ -212,6 +214,128 @@ def refresh_opensanctions_data(include_peps: bool = True):
 
     # clear cache
     clear_osn_cache()
+
+
+def _parse_birth_date_for_db(raw_value: str) -> Optional[str]:
+    """Keep only strict YYYY-MM-DD dates; partial dates are stored as NULL."""
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    if ";" in value:
+        value = value.split(";", 1)[0].strip()
+    if len(value) == 10:
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+            return value
+        except ValueError:
+            return None
+    return None
+
+
+async def sync_watchlist_entities_postgres(
+    conn,
+    *,
+    sanctions_csv_path: str,
+    peps_csv_path: Optional[str],
+    include_peps: bool = True,
+    batch_size: int = 2000,
+) -> Dict[str, int]:
+    """
+    Rebuild watchlist_entities from latest OpenSanctions CSV files.
+    Expected table columns:
+      source_type, entity_id, entity_schema, name, name_norm, birth_date, dataset, regime, raw_json
+    """
+    exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
+    if not exists:
+        raise ValueError("watchlist_entities table is not available")
+
+    async def _ingest_csv(path: str, source_type: str) -> int:
+        if not path or not os.path.exists(path):
+            return 0
+        inserted = 0
+        batch: List[Tuple[Any, ...]] = []
+        sql = """
+            INSERT INTO watchlist_entities (
+                source_type,
+                entity_id,
+                entity_schema,
+                name,
+                name_norm,
+                birth_date,
+                dataset,
+                regime,
+                raw_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+        """
+        with open(path, mode="r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                dataset = _safe_str(row.get("dataset")).strip()
+                if source_type == "sanctions" and not _dataset_allowed(dataset):
+                    continue
+
+                name = _safe_str(row.get("name")).strip()
+                if not name:
+                    continue
+
+                entity_schema = _safe_str(row.get("schema")).strip() or "Person"
+                name_norm = _normalize_text(name)
+                if not name_norm:
+                    continue
+
+                birth_date = _parse_birth_date_for_db(_safe_str(row.get("birth_date")))
+                regime = (
+                    _safe_str(row.get("program_ids")).split(";", 1)[0].strip()
+                    or _safe_str(row.get("sanctions")).split(";", 1)[0].strip()
+                    or dataset
+                    or None
+                )
+                entity_id = _safe_str(row.get("id")).strip() or hashlib.sha1(
+                    f"{source_type}|{name_norm}|{dataset}|{birth_date or ''}".encode("utf-8")
+                ).hexdigest()
+
+                raw_json = json.dumps(
+                    {
+                        "aliases": _safe_str(row.get("aliases")),
+                        "program_ids": _safe_str(row.get("program_ids")),
+                        "sanctions": _safe_str(row.get("sanctions")),
+                        "dataset": dataset,
+                    },
+                    ensure_ascii=True,
+                )
+
+                batch.append(
+                    (
+                        source_type,
+                        entity_id,
+                        entity_schema,
+                        name,
+                        name_norm,
+                        birth_date,
+                        dataset or None,
+                        regime,
+                        raw_json,
+                    )
+                )
+
+                if len(batch) >= batch_size:
+                    await conn.executemany(sql, batch)
+                    inserted += len(batch)
+                    batch.clear()
+
+        if batch:
+            await conn.executemany(sql, batch)
+            inserted += len(batch)
+            batch.clear()
+        return inserted
+
+    async with conn.transaction():
+        await conn.execute("TRUNCATE TABLE watchlist_entities")
+        sanctions_count = await _ingest_csv(sanctions_csv_path, "sanctions")
+        peps_count = await _ingest_csv(peps_csv_path or "", "peps") if include_peps else 0
+
+    return {"sanctions": sanctions_count, "peps": peps_count}
 
 # =============================================================================
 # Loading & caching

@@ -68,11 +68,17 @@ export interface ScreenedEntity {
 
 export interface RefreshRequest {
   include_peps: boolean
+  sync_postgres?: boolean
 }
 
 export interface RefreshResponse {
   status: 'ok'
   include_peps: boolean
+  postgres_synced: boolean
+  postgres_rows: {
+    sanctions: number
+    peps: number
+  }
 }
 
 export interface RefreshErrorResponse {

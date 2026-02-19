@@ -166,7 +166,7 @@ VITE_API_BASE_URL=https://sanctions-check.co.uk
 
 - **GET /health** — Returns plain text `ok`.
 - **POST /opcheck** — Body: `{ name, dob?, entity_type?, requestor? }`. Validates `name` and `requestor`; returns result with keys: `Match Found`, `Risk Level`, `Confidence`, `Score`, `Top Matches`, `Check Summary`, `Is Sanctioned`, `Is PEP`, etc. Do not rename or restructure these fields.
-- **POST /refresh_opensanctions** — Body: `{ include_peps: boolean }`. Returns `{ status: "ok", include_peps }` or 500 with `{ status: "error", message }`.
+- **POST /refresh_opensanctions** — Body: `{ include_peps?: boolean, sync_postgres?: boolean }` (`sync_postgres` defaults to `true`). Returns `{ status: "ok", include_peps, postgres_synced, postgres_rows }` or 500 with `{ status: "error", message }`.
 
 ## Docker (recommended for production / DigitalOcean)
 
@@ -189,7 +189,16 @@ docker compose up -d
 # App: http://localhost:8000
 ```
 
-After first deploy, **load sanctions data** via the app: open the app → **Admin** → **Refresh OpenSanctions data** (or `POST /refresh_opensanctions` with `{"include_peps": true}`). The data is stored in the container volume.
+After first deploy, load sanctions/PEP data with:
+
+```bash
+curl -X POST https://your-domain/refresh_opensanctions \
+  -H "Content-Type: application/json" \
+  -H "X-Refresh-Opensanctions-Key: $REFRESH_OPENSANCTIONS_API_KEY" \
+  -d '{"include_peps":true}'
+```
+
+This refresh now also rebuilds `watchlist_entities` in PostgreSQL by default.
 
 ### Deploy on DigitalOcean
 
@@ -205,7 +214,7 @@ You need a **PostgreSQL database** (for screening cache, job queue, and GUI user
    - **GUI_JWT_SECRET** — A long random secret for signing login tokens (e.g. `openssl rand -hex 32`). Required in production.
 5. Deploy. After the first deploy:
    - Open the app URL → sign in with the default user (see [GUI authentication](#gui-authentication)) and change the password if prompted.
-   - Go to **Admin** → **Refresh OpenSanctions data** so screening has data (this can take a few minutes).
+   - Trigger `POST /refresh_opensanctions` once so screening tables are populated (this can take a few minutes).
 6. (Optional) Add your domain under **Settings** → **Domains** and point DNS to the app.
 
 **Option B: Droplet (or any VM)**
@@ -242,7 +251,7 @@ You need a **PostgreSQL database** (for screening cache, job queue, and GUI user
    ```
    Then enable SSL (e.g. `certbot --nginx`) and reload Nginx.
    For internet-facing hardening (bot path blocking, edge rate limits, real IP headers), see `/docs/NGINX_HARDENING.md`.
-6. After first boot: open the app, sign in (default user), change password if required, then **Admin** → **Refresh OpenSanctions data**.
+6. After first boot: open the app, sign in (default user), change password if required, then call `POST /refresh_opensanctions` once.
 
 The container listens on `0.0.0.0` and uses the `PORT` env (default 8000), so it works with platform-assigned ports on App Platform.
 
@@ -284,7 +293,23 @@ If you already have the API running (e.g. NSSM on a Droplet, or an older App Pla
 **4. After first boot**
 
 - Open the app (via your domain or the app URL). Sign in with the default user (see [GUI authentication](#gui-authentication)); change the password when prompted.
-- Go to **Admin** → **Refresh OpenSanctions data** (or `POST /refresh_opensanctions` with `{"include_peps": true}`) so screening has data. This can take a few minutes.
+- Call `POST /refresh_opensanctions` (with `{"include_peps": true}`) so screening has data. This can take a few minutes.
+
+### Nightly refresh cron (Droplet)
+
+Run this on the droplet host to refresh at 22:00 daily:
+
+```bash
+crontab -e
+```
+
+Add:
+
+```cron
+0 22 * * * /usr/bin/curl -sS -X POST https://sanctions-check.co.uk/refresh_opensanctions -H 'Content-Type: application/json' -H 'X-Refresh-Opensanctions-Key: YOUR_REFRESH_KEY' -d '{"include_peps":true}' >> /var/log/sanctions-refresh.log 2>&1
+```
+
+Tip: keep `REFRESH_OPENSANCTIONS_API_KEY` in your app environment and use that same value in the cron header.
 
 **5. Sanity check**
 

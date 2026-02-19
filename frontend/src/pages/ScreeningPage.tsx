@@ -40,7 +40,7 @@ export function ScreeningPage() {
   const [name, setName] = useState('')
   const [dob, setDob] = useState('')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>('Person')
-  const [searchBackend, setSearchBackend] = useState<'original' | 'postgres_beta'>('original')
+  const [searchBackend, setSearchBackend] = useState<'original' | 'postgres_beta'>('postgres_beta')
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -143,8 +143,8 @@ export function ScreeningPage() {
                 onChange={(e) => setSearchBackend(e.target.value as 'original' | 'postgres_beta')}
                 className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
               >
-                <option value="original">Original (Parquet)</option>
-                <option value="postgres_beta">Postgres (Beta)</option>
+                <option value="postgres_beta">Postgres (Default)</option>
+                <option value="original">Original (Parquet fallback)</option>
               </select>
               <p className="text-xs text-text-muted mt-1">
                 Beta runs against watchlist tables in PostgreSQL and bypasses cache/queue reuse.
@@ -210,7 +210,7 @@ function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) 
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Search backend</dt>
             <dd className="text-text-primary mt-0.5">
-              {searchDetails.searchBackend === 'postgres_beta' ? 'Postgres (Beta)' : 'Original (Parquet)'}
+              {searchDetails.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'}
             </dd>
           </div>
         </dl>

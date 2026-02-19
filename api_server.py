@@ -31,8 +31,10 @@ from utils import (
     perform_opensanctions_check,
     perform_postgres_watchlist_check,
     refresh_opensanctions_data,
+    sync_watchlist_entities_postgres,
     derive_entity_key,
     _normalize_text,
+    DATA_DIR,
 )
 import screening_db
 import auth_db
@@ -237,12 +239,16 @@ class OpCheckRequest(BaseModel):
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
-    search_backend: Optional[str] = Field("original", description="'original' (parquet) or 'postgres_beta'")
+    search_backend: Optional[str] = Field("postgres_beta", description="'postgres_beta' (default) or 'original' (parquet)")
 
 class RefreshRequest(BaseModel):
     include_peps: bool = Field(
         True,
-        description="Include consolidated PEPs in the parquet (uses additional memory)"
+        description="Include consolidated PEPs in refreshed data"
+    )
+    sync_postgres: bool = Field(
+        True,
+        description="When true (default), rebuild watchlist_entities in PostgreSQL from refreshed CSV data"
     )
 
 
@@ -823,7 +829,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob) or None
     entity_type = (data.entity_type or "Person")
     requestor = data.requestor.strip()
-    search_backend = (data.search_backend or "original").strip().lower()
+    search_backend = (data.search_backend or "postgres_beta").strip().lower()
     if search_backend not in ("original", "postgres_beta"):
         return JSONResponse(
             status_code=400,
@@ -1031,12 +1037,34 @@ async def internal_screening_jobs_bulk(request: Request, body: InternalScreening
 @limiter.limit("2/minute")
 async def refresh_opensanctions(request: Request, body: RefreshRequest):
     """
-    Download latest consolidated sanctions (and optionally PEPs), write to parquet.
+    Download latest consolidated sanctions (and optionally PEPs), write to parquet,
+    and (by default) rebuild PostgreSQL watchlist table from refreshed CSV data.
     Requires admin JWT or REFRESH_OPENSANCTIONS_API_KEY (header X-Refresh-Opensanctions-Key or Authorization: Bearer <key>).
     """
     try:
         refresh_opensanctions_data(include_peps=body.include_peps)
-        return {"status": "ok", "include_peps": body.include_peps}
+        postgres_synced = False
+        postgres_rows = {"sanctions": 0, "peps": 0}
+        if body.sync_postgres:
+            pool = await screening_db.get_pool()
+            if pool is None:
+                raise RuntimeError("DATABASE_URL is required for sync_postgres=true")
+            sanctions_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
+            peps_csv = os.path.join(DATA_DIR, "os_peps_latest.csv")
+            async with pool.acquire() as conn:
+                postgres_rows = await sync_watchlist_entities_postgres(
+                    conn,
+                    sanctions_csv_path=sanctions_csv,
+                    peps_csv_path=peps_csv,
+                    include_peps=body.include_peps,
+                )
+            postgres_synced = True
+        return {
+            "status": "ok",
+            "include_peps": body.include_peps,
+            "postgres_synced": postgres_synced,
+            "postgres_rows": postgres_rows,
+        }
     except Exception as e:
         logger.exception("Refresh OpenSanctions failed: %s", e)
         return JSONResponse(
