@@ -98,4 +98,6 @@ export interface ScreeningJob {
   started_at: string | null
   finished_at: string | null
   error_message: string | null
+  screening_status: string | null
+  screening_risk_level: string | null
 }

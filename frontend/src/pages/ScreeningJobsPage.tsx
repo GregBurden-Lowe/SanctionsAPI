@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, SectionHeader } from '@/components'
-import { listScreeningJobs } from '@/api/client'
-import type { ScreeningJob } from '@/types/api'
+import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, Modal, SectionHeader } from '@/components'
+import { listScreeningJobs, searchScreened } from '@/api/client'
+import type { ScreenedEntity, ScreeningJob } from '@/types/api'
+import { ResultCard } from '@/pages/ScreeningPage'
 
 function formatDate(value: string | null): string {
   if (!value) return '—'
@@ -24,6 +25,9 @@ export function ScreeningJobsPage() {
   const [status, setStatus] = useState<'all' | ScreeningJob['status']>('all')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [detailRow, setDetailRow] = useState<ScreenedEntity | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -51,6 +55,29 @@ export function ScreeningJobsPage() {
   useEffect(() => {
     void load()
   }, [status])
+
+  const openResult = async (row: ScreeningJob) => {
+    setDetailError(null)
+    setDetailLoading(true)
+    try {
+      const res = await searchScreened({ entity_key: row.entity_key, limit: 1 })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setDetailError((data as { detail?: string }).detail ?? 'Failed to load result.')
+        return
+      }
+      const first = ((data as { items?: ScreenedEntity[] }).items ?? [])[0]
+      if (!first) {
+        setDetailError('No stored screening result found for this job.')
+        return
+      }
+      setDetailRow(first)
+    } catch (e) {
+      setDetailError(e instanceof Error ? e.message : 'Failed to load result.')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
 
   return (
     <div className="px-10 pb-10">
@@ -91,8 +118,10 @@ export function ScreeningJobsPage() {
                     <th className="py-2 pr-4 font-medium text-text-primary">Requestor</th>
                     <th className="py-2 pr-4 font-medium text-text-primary">Started</th>
                     <th className="py-2 pr-4 font-medium text-text-primary">Finished</th>
+                    <th className="py-2 pr-4 font-medium text-text-primary">Outcome</th>
                     <th className="py-2 pr-4 font-medium text-text-primary">Entity key</th>
                     <th className="py-2 font-medium text-text-primary">Error</th>
+                    <th className="py-2 font-medium text-text-primary">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -105,15 +134,25 @@ export function ScreeningJobsPage() {
                       <td className="py-2 pr-4 text-text-muted">{row.requestor || '—'}</td>
                       <td className="py-2 pr-4 text-text-muted">{formatDate(row.started_at)}</td>
                       <td className="py-2 pr-4 text-text-muted">{formatDate(row.finished_at)}</td>
+                      <td className="py-2 pr-4 text-text-secondary">
+                        {row.screening_status ?? (row.status === 'completed' ? 'Completed' : '—')}
+                      </td>
                       <td className="py-2 pr-4">
                         <code className="text-xs bg-surface px-1 rounded break-all font-mono">{row.entity_key}</code>
                       </td>
                       <td className="py-2 text-text-muted">{row.error_message || '—'}</td>
+                      <td className="py-2">
+                        {row.status === 'completed' && (
+                          <Button type="button" variant="ghost" size="sm" onClick={() => void openResult(row)}>
+                            View result
+                          </Button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {!loading && items.length === 0 && (
                     <tr>
-                      <td className="py-3 text-text-secondary" colSpan={9}>No jobs found for this filter.</td>
+                      <td className="py-3 text-text-secondary" colSpan={11}>No jobs found for this filter.</td>
                     </tr>
                   )}
                 </tbody>
@@ -121,8 +160,36 @@ export function ScreeningJobsPage() {
             </div>
           </CardBody>
         </Card>
+        {detailError && <ErrorBox message={detailError} />}
+        {detailLoading && <p className="text-sm text-text-secondary">Loading screening result…</p>}
       </div>
+
+      <Modal
+        isOpen={detailRow !== null}
+        onClose={() => setDetailRow(null)}
+        title="Screening result"
+        size="wide"
+        footer={
+          detailRow ? (
+            <Button variant="secondary" onClick={() => setDetailRow(null)}>
+              Close
+            </Button>
+          ) : null
+        }
+      >
+        {detailRow && (
+          <ResultCard
+            result={{ ...detailRow.result_json, entity_key: detailRow.entity_key }}
+            searchDetails={{
+              searchName: detailRow.display_name,
+              entityType: detailRow.entity_type,
+              searchDob: detailRow.date_of_birth ?? '',
+              requestor: detailRow.last_requestor ?? '',
+              searchBackend: 'postgres_beta',
+            }}
+          />
+        )}
+      </Modal>
     </div>
   )
 }
-

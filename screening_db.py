@@ -395,11 +395,25 @@ async def list_screening_jobs(
     idx_offset = len(args)
     rows = await conn.fetch(
         f"""
-        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor,
-               status, created_at, started_at, finished_at, error_message
-        FROM screening_jobs
+        SELECT
+            j.job_id,
+            j.entity_key,
+            j.name,
+            j.date_of_birth,
+            j.entity_type,
+            j.requestor,
+            j.status,
+            j.created_at,
+            j.started_at,
+            j.finished_at,
+            j.error_message,
+            s.status AS screening_status,
+            s.risk_level AS screening_risk_level
+        FROM screening_jobs j
+        LEFT JOIN screened_entities s
+          ON s.entity_key = j.entity_key
         {where}
-        ORDER BY created_at DESC
+        ORDER BY j.created_at DESC
         LIMIT ${idx_limit} OFFSET ${idx_offset}
         """,
         *args,
