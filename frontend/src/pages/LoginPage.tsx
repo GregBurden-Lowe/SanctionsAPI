@@ -59,13 +59,29 @@ export function LoginPage() {
 
   return (
     <div className={pageClass}>
-      <Card className="w-full max-w-sm">
-        {signupMode ? (
-          <>
-            <CardHeader>
-              <CardTitle>Sign up</CardTitle>
-            </CardHeader>
-            <CardBody>
+      <div className="w-full max-w-5xl rounded-3xl border border-border bg-surface shadow-xl overflow-hidden">
+        <div className="grid lg:grid-cols-[1.05fr_1fr]">
+          <div className="hidden lg:flex flex-col justify-between bg-[#0f1f2b] p-10 text-white">
+            <div>
+              <p className="text-xs uppercase tracking-[0.14em] text-white/60">Sanctions Intelligence</p>
+              <h1 className="mt-4 text-3xl font-semibold leading-tight">Corporate screening platform for analysts and compliance teams.</h1>
+              <p className="mt-5 text-sm text-white/75">
+                Real-time sanctions and PEP checks with auditable search history, risk flags, and controlled user access.
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/15 bg-white/10 p-4">
+              <p className="text-xs uppercase tracking-[0.12em] text-white/60">Environment</p>
+              <p className="mt-1 text-sm">Production Workspace</p>
+            </div>
+          </div>
+          <div className="p-6 lg:p-10">
+            <Card className="w-full border-none shadow-none bg-transparent p-0">
+              {signupMode ? (
+                <>
+                  <CardHeader>
+                    <CardTitle>Sign up</CardTitle>
+                  </CardHeader>
+                  <CardBody>
               {signupSuccess ? (
                 <div className="space-y-4">
                   <p className="text-sm text-semantic-success font-medium">
@@ -110,14 +126,14 @@ export function LoginPage() {
                   </form>
                 </>
               )}
-            </CardBody>
-          </>
-        ) : (
-          <>
-            <CardHeader>
-              <CardTitle>Sign in</CardTitle>
-            </CardHeader>
-            <CardBody>
+                  </CardBody>
+                </>
+              ) : (
+                <>
+                  <CardHeader>
+                    <CardTitle>Sign in</CardTitle>
+                  </CardHeader>
+                  <CardBody>
               <p className="text-sm text-text-secondary mb-4">
                 Sign in to use Sanctions &amp; PEP Screening.
               </p>
@@ -150,10 +166,13 @@ export function LoginPage() {
                   Sign up
                 </button>
               </form>
-            </CardBody>
-          </>
-        )}
-      </Card>
+                  </CardBody>
+                </>
+              )}
+            </Card>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

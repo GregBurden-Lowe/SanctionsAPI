@@ -5,9 +5,9 @@ import { useAuth } from '@/context/AuthContext'
 /** layout.containers.AppShell + Sidebar + Main from design.json */
 const appShellClass = 'min-h-screen bg-app text-text-primary'
 const sidebarClass =
-  'fixed inset-y-0 left-0 w-64 bg-surface border-r border-border px-6 py-6 flex flex-col gap-6 overflow-y-auto'
-const mainClass = 'ml-64 min-h-screen flex flex-col'
-const topBarClass = 'h-16 px-10 flex items-center justify-between gap-6 bg-app'
+  'fixed inset-y-0 left-0 w-72 bg-[#0f1f2b] text-white border-r border-white/10 px-6 py-6 flex flex-col gap-6 overflow-y-auto shadow-lg'
+const mainClass = 'ml-72 min-h-screen flex flex-col'
+const topBarClass = 'h-20 px-10 flex items-center justify-between gap-6'
 
 function HomeIcon() {
   return (
@@ -42,30 +42,25 @@ function UsersIcon() {
   )
 }
 
-function LayoutIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 5h16M4 12h16M4 19h16" />
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 5v14M10 5v14M16 5v14M20 5v14" />
-    </svg>
-  )
-}
-
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
   return (
     <div className={appShellClass}>
       <aside className={sidebarClass}>
-        <div className="text-sm font-semibold text-text-primary">Sanctions Screening</div>
+        <div>
+          <div className="text-[11px] tracking-[0.14em] uppercase text-white/50">Platform</div>
+          <div className="text-base font-semibold text-white mt-1">Sanctions Intelligence</div>
+        </div>
+        <div className="rounded-xl bg-white/10 border border-white/10 px-3 py-2">
+          <div className="text-[11px] uppercase tracking-[0.12em] text-white/60">Environment</div>
+          <div className="text-sm text-white mt-1">Production Workspace</div>
+        </div>
         <nav className="flex flex-col gap-1" aria-label="Primary">
           <NavItem to="/" icon={<HomeIcon />}>
             Screening
           </NavItem>
           <NavItem to="/search" icon={<SearchIcon />}>
             Search database
-          </NavItem>
-          <NavItem to="/mockups" icon={<LayoutIcon />}>
-            UI mockups
           </NavItem>
           {(!loginRequired || user?.is_admin) && (
             <NavItem to="/admin" icon={<SettingsIcon />}>
@@ -81,9 +76,14 @@ export function AppShell() {
       </aside>
       <main className={mainClass}>
         <header className={topBarClass}>
-          <h1 className="text-xl font-semibold text-text-primary">Sanctions & PEP Screening</h1>
+          <div>
+            <p className="text-xs uppercase tracking-[0.14em] text-text-muted">Analyst Console</p>
+            <h1 className="text-2xl font-semibold text-text-primary">Sanctions & PEP Screening</h1>
+          </div>
           <div className="flex items-center gap-4">
-            <span className="text-sm text-text-secondary">{user?.username}</span>
+            <span className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-text-secondary">
+              {user?.username}
+            </span>
             <Button variant="ghost" size="sm" onClick={logout}>
               Sign out
             </Button>

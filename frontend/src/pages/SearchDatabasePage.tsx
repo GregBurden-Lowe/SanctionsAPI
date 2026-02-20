@@ -66,8 +66,8 @@ export function SearchDatabasePage() {
 
   return (
     <div className="px-10 pb-10">
-      <div className="max-w-4xl space-y-6">
-        <SectionHeader title="Search database" />
+      <div className="max-w-6xl space-y-6">
+        <SectionHeader title="Search database" meta="Stored screening evidence" />
         <Card>
           <CardHeader>
             <CardTitle>Search screened entities</CardTitle>
@@ -106,7 +106,7 @@ export function SearchDatabasePage() {
               <div className="overflow-x-auto">
                 <table className="w-full text-sm text-left">
                   <thead>
-                    <tr className="border-b border-border">
+                    <tr className="border-b border-border/80">
                       <th className="py-2 pr-4 font-medium text-text-primary">Entity key</th>
                       <th className="py-2 pr-4 font-medium text-text-primary">Name</th>
                       <th className="py-2 pr-4 font-medium text-text-primary">Type</th>
@@ -119,7 +119,7 @@ export function SearchDatabasePage() {
                   </thead>
                   <tbody>
                     {items.map((row) => (
-                      <tr key={row.entity_key} className="border-b border-border">
+                      <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4">
                           <code className="text-xs bg-surface px-1 rounded break-all font-mono">
                             {row.entity_key}

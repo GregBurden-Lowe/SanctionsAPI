@@ -33,7 +33,17 @@ export function AdminPage() {
   return (
     <div className="px-10 pb-10">
       <div className="max-w-2xl space-y-6">
-        <SectionHeader title="Admin tools" />
+        <SectionHeader title="Admin tools" meta="Operational controls" />
+        <Card>
+          <CardHeader>
+            <CardTitle>Data refresh mode</CardTitle>
+          </CardHeader>
+          <CardBody>
+            <p className="text-sm text-text-secondary">
+              OpenSanctions refresh is now API/cron driven and syncs Postgres by default. Use your 22:00 droplet cron job to keep watchlist tables current.
+            </p>
+          </CardBody>
+        </Card>
         <Card>
           <CardHeader>
             <CardTitle>Testing tools</CardTitle>

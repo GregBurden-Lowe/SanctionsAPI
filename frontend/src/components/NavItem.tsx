@@ -2,8 +2,8 @@ import { type AnchorHTMLAttributes } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 
 const base =
-  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-text-secondary hover:bg-app hover:text-text-primary transition'
-const activeClass = 'bg-app text-text-primary'
+  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-white/75 hover:bg-white/10 hover:text-white transition'
+const activeClass = 'bg-white/14 text-white'
 
 export interface NavItemProps extends Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> {
   to: string

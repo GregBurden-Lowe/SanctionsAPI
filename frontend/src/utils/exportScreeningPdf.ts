@@ -54,9 +54,9 @@ function getGuidanceText(result: OpCheckResponse): string {
 }
 
 function statusTone(result: OpCheckResponse): string {
-  if (result['Is Sanctioned']) return '#ff5600'
-  if (result['Is PEP']) return '#000ce1'
-  return '#00a05a'
+  if (result['Is Sanctioned']) return '#ef4444'
+  if (result['Is PEP']) return '#0284c7'
+  return '#16a34a'
 }
 
 function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): string {
@@ -128,44 +128,44 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     </div>
   </div>
   <style>
-    * { box-sizing: border-box; font-family: Inter, system-ui, sans-serif; }
-    .page { width: 1400px; padding: 28px; background: #f4f3ec; color: #17100e; }
+    * { box-sizing: border-box; font-family: MediumLL, Inter, system-ui, sans-serif; }
+    .page { width: 1400px; padding: 28px; background: #eef3f7; color: #0f172a; }
     .hero {
       display: flex; justify-content: space-between; gap: 20px;
-      background: #ffffff; border: 1px solid rgba(23,16,14,.1); border-radius: 10px;
-      box-shadow: 0 4px 37px rgba(0,0,0,.05); padding: 20px;
+      background: #ffffff; border: 1px solid rgba(148,163,184,.3); border-radius: 14px;
+      box-shadow: 0 14px 50px rgba(2, 6, 23, .08); padding: 22px;
       border-left: 6px solid ${tone};
     }
-    .overline { font-size: 11px; letter-spacing: .08em; color: #6a6462; font-weight: 700; }
+    .overline { font-size: 11px; letter-spacing: .1em; color: #475569; font-weight: 700; }
     .headline { font-size: 34px; line-height: 1.1; font-weight: 700; margin-top: 4px; }
-    .sub { margin-top: 8px; font-size: 14px; color: #6a6462; max-width: 760px; }
+    .sub { margin-top: 8px; font-size: 14px; color: #475569; max-width: 760px; }
     .hero-right { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; justify-content: flex-end; }
-    .pill { font-size: 12px; padding: 8px 10px; border-radius: 8px; background: #f3f3f3; border: 1px solid rgba(23,16,14,.1); font-weight: 600; }
+    .pill { font-size: 12px; padding: 8px 10px; border-radius: 10px; background: #f1f5f9; border: 1px solid rgba(148,163,184,.35); font-weight: 600; }
     .pill.tone { background: ${tone}22; border-color: ${tone}66; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; margin-top: 16px; }
     .card {
-      background: #ffffff; border: 1px solid rgba(23,16,14,.1); border-radius: 10px;
-      box-shadow: 0 4px 37px rgba(0,0,0,.05); padding: 16px;
+      background: #ffffff; border: 1px solid rgba(148,163,184,.3); border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(2, 6, 23, .05); padding: 16px;
     }
     .card.span2 { grid-column: span 2; }
-    h3 { margin: 0 0 12px 0; font-size: 14px; letter-spacing: .04em; color: #6a6462; text-transform: uppercase; }
+    h3 { margin: 0 0 12px 0; font-size: 14px; letter-spacing: .08em; color: #475569; text-transform: uppercase; }
     .kv {
-      display: flex; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid rgba(23,16,14,.08);
+      display: flex; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid rgba(148,163,184,.25);
       font-size: 14px;
     }
     .kv:last-child { border-bottom: 0; }
-    .kv > span { color: #6a6462; }
-    .kv > b { color: #17100e; text-align: right; font-weight: 600; }
+    .kv > span { color: #475569; }
+    .kv > b { color: #0f172a; text-align: right; font-weight: 600; }
     .rows { display: grid; gap: 8px; }
     .row {
       display: flex; justify-content: space-between; gap: 12px; align-items: center;
-      border: 1px solid rgba(23,16,14,.08); border-radius: 8px; padding: 10px;
-      background: #f4f3ec;
+      border: 1px solid rgba(148,163,184,.28); border-radius: 10px; padding: 10px;
+      background: #f8fafc;
     }
-    .row-title { font-size: 14px; font-weight: 500; color: #17100e; }
-    .chip { font-size: 12px; color: #17100e; padding: 4px 8px; border: 1px solid rgba(23,16,14,.12); border-radius: 999px; background: #fff; }
-    .source-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: #17100e; font-size: 13px; }
-    .muted { color: #6a6462; font-size: 13px; }
+    .row-title { font-size: 14px; font-weight: 500; color: #0f172a; }
+    .chip { font-size: 12px; color: #0f172a; padding: 4px 8px; border: 1px solid rgba(148,163,184,.32); border-radius: 999px; background: #fff; }
+    .source-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: #0f172a; font-size: 13px; }
+    .muted { color: #475569; font-size: 13px; }
   </style>
   `
 }
@@ -195,7 +195,7 @@ export async function generateScreeningPdf(result: OpCheckResponse, search: Sear
 
   try {
     const canvas = await html2canvas(wrapper.firstElementChild as HTMLElement, {
-      backgroundColor: '#f4f3ec',
+      backgroundColor: '#eef3f7',
       scale: 2,
       useCORS: true,
       logging: false,

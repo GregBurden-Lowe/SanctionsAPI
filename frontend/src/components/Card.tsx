@@ -1,10 +1,10 @@
 import { type HTMLAttributes } from 'react'
 
-const base = 'rounded-card border border-border bg-surface shadow-card'
-const padding = 'p-4'
+const base = 'rounded-2xl border border-border bg-surface shadow-sm'
+const padding = 'p-5'
 const headerClass = 'flex items-start justify-between gap-3'
-const titleClass = 'text-sm font-semibold text-text-primary'
-const bodyClass = 'mt-2 text-xs text-text-secondary leading-relaxed'
+const titleClass = 'text-base font-semibold text-text-primary'
+const bodyClass = 'mt-3 text-sm text-text-secondary leading-relaxed'
 const footerClass = 'mt-4 flex items-center justify-between text-xs text-text-muted'
 
 export interface CardProps extends HTMLAttributes<HTMLDivElement> {

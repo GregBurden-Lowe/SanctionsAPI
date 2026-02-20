@@ -7,7 +7,6 @@ import { LoginPage } from '@/pages/LoginPage'
 import { ChangePasswordPage } from '@/pages/ChangePasswordPage'
 import { UsersPage } from '@/pages/UsersPage'
 import { SearchDatabasePage } from '@/pages/SearchDatabasePage'
-import { UiMockupsPage } from '@/pages/UiMockupsPage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -56,7 +55,6 @@ export default function App() {
             <Route index element={<ScreeningPage />} />
             <Route path="results" element={<ScreeningResultPage />} />
             <Route path="search" element={<SearchDatabasePage />} />
-            <Route path="mockups" element={<UiMockupsPage />} />
             <Route
               path="admin"
               element={

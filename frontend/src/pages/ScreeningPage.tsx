@@ -104,10 +104,13 @@ export function ScreeningPage() {
 
   return (
     <div className="px-10 pb-10">
-      <div className="max-w-2xl space-y-6">
-        <SectionHeader title="Run check" />
-        <Card>
-          <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="max-w-6xl space-y-6">
+        <SectionHeader title="Run check" meta="Analyst workflow" />
+        <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
+          <Card>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="md:col-span-2">
             <Input
               label="Name or organization"
               value={name}
@@ -115,6 +118,8 @@ export function ScreeningPage() {
               placeholder="e.g. John Smith or Acme Ltd"
               required
             />
+                </div>
+                <div>
             <div>
               <label htmlFor="entity_type" className="block text-xs font-medium text-text-primary mb-1">
                 Entity type
@@ -129,12 +134,16 @@ export function ScreeningPage() {
                 <option value="Organization">Organization</option>
               </select>
             </div>
+                </div>
+                <div>
             <Input
               label="Date of birth (optional)"
               value={dob}
               onChange={(e) => setDob(e.target.value)}
               placeholder="YYYY-MM-DD"
             />
+                </div>
+                <div className="md:col-span-2">
             <Input
               label="Your name (requestor)"
               value={requestor}
@@ -142,6 +151,8 @@ export function ScreeningPage() {
               placeholder="Who is running this check"
               required
             />
+                </div>
+                <div className="md:col-span-2">
             <div>
               <label htmlFor="search_backend" className="block text-xs font-medium text-text-primary mb-1">
                 Search backend
@@ -159,6 +170,8 @@ export function ScreeningPage() {
                 Beta runs against watchlist tables in PostgreSQL and bypasses cache/queue reuse.
               </p>
             </div>
+                </div>
+              </div>
             <Button type="submit" className="w-full mt-6" disabled={loading}>
               {loading ? 'Checking…' : 'Check'}
             </Button>
@@ -168,7 +181,32 @@ export function ScreeningPage() {
               <ErrorBox message={error} />
             </div>
           )}
-        </Card>
+          </Card>
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Review signals</CardTitle>
+              </CardHeader>
+              <CardBody>
+                <ul className="space-y-2 text-sm">
+                  <li>Sanctions match: immediate stop and escalate.</li>
+                  <li>PEP match: enhanced due diligence and monitoring.</li>
+                  <li>Both matched: treat sanctions as core risk entry.</li>
+                </ul>
+              </CardBody>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Data source</CardTitle>
+              </CardHeader>
+              <CardBody>
+                <p className="text-sm">
+                  Default backend is Postgres watchlist for faster lookups. Parquet is available as fallback.
+                </p>
+              </CardBody>
+            </Card>
+          </div>
+        </div>
 
         {loading && (
           <Card>
