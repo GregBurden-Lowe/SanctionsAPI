@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import {
   Button,
@@ -13,6 +13,7 @@ import {
   Skeleton,
 } from '@/components'
 import { opcheck } from '@/api/client'
+import { useAuth } from '@/context/AuthContext'
 import type { OpCheckResponse, ApiErrorResponse } from '@/types/api'
 import type { TopMatch } from '@/types/api'
 import { generateScreeningPdf } from '@/utils/exportScreeningPdf'
@@ -36,6 +37,7 @@ function formatTopMatch(m: TopMatch): { name: string; score: number } {
 }
 
 export function ScreeningPage() {
+  const { user } = useAuth()
   const navigate = useNavigate()
   const [name, setName] = useState('')
   const [dob, setDob] = useState('')
@@ -44,6 +46,13 @@ export function ScreeningPage() {
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const autoRequestor = (user?.email || user?.username || '').trim()
+    if (autoRequestor && !requestor.trim()) {
+      setRequestor(autoRequestor)
+    }
+  }, [user, requestor])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
