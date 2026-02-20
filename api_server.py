@@ -768,6 +768,40 @@ async def admin_clear_screening_data(request: Request, payload: dict = Depends(r
     }
 
 
+@app.post("/admin/screening/jobs/bulk", dependencies=[Depends(require_admin)])
+@limiter.limit("10/minute")
+async def admin_screening_jobs_bulk(request: Request, body: InternalScreeningBulkRequest, payload: dict = Depends(require_admin)):
+    """
+    Admin bulk enqueue endpoint for web UI CSV uploads.
+    Reuses internal queue logic; returns per-item statuses: reused | already_pending | queued.
+    """
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Screening queue requires DATABASE_URL",
+        )
+    results = []
+    async with pool.acquire() as conn:
+        for item in body.requests:
+            outcome = await _internal_screening_outcome(conn, item)
+            results.append(outcome)
+    counts = {"reused": 0, "already_pending": 0, "queued": 0, "error": 0}
+    for r in results:
+        s = r.get("status")
+        if s in counts:
+            counts[s] += 1
+    audit_log(
+        "admin",
+        action="bulk_screening_enqueue",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"total": len(results), **counts},
+    )
+    return {"results": results, "counts": counts}
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
@@ -780,6 +814,7 @@ async def admin_clear_screening_data(request: Request, payload: dict = Depends(r
 @app.options("/auth/users/import")
 @app.options("/auth/users/{user_id}")
 @app.options("/admin/testing/clear-screening-data")
+@app.options("/admin/screening/jobs/bulk")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():

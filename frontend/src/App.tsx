@@ -7,6 +7,7 @@ import { LoginPage } from '@/pages/LoginPage'
 import { ChangePasswordPage } from '@/pages/ChangePasswordPage'
 import { UsersPage } from '@/pages/UsersPage'
 import { SearchDatabasePage } from '@/pages/SearchDatabasePage'
+import { BulkScreeningPage } from '@/pages/BulkScreeningPage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -68,6 +69,14 @@ export default function App() {
               element={
                 <AdminRoute>
                   <UsersPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="admin/bulk-screening"
+              element={
+                <AdminRoute>
+                  <BulkScreeningPage />
                 </AdminRoute>
               }
             />

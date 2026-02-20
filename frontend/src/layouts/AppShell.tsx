@@ -42,6 +42,15 @@ function UsersIcon() {
   )
 }
 
+function UploadIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 16V4m0 0l-4 4m4-4l4 4" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+    </svg>
+  )
+}
+
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
   return (
@@ -62,6 +71,11 @@ export function AppShell() {
           {user?.is_admin && (
             <NavItem to="/admin/users" icon={<UsersIcon />}>
               Users
+            </NavItem>
+          )}
+          {user?.is_admin && (
+            <NavItem to="/admin/bulk-screening" icon={<UploadIcon />}>
+              Bulk screening
             </NavItem>
           )}
         </nav>

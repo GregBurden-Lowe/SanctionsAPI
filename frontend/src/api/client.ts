@@ -61,6 +61,21 @@ export async function clearScreeningData(): Promise<Response> {
   })
 }
 
+export interface BulkScreeningItem {
+  name: string
+  dob?: string | null
+  entity_type?: string
+  requestor: string
+}
+
+export async function enqueueBulkScreening(requests: BulkScreeningItem[]): Promise<Response> {
+  return fetch(resolve('/admin/screening/jobs/bulk'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ requests }),
+  })
+}
+
 export interface ApiUser {
   id: string
   email: string
