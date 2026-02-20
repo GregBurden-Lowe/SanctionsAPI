@@ -51,6 +51,15 @@ SANCTIONS_DATASET_ALLOWLIST = [
     "EU Council", "EU Financial Sanctions",    # EU lists
 ]
 
+_PERSON_NAME_PARTICLES = frozenset({
+    "al", "bin", "binti", "da", "de", "del", "della", "der", "di", "ibn", "la", "le", "st", "van", "von",
+})
+
+_ORG_SUFFIX_STOPWORDS = frozenset({
+    "the", "ltd", "limited", "llc", "inc", "corp", "co", "company", "plc", "sa", "ag", "gmbh", "bv",
+    "sarl", "pte", "pty", "holdings", "holding", "group",
+})
+
 # =============================================================================
 # Small helpers
 # =============================================================================
@@ -62,6 +71,37 @@ def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("utf-8")
     s = re.sub(r"[^\w\s]", "", s)
     return re.sub(r"\s+", " ", s).lower().strip()
+
+
+def _canonicalize_name_for_key(display_name: str, entity_type: str) -> str:
+    """
+    Canonicalize display name for stable entity identity keys.
+    Conservative rules:
+    - Person: drop common particles/initials and keep first+last-centric representation.
+    - Organization: drop generic legal suffixes.
+    """
+    norm = _normalize_text(display_name or "")
+    tokens = [t for t in norm.split() if t]
+    if not tokens:
+        return ""
+
+    et = (entity_type or "Person").strip().lower()
+    if et == "person":
+        filtered = [t for t in tokens if len(t) > 1 and t not in _PERSON_NAME_PARTICLES]
+        if not filtered:
+            filtered = tokens
+        if len(filtered) >= 3:
+            # Keep first + informative middle tokens + last to reduce collisions from token order/noise.
+            first = filtered[0]
+            last = filtered[-1]
+            middle = [t for t in filtered[1:-1] if len(t) > 2]
+            ordered = [first, *middle, last]
+        else:
+            ordered = filtered
+        return " ".join(dict.fromkeys(ordered))
+
+    filtered = [t for t in tokens if t not in _ORG_SUFFIX_STOPWORDS]
+    return " ".join(filtered) if filtered else norm
 
 def _safe_str(v) -> str:
     try:
@@ -421,7 +461,7 @@ def _normalize_dob(dob: Optional[str]) -> Optional[str]:
 def derive_entity_key(display_name: str, entity_type: str, dob: Optional[str]) -> str:
     """
     Stable key for one logical entity. Identity is based on:
-    - normalized name (Unicode-normalized, punctuation stripped, lowercased)
+    - canonicalized normalized name (to reduce duplicate logical searches)
     - entity type (Person / Organization)
     - DOB if provided (YYYY-MM-DD)
 
@@ -429,14 +469,33 @@ def derive_entity_key(display_name: str, entity_type: str, dob: Optional[str]) -
     Note: entities with only name (no DOB) may collide across different real-world persons;
     this is an accepted business trade-off for simplicity and deterministic reuse.
     """
-    import hashlib
-    norm_name = _normalize_text(display_name or "")
+    norm_name = _canonicalize_name_for_key(display_name or "", entity_type or "Person")
     et = (entity_type or "Person").strip().lower()
     dob_str = _normalize_dob(dob) if dob else ""
     payload = f"{norm_name}|{et}|{dob_str}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-def get_best_name_matches(search_name: str, candidates: List[str], limit=50, threshold=80):
+
+def derive_entity_key_variants(display_name: str, entity_type: str, dob: Optional[str]) -> List[str]:
+    """
+    Return preferred key first plus legacy key (if different) for backward-compatible cache reuse.
+    """
+    preferred = derive_entity_key(display_name, entity_type, dob)
+    legacy_payload = f"{_normalize_text(display_name or '')}|{(entity_type or 'Person').strip().lower()}|{_normalize_dob(dob) if dob else ''}"
+    legacy = hashlib.sha256(legacy_payload.encode("utf-8")).hexdigest()
+    if legacy == preferred:
+        return [preferred]
+    return [preferred, legacy]
+
+def get_best_name_matches(
+    search_name: str,
+    candidates: List[str],
+    limit: int = 50,
+    threshold: int = 80,
+    *,
+    has_dob: bool = False,
+    strict_short_queries: bool = True,
+):
     """Robust fuzzy match with simple heuristics."""
     def preprocess(name):
         name = _normalize_text(name)
@@ -450,12 +509,25 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
         return " ".join(tokens), set(tokens)
 
     s_clean, s_tokens = preprocess(search_name)
+    if not s_clean:
+        return []
+
+    effective_threshold = int(threshold)
+    if strict_short_queries and not has_dob:
+        # Hardening: short/no-DOB queries are more ambiguous, so require stronger similarity.
+        if len(s_tokens) <= 1:
+            effective_threshold = max(effective_threshold, 88)
+        elif len(s_tokens) == 2:
+            effective_threshold = max(effective_threshold, 82)
+
     clean_candidates = [(i, *preprocess(c)) for i, c in enumerate(candidates)]
     results = []
 
     for idx, c_clean, c_tokens in clean_candidates:
+        if not c_clean:
+            continue
         score = fuzz.token_set_ratio(s_clean, c_clean)
-        if score < threshold:
+        if score < effective_threshold:
             continue
         token_union = s_tokens | c_tokens
         overlap = len(s_tokens & c_tokens)
@@ -472,12 +544,14 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
             continue
         if len(s_tokens) > 2 and jaccard < 0.4:
             continue
+        if len(s_tokens) == 1 and len(c_tokens) > 5:
+            score -= 10
         if abs(len(s_tokens) - len(c_tokens)) > 2:
             score -= 15
         if len(c_tokens) <= 2 and len(s_tokens) > 3:
             score -= 20
 
-        if score >= threshold:
+        if score >= effective_threshold:
             results.append((c_clean, score, idx))
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
@@ -505,7 +579,14 @@ def _top_name_suggestions(
     if df_subset is None or df_subset.empty:
         return []
     candidates = df_subset["name"].fillna("").tolist()
-    hits = get_best_name_matches(search_name, candidates, limit=limit * 3, threshold=threshold)
+    hits = get_best_name_matches(
+        search_name,
+        candidates,
+        limit=limit * 3,
+        threshold=threshold,
+        has_dob=False,
+        strict_short_queries=False,
+    )
     # Deduplicate by display name, keep highest score, then take top 'limit'
     seen: Dict[str, float] = {}
     for cleaned_name, score, idx in hits:
@@ -585,7 +666,14 @@ def perform_opensanctions_check(
             return None, None
 
         candidates = df_subset["name"].fillna("").tolist()
-        matches = get_best_name_matches(norm_name, candidates, limit=top_limit, threshold=threshold)
+        matches = get_best_name_matches(
+            norm_name,
+            candidates,
+            limit=top_limit,
+            threshold=threshold,
+            has_dob=bool(norm_dob),
+            strict_short_queries=True,
+        )
         if not matches:
             return None, None
 
@@ -763,7 +851,14 @@ async def perform_postgres_watchlist_check(
         if not rows:
             return None, None
         candidates = [_as_safe_str(r.get("name")) for r in rows]
-        matches = get_best_name_matches(norm_name, candidates, limit=50, threshold=threshold)
+        matches = get_best_name_matches(
+            norm_name,
+            candidates,
+            limit=50,
+            threshold=threshold,
+            has_dob=bool(norm_dob),
+            strict_short_queries=True,
+        )
         if not matches:
             return None, None
         if norm_dob:
@@ -781,7 +876,14 @@ async def perform_postgres_watchlist_check(
     top_suggestions: List[Tuple[str, int]] = []
     candidate_names = [_as_safe_str(r.get("name")) for r in combined if _as_safe_str(r.get("name"))]
     if candidate_names:
-        hits = get_best_name_matches(norm_name, candidate_names, limit=15, threshold=60)
+        hits = get_best_name_matches(
+            norm_name,
+            candidate_names,
+            limit=15,
+            threshold=60,
+            has_dob=False,
+            strict_short_queries=False,
+        )
         seen: Dict[str, float] = {}
         for cleaned_name, score, idx in hits:
             display = candidate_names[idx] if idx < len(candidate_names) else cleaned_name

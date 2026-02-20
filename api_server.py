@@ -86,6 +86,7 @@ from utils import (
     refresh_opensanctions_data,
     sync_watchlist_entities_postgres,
     derive_entity_key,
+    derive_entity_key_variants,
     _normalize_text,
     DATA_DIR,
 )
@@ -977,13 +978,20 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
         # No DB: run check synchronously
         return _run_check_sync(data)
 
-    entity_key = derive_entity_key(display_name=name, entity_type=entity_type, dob=dob)
+    entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
+    entity_key = entity_key_candidates[0]
     async with pool.acquire() as conn:
-        cached = await screening_db.get_valid_screening(conn, entity_key)
+        cached = None
+        cached_key = entity_key
+        for key_candidate in entity_key_candidates:
+            cached = await screening_db.get_valid_screening(conn, key_candidate)
+            if cached is not None:
+                cached_key = key_candidate
+                break
         if cached is not None:
             # Reuse always first, regardless of load
-            logger.info("screening reused (valid) entity_key=%s", entity_key[:16])
-            return { **cached, "entity_key": entity_key }
+            logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
+            return { **cached, "entity_key": cached_key }
 
         # Queue pressure check: under threshold => sync; at or over => enqueue (graceful load protection)
         count = await screening_db.get_pending_running_count(conn)
@@ -1084,13 +1092,18 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
     dob = (item.dob.strip() if isinstance(item.dob, str) else item.dob) or None
     entity_type = (item.entity_type or "Person")
 
-    entity_key = derive_entity_key(display_name=name, entity_type=entity_type, dob=dob)
+    entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
+    entity_key = entity_key_candidates[0]
 
-    valid = await screening_db.get_valid_screening(conn, entity_key)
+    valid = None
+    for key_candidate in entity_key_candidates:
+        valid = await screening_db.get_valid_screening(conn, key_candidate)
+        if valid is not None:
+            break
     if valid is not None:
         return {"status": "reused"}
 
-    if await screening_db.has_pending_or_running_job(conn, entity_key):
+    if any([await screening_db.has_pending_or_running_job(conn, key_candidate) for key_candidate in entity_key_candidates]):
         return {"status": "already_pending"}
 
     job_id = await screening_db.enqueue_job(
