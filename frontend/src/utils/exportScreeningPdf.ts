@@ -53,7 +53,7 @@ function escapeHtml(input: string): string {
 
 function getGuidanceText(result: OpCheckResponse): string {
   if (result['Is Sanctioned']) {
-    return 'Potential sanctions match. Additional verification is required before proceeding.'
+    return 'Potential sanctions match. Stop and escalate for enhanced review before proceeding.'
   }
   if (result['Is PEP']) {
     return 'PEP indicator found. Continue with enhanced due diligence and record rationale.'
@@ -67,10 +67,20 @@ function statusTone(result: OpCheckResponse): string {
   return '#16a34a'
 }
 
+function verificationHash(input: string): string {
+  // Deterministic short fingerprint for document verification display.
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0').toUpperCase()
+}
+
 function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): string {
   const summary = result['Check Summary']
   const { list: sourceList, hasUK, otherCount, summaryLines } = parseSources(summary?.Source)
-  const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch).slice(0, 8)
+  const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch).slice(0, 5)
   const tone = statusTone(result)
   const checkedAt = summary?.Date || '—'
   const sourceSummary = `${hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No'}${otherCount > 0 ? ` · Other lists: ${otherCount}` : ''}`
@@ -78,6 +88,15 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const matchedDob = result['Birth Date'] || '—'
   const matchedRegime = result.Regime || '—'
   const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'
+  const docIdSeed = [
+    result.entity_key || '',
+    search.searchName || '',
+    search.requestor || '',
+    checkedAt || '',
+    String(result.Score ?? ''),
+  ].join('|')
+  const docId = `SCR-${verificationHash(docIdSeed)}-${verificationHash(`${docIdSeed}|A`)}`
+  const generatedUtc = new Date().toISOString()
   const verificationRows = [
     {
       title: 'Sanctions status',
@@ -119,7 +138,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     : `<div class="muted">No similarity suggestions.</div>`
 
   const sourceListHtml = sourceList.length
-    ? `<ul class="source-list">${sourceList.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`
+    ? `<ul class="source-list">${sourceList.slice(0, 6).map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`
     : `<div class="muted">No source list details provided.</div>`
 
   const verificationHtml = verificationRows
@@ -138,9 +157,19 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
 
   return `
   <div class="page">
+    <div class="watermark">SYSTEM GENERATED · AUDIT COPY · SYSTEM GENERATED · AUDIT COPY</div>
+
+    <div class="topline">
+      <div>
+        <div class="doc-overline">Compliance Screening Certificate</div>
+        <div class="doc-title">Sanctions &amp; PEP Screening Outcome</div>
+      </div>
+      <div class="meta-chip">Document ID ${escapeHtml(docId)}</div>
+    </div>
+
     <div class="hero">
       <div class="hero-left">
-        <div class="overline">SCREENING RESULT</div>
+        <div class="overline">RESULT STATUS</div>
         <div class="headline">${escapeHtml(summary?.Status || 'Unknown')}</div>
         <div class="sub">${escapeHtml(getGuidanceText(result))}</div>
       </div>
@@ -153,16 +182,16 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
 
     <div class="grid">
       <div class="card">
-        <h3>Original search details</h3>
+        <h3>Search Request</h3>
         <div class="kv"><span>Name or organization</span><b>${escapeHtml(search.searchName || '—')}</b></div>
         <div class="kv"><span>Entity type</span><b>${escapeHtml(search.entityType || '—')}</b></div>
         <div class="kv"><span>Date of birth</span><b>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</b></div>
-        <div class="kv"><span>Requestor</span><b>${escapeHtml(search.requestor || '—')}</b></div>
+        <div class="kv"><span>Requested by</span><b>${escapeHtml(search.requestor || '—')}</b></div>
         <div class="kv"><span>Search backend</span><b>${escapeHtml(backendLabel)}</b></div>
       </div>
 
       <div class="card">
-        <h3>Decision summary</h3>
+        <h3>Decision Summary</h3>
         <div class="kv"><span>Checked at</span><b>${escapeHtml(checkedAt)}</b></div>
         <div class="kv"><span>Source summary</span><b>${escapeHtml(sourceSummary || '—')}</b></div>
         <div class="kv"><span>Sanctioned</span><b>${result['Is Sanctioned'] ? 'Yes' : 'No'}</b></div>
@@ -170,36 +199,89 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       </div>
 
       <div class="card span2">
-        <h3>Verification board</h3>
+        <h3>Verification Board</h3>
         <div class="v-grid">${verificationHtml}</div>
       </div>
 
       <div class="card">
-        <h3>Matched subject</h3>
+        <h3>Matched Subject</h3>
         <div class="kv"><span>Name</span><b>${escapeHtml(matchedName)}</b></div>
         <div class="kv"><span>Date of birth</span><b>${escapeHtml(matchedDob)}</b></div>
         <div class="kv"><span>Regime</span><b>${escapeHtml(matchedRegime)}</b></div>
       </div>
 
       <div class="card span2">
-        <h3>Name similarity suggestions</h3>
+        <h3>Name Similarity Suggestions</h3>
         <div class="rows">${matchesHtml}</div>
       </div>
 
-      <div class="card span2">
+      <div class="card">
         <h3>Sources</h3>
         ${sourceListHtml}
+      </div>
+
+      <div class="card">
+        <h3>Audit Metadata</h3>
+        <div class="kv"><span>Document ID</span><b>${escapeHtml(docId)}</b></div>
+        <div class="kv"><span>Entity key reference</span><b>${escapeHtml(result.entity_key || 'Not available')}</b></div>
+        <div class="kv"><span>Generated (UTC)</span><b>${escapeHtml(generatedUtc)}</b></div>
       </div>
     </div>
   </div>
   <style>
     * { box-sizing: border-box; font-family: MediumLL, Inter, system-ui, sans-serif; }
-    .page { width: 1400px; padding: 28px; background: #eef3f7; color: #0f172a; }
+    .page {
+      width: 1400px;
+      padding: 24px;
+      background:
+        repeating-linear-gradient(135deg, rgba(2,132,199,.02), rgba(2,132,199,.02) 8px, rgba(14,165,233,.02) 8px, rgba(14,165,233,.02) 16px),
+        #eef3f7;
+      color: #0f172a;
+      position: relative;
+      overflow: hidden;
+    }
+    .watermark {
+      position: absolute;
+      top: 50%;
+      left: -120px;
+      transform: rotate(-26deg);
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      color: rgba(2, 132, 199, .06);
+      white-space: nowrap;
+      pointer-events: none;
+      user-select: none;
+    }
+    .topline {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 10px;
+      position: relative;
+      z-index: 2;
+    }
+    .doc-overline { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #475569; font-weight: 700; }
+    .doc-title { margin-top: 2px; font-size: 22px; font-weight: 700; color: #0f172a; }
+    .meta-chip {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: #0f172a;
+      border: 1px solid rgba(148,163,184,.35);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: #fff;
+      font-weight: 700;
+    }
     .hero {
       display: flex; justify-content: space-between; gap: 20px;
       background: #ffffff; border: 1px solid rgba(148,163,184,.3); border-radius: 14px;
       box-shadow: 0 14px 50px rgba(2, 6, 23, .08); padding: 22px;
       border-left: 6px solid ${tone};
+      position: relative;
+      z-index: 2;
     }
     .overline { font-size: 11px; letter-spacing: .1em; color: #475569; font-weight: 700; }
     .headline { font-size: 34px; line-height: 1.1; font-weight: 700; margin-top: 4px; }
@@ -207,21 +289,21 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     .hero-right { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; justify-content: flex-end; }
     .pill { font-size: 12px; padding: 8px 10px; border-radius: 10px; background: #f1f5f9; border: 1px solid rgba(148,163,184,.35); font-weight: 600; }
     .pill.tone { background: ${tone}22; border-color: ${tone}66; }
-    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; margin-top: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 12px; position: relative; z-index: 2; }
     .card {
       background: #ffffff; border: 1px solid rgba(148,163,184,.3); border-radius: 14px;
-      box-shadow: 0 10px 30px rgba(2, 6, 23, .05); padding: 16px;
+      box-shadow: 0 10px 30px rgba(2, 6, 23, .05); padding: 14px;
     }
     .card.span2 { grid-column: span 2; }
-    h3 { margin: 0 0 12px 0; font-size: 14px; letter-spacing: .08em; color: #475569; text-transform: uppercase; }
+    h3 { margin: 0 0 10px 0; font-size: 12px; letter-spacing: .1em; color: #475569; text-transform: uppercase; font-weight: 700; }
     .kv {
-      display: flex; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid rgba(148,163,184,.25);
-      font-size: 14px;
+      display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(148,163,184,.25);
+      font-size: 13px;
     }
     .kv:last-child { border-bottom: 0; }
     .kv > span { color: #475569; }
     .kv > b { color: #0f172a; text-align: right; font-weight: 600; }
-    .rows { display: grid; gap: 8px; }
+    .rows { display: grid; gap: 6px; }
     .v-grid { display: grid; gap: 8px; }
     .v-row {
       display: flex; justify-content: space-between; gap: 10px; align-items: center;
@@ -245,7 +327,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     }
     .row-title { font-size: 14px; font-weight: 500; color: #0f172a; }
     .chip { font-size: 12px; color: #0f172a; padding: 4px 8px; border: 1px solid rgba(148,163,184,.32); border-radius: 999px; background: #fff; }
-    .source-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: #0f172a; font-size: 13px; }
+    .source-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: #0f172a; font-size: 12px; }
     .muted { color: #475569; font-size: 13px; }
   </style>
   `
