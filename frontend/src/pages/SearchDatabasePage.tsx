@@ -30,6 +30,7 @@ export function SearchDatabasePage() {
   const [searchName, setSearchName] = useState('')
   const [searchEntityKey, setSearchEntityKey] = useState('')
   const [loading, setLoading] = useState(false)
+  const [hasSearched, setHasSearched] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [items, setItems] = useState<ScreenedEntity[]>([])
   const [detailRow, setDetailRow] = useState<ScreenedEntity | null>(null)
@@ -43,6 +44,7 @@ export function SearchDatabasePage() {
       setError('Provide at least one of name or entity key.')
       return
     }
+    setHasSearched(true)
     setLoading(true)
     try {
       const res = await searchScreened({
@@ -159,7 +161,7 @@ export function SearchDatabasePage() {
           </Card>
         )}
 
-        {!loading && items.length === 0 && (searchName.trim() || searchEntityKey.trim()) && (
+        {!loading && hasSearched && !error && items.length === 0 && (
           <p className="text-sm text-text-secondary">No screenings match your search.</p>
         )}
       </div>
