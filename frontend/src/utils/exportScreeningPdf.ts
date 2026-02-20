@@ -34,6 +34,23 @@ function parseSources(source: string | undefined): {
   return { list: items, hasUK, otherCount, summaryLines }
 }
 
+function sourceBadgeMeta(item: string): { label: string; cls: string } {
+  const lower = item.toLowerCase()
+  if (lower.includes('united nations') || lower === 'un' || lower.includes(' un ')) {
+    return { label: 'UN', cls: 'src-un' }
+  }
+  if (lower.includes('eu') || lower.includes('european union') || lower.includes('eu council')) {
+    return { label: 'EU', cls: 'src-eu' }
+  }
+  if (lower.includes('ofac') || lower.includes('u.s.') || lower.includes('us treasury')) {
+    return { label: 'OFAC', cls: 'src-ofac' }
+  }
+  if (lower.includes('hm treasury') || lower.includes('hmt') || lower.includes('ofsi') || lower.includes('uk')) {
+    return { label: 'HM Treasury', cls: 'src-hmt' }
+  }
+  return { label: item, cls: 'src-other' }
+}
+
 function formatTopMatch(m: TopMatch): { name: string; score: number } {
   if (Array.isArray(m) && m.length >= 2) return { name: m[0], score: m[1] }
   if (m && typeof m === 'object' && 'name' in m) {
@@ -87,6 +104,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const matchedDob = result['Birth Date'] || '—'
   const matchedRegime = result.Regime || '—'
   const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'
+  const hasMatchedSubject = Boolean(result['Match Found'] && (result['Sanctions Name'] || result.Regime || result['Birth Date']))
 
   const docIdSeed = [
     result.entity_key || '',
@@ -107,12 +125,15 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         .join('')
     : '<tr><td colspan="2" class="muted">No similarity suggestions.</td></tr>'
 
-  const sourceRows = sourceList.length
+  const sourceBadges = sourceList.length
     ? sourceList
-        .slice(0, 8)
-        .map((s, i) => `<tr><td class="n-col">${i + 1}</td><td>${escapeHtml(s)}</td></tr>`)
+        .slice(0, 12)
+        .map((s) => {
+          const meta = sourceBadgeMeta(s)
+          return `<span class="src-badge ${meta.cls}" title="${escapeHtml(s)}"><span class="dot"></span>${escapeHtml(meta.label)}</span>`
+        })
         .join('')
-    : '<tr><td colspan="2" class="muted">No source list details provided.</td></tr>'
+    : '<div class="muted">No source list details provided.</div>'
 
   return `
   <div class="page">
@@ -130,6 +151,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       <div class="summary-cell status" style="--tone:${tone}">
         <span class="label">Status</span>
         <strong>${escapeHtml(summary?.Status || 'Unknown')}</strong>
+        <div class="outcome">${escapeHtml(getGuidanceText(result))}</div>
       </div>
       <div class="summary-cell">
         <span class="label">Risk Level</span>
@@ -153,7 +175,6 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
           <tr><th>Entity Type</th><td>${escapeHtml(search.entityType || '—')}</td></tr>
           <tr><th>Date of Birth Input</th><td>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</td></tr>
           <tr><th>Requested By</th><td>${escapeHtml(search.requestor || '—')}</td></tr>
-          <tr><th>Search Backend</th><td>${escapeHtml(backendLabel)}</td></tr>
         </table>
       </section>
 
@@ -165,31 +186,31 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
           <tr><th>PEP Indicator</th><td>${result['Is PEP'] ? 'Yes' : 'No'}</td></tr>
           <tr><th>Source Summary</th><td>${escapeHtml(sourceSummary || '—')}</td></tr>
         </table>
-        <div class="recommend">${escapeHtml(getGuidanceText(result))}</div>
       </section>
 
       <section class="panel">
         <h2>Matched Subject</h2>
-        <table class="kv-table">
+        ${
+          hasMatchedSubject
+            ? `<table class="kv-table">
           <tr><th>Name</th><td>${escapeHtml(matchedName)}</td></tr>
           <tr><th>Date of Birth</th><td>${escapeHtml(matchedDob)}</td></tr>
           <tr><th>Regime</th><td>${escapeHtml(matchedRegime)}</td></tr>
-        </table>
+        </table>`
+            : '<div class="muted compact">No matched subject identified for this check.</div>'
+        }
       </section>
 
       <section class="panel">
+        <h2>Sources Reviewed</h2>
+        <div class="source-badges">${sourceBadges}</div>
+      </section>
+
+      <section class="panel span2">
         <h2>Name Similarity Suggestions</h2>
         <table class="data-table">
           <thead><tr><th>Candidate Name</th><th class="score-col">Score</th></tr></thead>
           <tbody>${topMatchRows}</tbody>
-        </table>
-      </section>
-
-      <section class="panel span2">
-        <h2>Sources Reviewed</h2>
-        <table class="data-table">
-          <thead><tr><th class="n-col">#</th><th>Source</th></tr></thead>
-          <tbody>${sourceRows}</tbody>
         </table>
       </section>
 
@@ -199,6 +220,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
           <tr><th>Document ID</th><td>${escapeHtml(docId)}</td></tr>
           <tr><th>Verification Fingerprint</th><td>${escapeHtml(docFingerprint)}</td></tr>
           <tr><th>Entity Key Reference</th><td>${escapeHtml(result.entity_key || 'Not available')}</td></tr>
+          <tr><th>Search Backend</th><td>${escapeHtml(backendLabel)}</td></tr>
           <tr><th>Generated (UTC)</th><td>${escapeHtml(generatedUtc)}</td></tr>
           <tr><th>Coverage Notes</th><td>${escapeHtml(summaryLines.join(' · '))}</td></tr>
         </table>
@@ -261,7 +283,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     .summary-band {
       margin-top: 10px;
       display: grid;
-      grid-template-columns: repeat(4, minmax(0,1fr));
+      grid-template-columns: 2fr 1fr 1fr 1fr;
       gap: 8px;
       position: relative;
       z-index: 2;
@@ -283,6 +305,14 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       font-weight: 700;
     }
     .summary-cell strong { font-size: 18px; line-height: 1.2; }
+    .summary-cell.status strong { font-size: 28px; line-height: 1.05; display: block; }
+    .outcome {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 1.35;
+      color: #334155;
+      font-weight: 600;
+    }
     .content {
       margin-top: 10px;
       display: grid;
@@ -325,18 +355,6 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     }
     .kv-table td { color: #0f172a; font-weight: 600; word-break: break-word; }
     .kv-table tr:last-child th, .kv-table tr:last-child td { border-bottom: 0; }
-    .recommend {
-      margin-top: 8px;
-      border: 1px solid rgba(148,163,184,.24);
-      border-left: 4px solid ${tone};
-      border-radius: 8px;
-      background: #f8fafc;
-      padding: 8px;
-      font-size: 12px;
-      line-height: 1.35;
-      font-weight: 600;
-      color: #1e293b;
-    }
     .data-table th, .data-table td {
       padding: 6px;
       border-bottom: 1px solid rgba(148,163,184,.24);
@@ -355,11 +373,39 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     .data-table tr:last-child td { border-bottom: 0; }
     .score-col { width: 70px; text-align: right; font-weight: 700; }
     .n-col { width: 34px; text-align: center; color: #64748b; font-weight: 700; }
+    .source-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+    .src-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      border: 1px solid rgba(148,163,184,.34);
+      background: #f8fafc;
+      color: #0f172a;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      padding: 5px 10px;
+      text-transform: uppercase;
+    }
+    .src-badge .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      display: inline-block;
+      background: #94a3b8;
+    }
+    .src-badge.src-un .dot { background: #06b6d4; }
+    .src-badge.src-eu .dot { background: #2563eb; }
+    .src-badge.src-ofac .dot { background: #dc2626; }
+    .src-badge.src-hmt .dot { background: #1d4ed8; }
+    .src-badge.src-other .dot { background: #64748b; }
     .muted { color: #64748b; font-style: italic; }
+    .muted.compact { padding: 4px 2px; font-size: 12px; }
     .audit td { font-family: DmMono, ui-monospace, monospace; font-size: 11px; font-weight: 600; }
     .footer-note {
       margin-top: 8px;
-      font-size: 10px;
+      font-size: 9px;
       color: #64748b;
       letter-spacing: .04em;
       text-transform: uppercase;
