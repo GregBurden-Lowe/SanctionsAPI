@@ -34,21 +34,37 @@ function parseSources(source: string | undefined): {
   return { list: items, hasUK, otherCount, summaryLines }
 }
 
-function sourceBadgeMeta(item: string): { label: string; cls: string } {
+function sourceBadgeMeta(item: string): { label: string; cls: string; mark: string } {
   const lower = item.toLowerCase()
   if (lower.includes('united nations') || lower === 'un' || lower.includes(' un ')) {
-    return { label: 'UN', cls: 'src-un' }
+    return { label: 'UN', cls: 'src-un', mark: 'UN' }
   }
   if (lower.includes('eu') || lower.includes('european union') || lower.includes('eu council')) {
-    return { label: 'EU', cls: 'src-eu' }
+    return { label: 'EU', cls: 'src-eu', mark: 'EU' }
   }
   if (lower.includes('ofac') || lower.includes('u.s.') || lower.includes('us treasury')) {
-    return { label: 'OFAC', cls: 'src-ofac' }
+    return { label: 'OFAC', cls: 'src-ofac', mark: 'US' }
   }
   if (lower.includes('hm treasury') || lower.includes('hmt') || lower.includes('ofsi') || lower.includes('uk')) {
-    return { label: 'HM Treasury', cls: 'src-hmt' }
+    return { label: 'HM Treasury', cls: 'src-hmt', mark: 'UK' }
   }
-  return { label: item, cls: 'src-other' }
+  return { label: item, cls: 'src-other', mark: '•' }
+}
+
+function expandSourceBadgesForDisplay(sourceList: string[]): string[] {
+  const cleaned = sourceList.map((s) => s.trim()).filter(Boolean)
+  if (cleaned.length === 0) return []
+  const defaults = ['United Nations', 'EU Council', 'OFAC', 'HM Treasury']
+  const isGeneric = (v: string): boolean =>
+    v === 'opensanctions' || v.includes('open sanctions') || v.includes('postgres watchlist')
+
+  const normalized = cleaned.map((s) => s.toLowerCase())
+  const hasGeneric = normalized.some(isGeneric)
+  if (!hasGeneric) return cleaned
+
+  const withoutGeneric = cleaned.filter((s) => !isGeneric(s.toLowerCase()))
+  const merged = [...defaults, ...withoutGeneric]
+  return [...new Set(merged)]
 }
 
 function formatTopMatch(m: TopMatch): { name: string; score: number } {
@@ -125,12 +141,13 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         .join('')
     : '<tr><td colspan="2" class="muted">No similarity suggestions.</td></tr>'
 
-  const sourceBadges = sourceList.length
-    ? sourceList
+  const sourceBadgeItems = expandSourceBadgesForDisplay(sourceList)
+  const sourceBadges = sourceBadgeItems.length
+    ? sourceBadgeItems
         .slice(0, 12)
         .map((s) => {
           const meta = sourceBadgeMeta(s)
-          return `<span class="src-badge ${meta.cls}" title="${escapeHtml(s)}"><span class="dot"></span>${escapeHtml(meta.label)}</span>`
+          return `<span class="src-badge ${meta.cls}" title="${escapeHtml(s)}"><span class="mark">${escapeHtml(meta.mark)}</span>${escapeHtml(meta.label)}</span>`
         })
         .join('')
     : '<div class="muted">No source list details provided.</div>'
@@ -388,18 +405,27 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       padding: 5px 10px;
       text-transform: uppercase;
     }
-    .src-badge .dot {
-      width: 8px;
-      height: 8px;
+    .src-badge .mark {
+      min-width: 18px;
+      height: 18px;
       border-radius: 999px;
-      display: inline-block;
-      background: #94a3b8;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: .03em;
+      border: 1px solid rgba(148,163,184,.45);
+      background: #e2e8f0;
+      color: #0f172a;
+      padding: 0 4px;
     }
-    .src-badge.src-un .dot { background: #06b6d4; }
-    .src-badge.src-eu .dot { background: #2563eb; }
-    .src-badge.src-ofac .dot { background: #dc2626; }
-    .src-badge.src-hmt .dot { background: #1d4ed8; }
-    .src-badge.src-other .dot { background: #64748b; }
+    .src-badge.src-un .mark { background: #d8f5fb; border-color: #67e8f9; color: #0c4a6e; }
+    .src-badge.src-eu .mark { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+    .src-badge.src-ofac .mark { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
+    .src-badge.src-hmt .mark { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+    .src-badge.src-other .mark { background: #e2e8f0; border-color: #cbd5e1; color: #475569; }
     .muted { color: #64748b; font-style: italic; }
     .muted.compact { padding: 4px 2px; font-size: 12px; }
     .audit td { font-family: DmMono, ui-monospace, monospace; font-size: 11px; font-weight: 600; }
