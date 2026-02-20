@@ -94,6 +94,14 @@ export async function listScreeningJobs(params: ListScreeningJobsParams = {}): P
   })
 }
 
+export async function markFalsePositive(entity_key: string, reason?: string): Promise<Response> {
+  return fetch(resolve('/admin/screening/false-positive'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ entity_key, reason: reason ?? null }),
+  })
+}
+
 export interface ApiUser {
   id: string
   email: string

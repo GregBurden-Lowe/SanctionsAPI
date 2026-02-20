@@ -10,9 +10,10 @@ import {
   ErrorBox,
   Modal,
 } from '@/components'
-import { searchScreened } from '@/api/client'
+import { markFalsePositive, searchScreened } from '@/api/client'
 import type { ScreenedEntity } from '@/types/api'
 import { ResultCard } from '@/pages/ScreeningPage'
+import { useAuth } from '@/context/AuthContext'
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -27,6 +28,7 @@ function formatDate(iso: string | null): string {
 }
 
 export function SearchDatabasePage() {
+  const { user } = useAuth()
   const [searchName, setSearchName] = useState('')
   const [searchEntityKey, setSearchEntityKey] = useState('')
   const [loading, setLoading] = useState(false)
@@ -34,6 +36,9 @@ export function SearchDatabasePage() {
   const [error, setError] = useState<string | null>(null)
   const [items, setItems] = useState<ScreenedEntity[]>([])
   const [detailRow, setDetailRow] = useState<ScreenedEntity | null>(null)
+  const [overrideLoading, setOverrideLoading] = useState(false)
+  const [overrideError, setOverrideError] = useState<string | null>(null)
+  const [overrideSuccess, setOverrideSuccess] = useState<string | null>(null)
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -63,6 +68,59 @@ export function SearchDatabasePage() {
       setItems([])
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleMarkFalsePositive = async () => {
+    if (!detailRow) return
+    const confirmed = window.confirm(
+      'Mark this screening result as a false positive and clear the sanction outcome?',
+    )
+    if (!confirmed) return
+    setOverrideLoading(true)
+    setOverrideError(null)
+    setOverrideSuccess(null)
+    try {
+      const res = await markFalsePositive(detailRow.entity_key)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setOverrideError((data as { detail?: string }).detail ?? 'Failed to clear false positive.')
+        return
+      }
+      const updatedResult = (data as { result?: ScreenedEntity['result_json'] }).result
+      if (updatedResult) {
+        setDetailRow((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: 'Cleared - False Positive',
+                risk_level: 'Cleared',
+                confidence: 'Manual Review',
+                score: 0,
+                result_json: updatedResult,
+              }
+            : prev,
+        )
+        setItems((prev) =>
+          prev.map((it) =>
+            it.entity_key === detailRow.entity_key
+              ? {
+                  ...it,
+                  status: 'Cleared - False Positive',
+                  risk_level: 'Cleared',
+                  confidence: 'Manual Review',
+                  score: 0,
+                  result_json: updatedResult,
+                }
+              : it,
+          ),
+        )
+      }
+      setOverrideSuccess('Marked as false positive and cleared.')
+    } catch (err) {
+      setOverrideError(err instanceof Error ? err.message : 'Failed to clear false positive.')
+    } finally {
+      setOverrideLoading(false)
     }
   }
 
@@ -173,14 +231,29 @@ export function SearchDatabasePage() {
         size="wide"
         footer={
           detailRow ? (
-            <Button variant="secondary" onClick={() => setDetailRow(null)}>
-              Close
-            </Button>
+            <div className="flex items-center gap-2">
+              {user?.is_admin && (
+                <Button
+                  variant="secondary"
+                  onClick={() => void handleMarkFalsePositive()}
+                  disabled={overrideLoading}
+                >
+                  {overrideLoading ? 'Clearing…' : 'Mark false positive'}
+                </Button>
+              )}
+              <Button variant="secondary" onClick={() => setDetailRow(null)}>
+                Close
+              </Button>
+            </div>
           ) : null
         }
       >
         {detailRow && (
           <div className="space-y-4">
+            {overrideError && <ErrorBox message={overrideError} />}
+            {overrideSuccess && (
+              <p className="text-sm text-semantic-success">{overrideSuccess}</p>
+            )}
             <p className="text-sm text-text-secondary">
               <span className="font-medium">Entity key</span>{' '}
               <code className="text-xs bg-surface px-1 rounded">{detailRow.entity_key}</code>

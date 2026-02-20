@@ -370,6 +370,97 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
     return out
 
 
+async def mark_false_positive(
+    conn,
+    *,
+    entity_key: str,
+    actor: str,
+    reason: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Mark an existing screening record as manually cleared (false positive).
+    Keeps an audit trail inside result_json["Manual Override"].
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT result_json
+        FROM screened_entities
+        WHERE entity_key = $1
+        """,
+        entity_key,
+    )
+    if row is None:
+        return None
+
+    rj = row["result_json"]
+    if isinstance(rj, str):
+        result = json.loads(rj)
+    elif isinstance(rj, dict):
+        result = dict(rj)
+    else:
+        result = dict(rj) if hasattr(rj, "items") else {}
+
+    previous_summary = dict(result.get("Check Summary") or {})
+    now = datetime.now(timezone.utc)
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    valid_until = now + timedelta(days=365)
+
+    result["Manual Override"] = {
+        "type": "false_positive_clear",
+        "actor": actor,
+        "reason": (reason or "").strip() or None,
+        "overridden_at": now.isoformat(),
+        "previous_status": previous_summary.get("Status"),
+        "previous_risk_level": result.get("Risk Level"),
+        "previous_score": result.get("Score"),
+        "previous_sanctions_name": result.get("Sanctions Name"),
+    }
+    result["Sanctions Name"] = None
+    result["Birth Date"] = None
+    result["Regime"] = None
+    result["Is Sanctioned"] = False
+    result["Is PEP"] = False
+    result["Match Found"] = False
+    result["Risk Level"] = "Cleared"
+    result["Confidence"] = "Manual Review"
+    result["Score"] = 0
+    result["Check Summary"] = {
+        "Status": "Cleared - False Positive",
+        "Source": f"{previous_summary.get('Source') or 'Manual Review'}; Manual override",
+        "Date": now_str,
+    }
+
+    await conn.execute(
+        """
+        UPDATE screened_entities
+        SET status = $2,
+            risk_level = $3,
+            confidence = $4,
+            score = $5,
+            uk_sanctions_flag = $6,
+            pep_flag = $7,
+            result_json = $8::jsonb,
+            last_requestor = $9,
+            last_screened_at = $10,
+            screening_valid_until = $11,
+            updated_at = $10
+        WHERE entity_key = $1
+        """,
+        entity_key,
+        "Cleared - False Positive",
+        "Cleared",
+        "Manual Review",
+        0.0,
+        False,
+        False,
+        json.dumps(result),
+        actor,
+        now,
+        valid_until,
+    )
+    return result
+
+
 async def list_screening_jobs(
     conn,
     *,

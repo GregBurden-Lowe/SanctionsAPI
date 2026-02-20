@@ -357,6 +357,11 @@ class SignupRequest(BaseModel):
     email: str = Field(..., description="User email (must be from an allowed domain); temp password is emailed via Resend")
 
 
+class FalsePositiveRequest(BaseModel):
+    entity_key: str = Field(..., description="Entity key to clear as false positive")
+    reason: Optional[str] = Field(None, description="Optional analyst/admin reason")
+
+
 # Internal queue-ingestion API: request body (no screening results returned).
 class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
@@ -905,6 +910,45 @@ async def admin_list_screening_jobs(
     return {"items": items}
 
 
+@app.post("/admin/screening/false-positive", dependencies=[Depends(require_admin)])
+@limiter.limit("30/minute")
+async def admin_mark_false_positive(
+    request: Request,
+    body: FalsePositiveRequest,
+    payload: dict = Depends(require_admin),
+):
+    """Admin action: clear a stored screening result as false positive (manual override)."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Search unavailable (configure DATABASE_URL)")
+    entity_key = (body.entity_key or "").strip()
+    if not entity_key:
+        raise HTTPException(status_code=400, detail="entity_key is required")
+    async with pool.acquire() as conn:
+        result = await screening_db.mark_false_positive(
+            conn,
+            entity_key=entity_key,
+            actor=payload.get("sub") or "admin",
+            reason=body.reason,
+        )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Screening record not found")
+    audit_log(
+        "admin",
+        action="mark_false_positive",
+        actor=payload.get("sub"),
+        resource=entity_key,
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"reason": (body.reason or "").strip() or None},
+    )
+    return {
+        "status": "ok",
+        "entity_key": entity_key,
+        "result": result,
+    }
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
@@ -919,6 +963,7 @@ async def admin_list_screening_jobs(
 @app.options("/admin/testing/clear-screening-data")
 @app.options("/admin/screening/jobs/bulk")
 @app.options("/admin/screening/jobs")
+@app.options("/admin/screening/false-positive")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():
