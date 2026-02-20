@@ -406,20 +406,21 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       text-transform: uppercase;
     }
     .src-badge .mark {
-      min-width: 18px;
+      width: 18px;
       height: 18px;
       border-radius: 999px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 9px;
+      display: inline-grid;
+      place-items: center;
+      text-align: center;
+      font-size: 8px;
       font-weight: 800;
-      line-height: 1;
+      line-height: 18px;
       letter-spacing: .03em;
       border: 1px solid rgba(148,163,184,.45);
       background: #e2e8f0;
       color: #0f172a;
-      padding: 0 4px;
+      padding: 0;
+      vertical-align: middle;
     }
     .src-badge.src-un .mark { background: #d8f5fb; border-color: #67e8f9; color: #0c4a6e; }
     .src-badge.src-eu .mark { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
