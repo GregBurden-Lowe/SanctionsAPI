@@ -18,5 +18,22 @@ services:
       - sanctions-data:/app/data
     restart: unless-stopped
 
+  worker:
+    build: .
+    command: ["python", "screening_worker.py"]
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SCREENING_WORKER_POLL_SECONDS=${SCREENING_WORKER_POLL_SECONDS:-5}
+      - SCREENING_JOBS_RETENTION_DAYS=${SCREENING_JOBS_RETENTION_DAYS:-7}
+      - SCREENED_ENTITIES_RETENTION_MONTHS=${SCREENED_ENTITIES_RETENTION_MONTHS:-0}
+      - SCREENING_CLEANUP_EVERY_N_LOOPS=${SCREENING_CLEANUP_EVERY_N_LOOPS:-50}
+    volumes:
+      - sanctions-data:/app/data
+    depends_on:
+      - app
+    restart: unless-stopped
+
 volumes:
   sanctions-data:
