@@ -170,6 +170,7 @@ export function SearchDatabasePage() {
         isOpen={detailRow !== null}
         onClose={() => setDetailRow(null)}
         title="Screening details"
+        size="wide"
         footer={
           detailRow ? (
             <Button variant="secondary" onClick={() => setDetailRow(null)}>
