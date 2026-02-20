@@ -236,7 +236,7 @@ app.add_middleware(
 # ---------------------------
 class OpCheckRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
-    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or null")
+    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
     search_backend: Optional[str] = Field("postgres_beta", description="'postgres_beta' (default) or 'original' (parquet)")
@@ -289,7 +289,7 @@ class SignupRequest(BaseModel):
 # Internal queue-ingestion API: request body (no screening results returned).
 class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
-    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD) or null")
+    dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     requestor: Optional[str] = Field(None, description="User/system requesting the screening")
 

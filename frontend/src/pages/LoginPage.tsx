@@ -63,15 +63,7 @@ export function LoginPage() {
         <div className="grid lg:grid-cols-[1.05fr_1fr]">
           <div className="hidden lg:flex flex-col justify-between bg-[#0f1f2b] p-10 text-white">
             <div>
-              <p className="text-xs uppercase tracking-[0.14em] text-white/60">Sanctions Intelligence</p>
-              <h1 className="mt-4 text-3xl font-semibold leading-tight">Corporate screening platform for analysts and compliance teams.</h1>
-              <p className="mt-5 text-sm text-white/75">
-                Real-time sanctions and PEP checks with auditable search history, risk flags, and controlled user access.
-              </p>
-            </div>
-            <div className="rounded-xl border border-white/15 bg-white/10 p-4">
-              <p className="text-xs uppercase tracking-[0.12em] text-white/60">Environment</p>
-              <p className="mt-1 text-sm">Production Workspace</p>
+              <h1 className="text-3xl font-semibold leading-tight">Sanctions &amp; PEP Screening</h1>
             </div>
           </div>
           <div className="p-6 lg:p-10">

@@ -5,6 +5,7 @@ import csv
 import time
 import json
 import hashlib
+import re
 from datetime import datetime, date
 from functools import lru_cache
 from typing import Optional, List, Tuple, Dict, Any
@@ -390,7 +391,26 @@ def _normalize_dob(dob: Optional[str]) -> Optional[str]:
     if not dob:
         return None
     try:
-        dt = pd.to_datetime(str(dob), errors="coerce")
+        raw = str(dob).strip()
+        if not raw:
+            return None
+
+        # Year-only support, e.g. "1984".
+        if re.fullmatch(r"\d{4}", raw):
+            return raw
+
+        # DD-MM-YYYY support (user-facing format).
+        if re.fullmatch(r"\d{2}-\d{2}-\d{4}", raw):
+            dt = datetime.strptime(raw, "%d-%m-%Y")
+            return dt.strftime("%Y-%m-%d")
+
+        # Existing canonical format.
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            dt = datetime.strptime(raw, "%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d")
+
+        # Final fallback for compatibility.
+        dt = pd.to_datetime(raw, errors="coerce", dayfirst=True)
         if pd.isna(dt):
             return None
         return dt.strftime("%Y-%m-%d")
@@ -462,6 +482,16 @@ def get_best_name_matches(search_name: str, candidates: List[str], limit=50, thr
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
 
+
+def _dob_matches(candidate_dob: Optional[str], query_dob: Optional[str]) -> bool:
+    if not query_dob:
+        return True
+    if not candidate_dob:
+        return False
+    if len(query_dob) == 4:
+        return candidate_dob == query_dob or candidate_dob.startswith(f"{query_dob}-")
+    return candidate_dob == query_dob
+
 def _top_name_suggestions(
     df_subset: pd.DataFrame,
     search_name: str,
@@ -514,12 +544,7 @@ def perform_opensanctions_check(
     # Precompute normalized search
     norm_name = _normalize_text(name)
     def _norm_dob(d):
-        try:
-            if not d:
-                return None
-            return pd.to_datetime(str(d), errors="coerce").strftime("%Y-%m-%d")
-        except Exception:
-            return None
+        return _normalize_dob(d)
     norm_dob = _norm_dob(dob)
 
     # Split by source type and build pool for suggestions
@@ -570,7 +595,7 @@ def perform_opensanctions_check(
             for _, score, idx in matches:
                 r = df_subset.iloc[idx]
                 cand_dob = parse_dob(r.get("birth_date"))
-                if cand_dob and cand_dob == norm_dob:
+                if _dob_matches(cand_dob, norm_dob):
                     dob_ok_matches.append((_, score, idx))
             if not dob_ok_matches:
                 return None, None
@@ -685,6 +710,7 @@ async def perform_postgres_watchlist_check(
               AND (
                 $3::text IS NULL
                 OR birth_date::text = $3::text
+                OR (char_length($3::text) = 4 AND birth_date::text LIKE ($3::text || '-%'))
                 OR birth_date IS NULL
               )
             ORDER BY similarity(name_norm, $2) DESC
@@ -744,7 +770,7 @@ async def perform_postgres_watchlist_check(
             dob_ok = []
             for _, score, idx in matches:
                 cand_dob = _parse_dob(rows[idx].get("birth_date"))
-                if cand_dob and cand_dob == norm_dob:
+                if _dob_matches(cand_dob, norm_dob):
                     dob_ok.append((_, score, idx))
             if not dob_ok:
                 return None, None
