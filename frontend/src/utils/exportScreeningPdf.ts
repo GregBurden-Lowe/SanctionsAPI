@@ -13,9 +13,14 @@ function isUKSource(item: string): boolean {
   return UK_PATTERNS.some((p) => lower.includes(p))
 }
 
-function parseSources(source: string | undefined): { list: string[]; hasUK: boolean; otherCount: number } {
+function parseSources(source: string | undefined): {
+  list: string[]
+  hasUK: boolean
+  otherCount: number
+  summaryLines: string[]
+} {
   const raw = (source ?? '').trim()
-  if (!raw) return { list: [], hasUK: false, otherCount: 0 }
+  if (!raw) return { list: [], hasUK: false, otherCount: 0, summaryLines: ['—'] }
   const list = raw
     .split(/[;,\n]+/)
     .map((s) => s.trim())
@@ -23,7 +28,10 @@ function parseSources(source: string | undefined): { list: string[]; hasUK: bool
   const items = list.length > 0 ? list : [raw]
   const hasUK = items.some(isUKSource)
   const otherCount = items.filter((i) => !isUKSource(i)).length
-  return { list: items, hasUK, otherCount }
+  const summaryLines: string[] = []
+  summaryLines.push(hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No')
+  if (otherCount > 0) summaryLines.push(`Other sanctions lists: ${otherCount}`)
+  return { list: items, hasUK, otherCount, summaryLines }
 }
 
 function formatTopMatch(m: TopMatch): { name: string; score: number } {
@@ -61,11 +69,41 @@ function statusTone(result: OpCheckResponse): string {
 
 function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): string {
   const summary = result['Check Summary']
-  const { list: sourceList, hasUK, otherCount } = parseSources(summary?.Source)
+  const { list: sourceList, hasUK, otherCount, summaryLines } = parseSources(summary?.Source)
   const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch).slice(0, 8)
   const tone = statusTone(result)
   const checkedAt = summary?.Date || '—'
   const sourceSummary = `${hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No'}${otherCount > 0 ? ` · Other lists: ${otherCount}` : ''}`
+  const matchedName = result['Sanctions Name'] || '—'
+  const matchedDob = result['Birth Date'] || '—'
+  const matchedRegime = result.Regime || '—'
+  const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'
+  const verificationRows = [
+    {
+      title: 'Sanctions status',
+      subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : 'No sanctions match detected',
+      badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',
+      toneClass: result['Is Sanctioned'] ? 'warn' : 'ok',
+    },
+    {
+      title: 'PEP status',
+      subtitle: result['Is PEP'] ? 'Politically Exposed Person indicator found' : 'No PEP indicator found',
+      badge: result['Is PEP'] ? 'Monitor' : 'Clear',
+      toneClass: result['Is PEP'] ? 'warn' : 'ok',
+    },
+    {
+      title: 'Confidence',
+      subtitle: `Engine confidence: ${result.Confidence}`,
+      badge: `${result.Score}`,
+      toneClass: 'neutral',
+    },
+    {
+      title: 'Source coverage',
+      subtitle: summaryLines.join(' · '),
+      badge: sourceList.length > 0 ? `${sourceList.length} source${sourceList.length > 1 ? 's' : ''}` : 'No sources',
+      toneClass: 'neutral',
+    },
+  ]
 
   const matchesHtml = topMatches.length
     ? topMatches
@@ -83,6 +121,20 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const sourceListHtml = sourceList.length
     ? `<ul class="source-list">${sourceList.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`
     : `<div class="muted">No source list details provided.</div>`
+
+  const verificationHtml = verificationRows
+    .map(
+      (row) => `
+      <div class="v-row">
+        <div class="v-copy">
+          <div class="v-title">${escapeHtml(row.title)}</div>
+          <div class="v-sub">${escapeHtml(row.subtitle)}</div>
+        </div>
+        <div class="v-badge ${row.toneClass}">${escapeHtml(row.badge)}</div>
+      </div>
+    `,
+    )
+    .join('')
 
   return `
   <div class="page">
@@ -106,6 +158,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         <div class="kv"><span>Entity type</span><b>${escapeHtml(search.entityType || '—')}</b></div>
         <div class="kv"><span>Date of birth</span><b>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</b></div>
         <div class="kv"><span>Requestor</span><b>${escapeHtml(search.requestor || '—')}</b></div>
+        <div class="kv"><span>Search backend</span><b>${escapeHtml(backendLabel)}</b></div>
       </div>
 
       <div class="card">
@@ -114,6 +167,18 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         <div class="kv"><span>Source summary</span><b>${escapeHtml(sourceSummary || '—')}</b></div>
         <div class="kv"><span>Sanctioned</span><b>${result['Is Sanctioned'] ? 'Yes' : 'No'}</b></div>
         <div class="kv"><span>PEP</span><b>${result['Is PEP'] ? 'Yes' : 'No'}</b></div>
+      </div>
+
+      <div class="card span2">
+        <h3>Verification board</h3>
+        <div class="v-grid">${verificationHtml}</div>
+      </div>
+
+      <div class="card">
+        <h3>Matched subject</h3>
+        <div class="kv"><span>Name</span><b>${escapeHtml(matchedName)}</b></div>
+        <div class="kv"><span>Date of birth</span><b>${escapeHtml(matchedDob)}</b></div>
+        <div class="kv"><span>Regime</span><b>${escapeHtml(matchedRegime)}</b></div>
       </div>
 
       <div class="card span2">
@@ -157,6 +222,22 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     .kv > span { color: #475569; }
     .kv > b { color: #0f172a; text-align: right; font-weight: 600; }
     .rows { display: grid; gap: 8px; }
+    .v-grid { display: grid; gap: 8px; }
+    .v-row {
+      display: flex; justify-content: space-between; gap: 10px; align-items: center;
+      border: 1px solid rgba(148,163,184,.28); border-radius: 10px; padding: 10px;
+      background: #f8fafc;
+    }
+    .v-copy { min-width: 0; }
+    .v-title { font-size: 14px; font-weight: 600; color: #0f172a; }
+    .v-sub { font-size: 12px; color: #475569; margin-top: 3px; }
+    .v-badge {
+      font-size: 12px; font-weight: 600; border-radius: 8px; padding: 4px 8px; border: 1px solid rgba(148,163,184,.32);
+      background: #fff; color: #334155; white-space: nowrap;
+    }
+    .v-badge.ok { background: rgba(22, 163, 74, .13); border-color: rgba(22, 163, 74, .28); color: #166534; }
+    .v-badge.warn { background: rgba(239, 68, 68, .13); border-color: rgba(239, 68, 68, .28); color: #991b1b; }
+    .v-badge.neutral { background: #fff; color: #334155; }
     .row {
       display: flex; justify-content: space-between; gap: 12px; align-items: center;
       border: 1px solid rgba(148,163,184,.28); border-radius: 10px; padding: 10px;
