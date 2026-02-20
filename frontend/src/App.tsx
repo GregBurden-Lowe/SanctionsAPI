@@ -8,6 +8,7 @@ import { ChangePasswordPage } from '@/pages/ChangePasswordPage'
 import { UsersPage } from '@/pages/UsersPage'
 import { SearchDatabasePage } from '@/pages/SearchDatabasePage'
 import { BulkScreeningPage } from '@/pages/BulkScreeningPage'
+import { ScreeningJobsPage } from '@/pages/ScreeningJobsPage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -77,6 +78,14 @@ export default function App() {
               element={
                 <AdminRoute>
                   <BulkScreeningPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="admin/jobs"
+              element={
+                <AdminRoute>
+                  <ScreeningJobsPage />
                 </AdminRoute>
               }
             />

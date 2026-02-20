@@ -85,3 +85,17 @@ export interface RefreshErrorResponse {
   status: 'error'
   message: string
 }
+
+export interface ScreeningJob {
+  job_id: string
+  entity_key: string
+  name: string
+  date_of_birth: string | null
+  entity_type: string
+  requestor: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  error_message: string | null
+}

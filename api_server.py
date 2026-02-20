@@ -873,6 +873,38 @@ async def admin_screening_jobs_bulk(request: Request, body: InternalScreeningBul
     return {"results": results, "counts": counts}
 
 
+@app.get("/admin/screening/jobs", dependencies=[Depends(require_admin)])
+@limiter.limit("60/minute")
+async def admin_list_screening_jobs(
+    request: Request,
+    payload: dict = Depends(require_admin),
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Admin queue monitor: list screening jobs with status and timestamps."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Screening queue requires DATABASE_URL")
+    status_norm = (status or "").strip().lower() or None
+    async with pool.acquire() as conn:
+        items = await screening_db.list_screening_jobs(
+            conn,
+            status=status_norm,
+            limit=limit,
+            offset=offset,
+        )
+    audit_log(
+        "admin",
+        action="screening_jobs_list",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"count": len(items), "status": status_norm or "all"},
+    )
+    return {"items": items}
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
@@ -886,6 +918,7 @@ async def admin_screening_jobs_bulk(request: Request, body: InternalScreeningBul
 @app.options("/auth/users/{user_id}")
 @app.options("/admin/testing/clear-screening-data")
 @app.options("/admin/screening/jobs/bulk")
+@app.options("/admin/screening/jobs")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():

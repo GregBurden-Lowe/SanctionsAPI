@@ -368,3 +368,47 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
             else:
                 out["result"] = dict(rj) if hasattr(rj, "items") else rj
     return out
+
+
+async def list_screening_jobs(
+    conn,
+    *,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """
+    List screening jobs for operational monitoring.
+    Sorted newest-first by created_at.
+    """
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    valid_status = {"pending", "running", "completed", "failed"}
+    where = ""
+    args: List[Any] = []
+    if status and status in valid_status:
+        where = "WHERE status = $1"
+        args.append(status)
+    args.extend([limit, offset])
+
+    idx_limit = len(args) - 1
+    idx_offset = len(args)
+    rows = await conn.fetch(
+        f"""
+        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor,
+               status, created_at, started_at, finished_at, error_message
+        FROM screening_jobs
+        {where}
+        ORDER BY created_at DESC
+        LIMIT ${idx_limit} OFFSET ${idx_offset}
+        """,
+        *args,
+    )
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        for key in ("created_at", "started_at", "finished_at"):
+            if d.get(key) is not None:
+                d[key] = d[key].isoformat()
+        out.append(_to_json_safe(d))
+    return out

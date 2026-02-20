@@ -76,6 +76,24 @@ export async function enqueueBulkScreening(requests: BulkScreeningItem[]): Promi
   })
 }
 
+export interface ListScreeningJobsParams {
+  status?: 'pending' | 'running' | 'completed' | 'failed'
+  limit?: number
+  offset?: number
+}
+
+export async function listScreeningJobs(params: ListScreeningJobsParams = {}): Promise<Response> {
+  const sp = new URLSearchParams()
+  if (params.status) sp.set('status', params.status)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return fetch(resolve(`/admin/screening/jobs${qs ? `?${qs}` : ''}`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
 export interface ApiUser {
   id: string
   email: string

@@ -51,6 +51,15 @@ function UploadIcon() {
   )
 }
 
+function QueueIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 6h13M8 12h13M8 18h13" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 6h.01M3 12h.01M3 18h.01" />
+    </svg>
+  )
+}
+
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
   return (
@@ -76,6 +85,11 @@ export function AppShell() {
           {user?.is_admin && (
             <NavItem to="/admin/bulk-screening" icon={<UploadIcon />}>
               Bulk screening
+            </NavItem>
+          )}
+          {user?.is_admin && (
+            <NavItem to="/admin/jobs" icon={<QueueIcon />}>
+              Screening jobs
             </NavItem>
           )}
         </nav>
