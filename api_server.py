@@ -1027,8 +1027,21 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                 status_code=503,
                 content={"error": "backend_unavailable", "message": "postgres_beta requires DATABASE_URL and watchlist tables."},
             )
-        entity_key = f"{derive_entity_key(display_name=name, entity_type=entity_type, dob=dob)}-pgb"
+        key_variants = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
+        entity_key_candidates = [f"{k}-pgb" for k in key_variants]
+        entity_key = entity_key_candidates[0]
         async with pool.acquire() as conn:
+            cached = None
+            cached_key = entity_key
+            for key_candidate in entity_key_candidates:
+                cached = await screening_db.get_valid_screening(conn, key_candidate)
+                if cached is not None:
+                    cached_key = key_candidate
+                    break
+            if cached is not None:
+                logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
+                return {**cached, "entity_key": cached_key}
+
             results = await perform_postgres_watchlist_check(
                 conn,
                 name=name,
