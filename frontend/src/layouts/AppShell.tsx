@@ -42,6 +42,15 @@ function UsersIcon() {
   )
 }
 
+function LayoutIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 5h16M4 12h16M4 19h16" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 5v14M10 5v14M16 5v14M20 5v14" />
+    </svg>
+  )
+}
+
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
   return (
@@ -54,6 +63,9 @@ export function AppShell() {
           </NavItem>
           <NavItem to="/search" icon={<SearchIcon />}>
             Search database
+          </NavItem>
+          <NavItem to="/mockups" icon={<LayoutIcon />}>
+            UI mockups
           </NavItem>
           {(!loginRequired || user?.is_admin) && (
             <NavItem to="/admin" icon={<SettingsIcon />}>
