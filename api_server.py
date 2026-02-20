@@ -843,6 +843,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                 status_code=503,
                 content={"error": "backend_unavailable", "message": "postgres_beta requires DATABASE_URL and watchlist tables."},
             )
+        entity_key = f"{derive_entity_key(display_name=name, entity_type=entity_type, dob=dob)}-pgb"
         async with pool.acquire() as conn:
             results = await perform_postgres_watchlist_check(
                 conn,
@@ -851,7 +852,21 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                 entity_type=entity_type,
                 requestor=requestor,
             )
-        return {**results, "entity_key": f"{derive_entity_key(display_name=name, entity_type=entity_type, dob=dob)}-pgb"}
+            # Persist beta checks so Search database can find them by returned entity_key.
+            try:
+                await screening_db.upsert_screening(
+                    conn,
+                    entity_key=entity_key,
+                    display_name=name,
+                    normalized_name=_normalize_text(name),
+                    date_of_birth=dob,
+                    entity_type=entity_type,
+                    requestor=requestor,
+                    result=results,
+                )
+            except Exception as e:
+                logger.warning("postgres_beta upsert failed entity_key=%s: %s", entity_key[:16], e)
+        return {**results, "entity_key": entity_key}
 
     if pool is None:
         # No DB: run check synchronously
