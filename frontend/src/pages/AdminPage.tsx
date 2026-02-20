@@ -1,11 +1,39 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, Card, CardHeader, CardTitle, CardBody, SectionHeader, ErrorBox } from '@/components'
-import { clearScreeningData } from '@/api/client'
+import { clearScreeningData, getRescreenSummary } from '@/api/client'
+import type { RefreshRunSummaryResponse } from '@/types/api'
 
 export function AdminPage() {
   const [clearing, setClearing] = useState(false)
   const [clearError, setClearError] = useState<string | null>(null)
   const [clearResponse, setClearResponse] = useState<{ status: string; screened_entities_removed: number; screening_jobs_removed: number } | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+  const [summary, setSummary] = useState<RefreshRunSummaryResponse | null>(null)
+
+  const loadSummary = async () => {
+    setSummaryLoading(true)
+    setSummaryError(null)
+    try {
+      const res = await getRescreenSummary(14)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setSummaryError((data as { detail?: string }).detail ?? 'Failed to load rescreen summary.')
+        setSummary(null)
+        return
+      }
+      setSummary(data as RefreshRunSummaryResponse)
+    } catch (err) {
+      setSummaryError(err instanceof Error ? err.message : 'Failed to load rescreen summary.')
+      setSummary(null)
+    } finally {
+      setSummaryLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadSummary()
+  }, [])
 
   const handleClearScreeningData = async () => {
     setClearError(null)
@@ -42,6 +70,47 @@ export function AdminPage() {
             <p className="text-sm text-text-secondary">
               OpenSanctions refresh is now API/cron driven and syncs Postgres by default. Use your 22:00 droplet cron job to keep watchlist tables current.
             </p>
+          </CardBody>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Daily re-screen summary</CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            <Button type="button" variant="secondary" onClick={loadSummary} disabled={summaryLoading}>
+              {summaryLoading ? 'Refreshing…' : 'Refresh summary'}
+            </Button>
+            {summaryError && <ErrorBox message={summaryError} />}
+            {summary?.latest && (
+              <div className="rounded-lg border border-border bg-app p-4">
+                <p className="text-xs font-medium text-text-muted mb-2">Latest refresh run</p>
+                <pre className="text-xs text-text-secondary overflow-x-auto whitespace-pre-wrap font-mono">
+                  {JSON.stringify(
+                    {
+                      ran_at: summary.latest.ran_at,
+                      uk_changed: summary.latest.uk_changed,
+                      delta: {
+                        added: summary.latest.delta_added,
+                        removed: summary.latest.delta_removed,
+                        changed: summary.latest.delta_changed,
+                      },
+                      rescreen: {
+                        candidate_count: summary.latest.candidate_count,
+                        queued_count: summary.latest.queued_count,
+                        already_pending_count: summary.latest.already_pending_count,
+                        failed_count: summary.latest.failed_count,
+                      },
+                      transitions: summary.latest_transitions,
+                    },
+                    null,
+                    2,
+                  )}
+                </pre>
+              </div>
+            )}
+            {!summaryLoading && !summary?.latest && !summaryError && (
+              <p className="text-sm text-text-secondary">No refresh runs recorded yet.</p>
+            )}
           </CardBody>
         </Card>
         <Card>

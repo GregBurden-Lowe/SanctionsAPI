@@ -8,7 +8,7 @@ import hashlib
 import re
 from datetime import datetime, date
 from functools import lru_cache
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Set
 
 import requests
 import pandas as pd
@@ -49,6 +49,15 @@ SANCTIONS_DATASET_ALLOWLIST = [
     "OFAC",                                    # US OFAC (SDN etc.)
     "HM Treasury", "HMT", "UK Financial",      # UK HMT/OFSI lists
     "EU Council", "EU Financial Sanctions",    # EU lists
+]
+
+# UK consolidated list indicators (for change detection and re-screen triggers)
+UK_DATASET_PATTERNS = [
+    "HM Treasury",
+    "HMT",
+    "OFSI",
+    "UK Financial",
+    "UK FCDO",
 ]
 
 _PERSON_NAME_PARTICLES = frozenset({
@@ -194,6 +203,123 @@ def _dataset_allowed(label: str) -> bool:
         if needle.lower() in L:
             return True
     return False
+
+
+def _dataset_is_uk(label: str) -> bool:
+    if not label:
+        return False
+    lower = label.lower()
+    return any(p.lower() in lower for p in UK_DATASET_PATTERNS)
+
+
+def _first_birth_date(raw_value: str) -> str:
+    """Return strict YYYY-MM-DD when available; else empty string."""
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    if ";" in value:
+        value = value.split(";", 1)[0].strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value
+    return ""
+
+
+def _build_uk_snapshot_entry(row: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    dataset = _safe_str(row.get("dataset")).strip()
+    if not _dataset_is_uk(dataset):
+        return None
+    name = _safe_str(row.get("name")).strip()
+    name_norm = _normalize_text(name)
+    if not name_norm:
+        return None
+    entity_id = _safe_str(row.get("id")).strip()
+    birth_date = _first_birth_date(_safe_str(row.get("birth_date")))
+    regime = (
+        _safe_str(row.get("program_ids")).split(";", 1)[0].strip()
+        or _safe_str(row.get("sanctions")).split(";", 1)[0].strip()
+    )
+    payload = "|".join([entity_id, name_norm, birth_date, dataset, regime])
+    fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return {
+        "fingerprint": fingerprint,
+        "entity_id": entity_id,
+        "name_norm": name_norm,
+        "birth_date": birth_date,
+        "dataset": dataset,
+        "regime": regime,
+    }
+
+
+def build_uk_sanctions_snapshot(sanctions_csv_path: str) -> Dict[str, Any]:
+    """
+    Build a deterministic UK sanctions snapshot from the latest sanctions CSV.
+    Output:
+      { uk_hash, row_count, entries: [ {fingerprint, entity_id, name_norm, birth_date, dataset, regime}, ... ] }
+    """
+    if not sanctions_csv_path or not os.path.exists(sanctions_csv_path):
+        return {"uk_hash": "", "row_count": 0, "entries": []}
+
+    entries: List[Dict[str, str]] = []
+    with open(sanctions_csv_path, mode="r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            entry = _build_uk_snapshot_entry(row)
+            if entry is None:
+                continue
+            entries.append(entry)
+
+    entries.sort(key=lambda e: e["fingerprint"])
+    digest = hashlib.sha256()
+    for entry in entries:
+        digest.update(entry["fingerprint"].encode("utf-8"))
+        digest.update(b"\n")
+    return {"uk_hash": digest.hexdigest(), "row_count": len(entries), "entries": entries}
+
+
+def compute_uk_snapshot_delta(
+    current_entries: List[Dict[str, str]],
+    previous_entries: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """
+    Compare UK snapshots and return delta stats + targetable entries.
+    """
+    curr_fp = {e["fingerprint"] for e in current_entries}
+    prev_fp = {e["fingerprint"] for e in previous_entries}
+    added_fp = curr_fp - prev_fp
+    removed_fp = prev_fp - curr_fp
+
+    curr_by_id = {e["entity_id"]: e for e in current_entries if e.get("entity_id")}
+    prev_by_id = {e["entity_id"]: e for e in previous_entries if e.get("entity_id")}
+    changed_ids: Set[str] = set()
+    for entity_id, cur in curr_by_id.items():
+        prev = prev_by_id.get(entity_id)
+        if prev and prev.get("fingerprint") != cur.get("fingerprint"):
+            changed_ids.add(entity_id)
+
+    added_entries = [e for e in current_entries if e["fingerprint"] in added_fp]
+    removed_entries = [e for e in previous_entries if e["fingerprint"] in removed_fp]
+    changed_entries = [curr_by_id[eid] for eid in changed_ids if eid in curr_by_id]
+
+    # Terms for shortlist matching against normalized customer names.
+    stopwords = {
+        "the", "and", "limited", "ltd", "llc", "inc", "company", "co", "group",
+        "partners", "services", "holdings", "international", "global",
+    }
+    terms: Set[str] = set()
+    for entry in added_entries + removed_entries + changed_entries:
+        tokens = [t for t in entry.get("name_norm", "").split() if len(t) >= 4 and t not in stopwords]
+        for token in tokens[:6]:
+            terms.add(token)
+
+    return {
+        "added": len(added_entries),
+        "removed": len(removed_entries),
+        "changed": len(changed_entries),
+        "added_entries": added_entries,
+        "removed_entries": removed_entries,
+        "changed_entries": changed_entries,
+        "candidate_terms": sorted(terms),
+    }
 
 def refresh_opensanctions_data(include_peps: bool = True):
     """

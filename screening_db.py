@@ -86,8 +86,14 @@ async def ensure_schema(conn) -> None:
             date_of_birth   TEXT,
             entity_type     TEXT NOT NULL DEFAULT 'Person',
             requestor       TEXT NOT NULL,
+            reason          TEXT NOT NULL DEFAULT 'manual',
+            refresh_run_id  UUID,
+            force_rescreen  BOOLEAN NOT NULL DEFAULT FALSE,
             status          TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+            previous_status TEXT,
+            result_status   TEXT,
+            transition      TEXT,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             started_at      TIMESTAMPTZ,
             finished_at     TIMESTAMPTZ,
@@ -98,6 +104,88 @@ async def ensure_schema(conn) -> None:
         CREATE INDEX IF NOT EXISTS idx_screening_jobs_pending
         ON screening_jobs (created_at) WHERE status = 'pending'
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist_refresh_runs (
+            refresh_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            include_peps BOOLEAN NOT NULL DEFAULT TRUE,
+            postgres_synced BOOLEAN NOT NULL DEFAULT FALSE,
+            sanctions_rows INTEGER NOT NULL DEFAULT 0,
+            peps_rows INTEGER NOT NULL DEFAULT 0,
+            uk_hash TEXT,
+            prev_uk_hash TEXT,
+            uk_changed BOOLEAN NOT NULL DEFAULT FALSE,
+            uk_row_count INTEGER NOT NULL DEFAULT 0,
+            delta_added INTEGER NOT NULL DEFAULT 0,
+            delta_removed INTEGER NOT NULL DEFAULT 0,
+            delta_changed INTEGER NOT NULL DEFAULT 0,
+            candidate_count INTEGER NOT NULL DEFAULT 0,
+            queued_count INTEGER NOT NULL DEFAULT 0,
+            already_pending_count INTEGER NOT NULL DEFAULT 0,
+            reused_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist_uk_snapshot_entries (
+            refresh_run_id UUID NOT NULL REFERENCES watchlist_refresh_runs(refresh_run_id) ON DELETE CASCADE,
+            fingerprint TEXT NOT NULL,
+            entity_id TEXT,
+            name_norm TEXT NOT NULL,
+            birth_date TEXT,
+            dataset TEXT,
+            regime TEXT,
+            PRIMARY KEY (refresh_run_id, fingerprint)
+        )
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_name_norm
+        ON watchlist_uk_snapshot_entries (name_norm)
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS screened_against_uk_hash TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS screened_against_refresh_run_id UUID
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS manual_override_uk_hash TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS manual_override_stale BOOLEAN NOT NULL DEFAULT FALSE
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT 'manual'
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS refresh_run_id UUID
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS force_rescreen BOOLEAN NOT NULL DEFAULT FALSE
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS previous_status TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS result_status TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS transition TEXT
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_screening_jobs_refresh_run
+        ON screening_jobs (refresh_run_id)
+    """)
 
 
 async def get_valid_screening(conn, entity_key: str) -> Optional[Dict[str, Any]]:
@@ -107,13 +195,15 @@ async def get_valid_screening(conn, entity_key: str) -> Optional[Dict[str, Any]]
     """
     row = await conn.fetchrow(
         """
-        SELECT result_json, screening_valid_until
+        SELECT result_json, screening_valid_until, manual_override_stale
         FROM screened_entities
         WHERE entity_key = $1 AND screening_valid_until > NOW()
         """,
         entity_key,
     )
     if row is None:
+        return None
+    if bool(row["manual_override_stale"]):
         return None
     rj = row["result_json"]
     if isinstance(rj, str):
@@ -132,6 +222,8 @@ async def upsert_screening(
     entity_type: str,
     requestor: str,
     result: Dict[str, Any],
+    screened_against_uk_hash: Optional[str] = None,
+    screened_against_refresh_run_id: Optional[str] = None,
 ) -> None:
     """Insert or replace screened_entities row. Sets validity to last_screened_at + 12 months."""
     now = datetime.now(timezone.utc)
@@ -156,8 +248,10 @@ async def upsert_screening(
             entity_key, display_name, normalized_name, date_of_birth, entity_type,
             last_screened_at, screening_valid_until,
             status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
-            result_json, last_requestor, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            result_json, last_requestor, updated_at,
+            screened_against_uk_hash, screened_against_refresh_run_id,
+            manual_override_uk_hash, manual_override_stale
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::uuid, NULL, FALSE)
         ON CONFLICT (entity_key) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             normalized_name = EXCLUDED.normalized_name,
@@ -173,7 +267,11 @@ async def upsert_screening(
             pep_flag = EXCLUDED.pep_flag,
             result_json = EXCLUDED.result_json,
             last_requestor = EXCLUDED.last_requestor,
-            updated_at = EXCLUDED.updated_at
+            updated_at = EXCLUDED.updated_at,
+            screened_against_uk_hash = EXCLUDED.screened_against_uk_hash,
+            screened_against_refresh_run_id = EXCLUDED.screened_against_refresh_run_id,
+            manual_override_uk_hash = NULL,
+            manual_override_stale = FALSE
         """,
         entity_key,
         display_name,
@@ -191,6 +289,8 @@ async def upsert_screening(
         json.dumps(result),
         requestor,
         now,
+        screened_against_uk_hash,
+        screened_against_refresh_run_id,
     )
 
 
@@ -222,12 +322,17 @@ async def enqueue_job(
     date_of_birth: Optional[str],
     entity_type: str,
     requestor: str,
+    reason: str = "manual",
+    refresh_run_id: Optional[str] = None,
+    force_rescreen: bool = False,
 ) -> str:
     """Insert a pending job; return job_id (UUID string)."""
     row = await conn.fetchrow(
         """
-        INSERT INTO screening_jobs (entity_key, name, date_of_birth, entity_type, requestor, status)
-        VALUES ($1, $2, $3, $4, $5, 'pending')
+        INSERT INTO screening_jobs (
+            entity_key, name, date_of_birth, entity_type, requestor, reason, refresh_run_id, force_rescreen, status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8, 'pending')
         RETURNING job_id
         """,
         entity_key,
@@ -235,8 +340,235 @@ async def enqueue_job(
         date_of_birth,
         entity_type or "Person",
         requestor,
+        reason or "manual",
+        refresh_run_id,
+        bool(force_rescreen),
     )
     return str(row["job_id"])
+
+
+async def get_latest_refresh_run(conn) -> Optional[Dict[str, Any]]:
+    row = await conn.fetchrow(
+        """
+        SELECT *
+        FROM watchlist_refresh_runs
+        ORDER BY ran_at DESC
+        LIMIT 1
+        """
+    )
+    return _to_json_safe(dict(row)) if row else None
+
+
+async def get_latest_uk_hash(conn) -> Dict[str, Optional[str]]:
+    row = await conn.fetchrow(
+        """
+        SELECT refresh_run_id, uk_hash
+        FROM watchlist_refresh_runs
+        ORDER BY ran_at DESC
+        LIMIT 1
+        """
+    )
+    if not row:
+        return {"refresh_run_id": None, "uk_hash": None}
+    return {"refresh_run_id": str(row["refresh_run_id"]), "uk_hash": row["uk_hash"]}
+
+
+async def create_refresh_run(
+    conn,
+    *,
+    include_peps: bool,
+    postgres_synced: bool,
+    sanctions_rows: int,
+    peps_rows: int,
+    uk_hash: str,
+    prev_uk_hash: Optional[str],
+    uk_changed: bool,
+    uk_row_count: int,
+    delta_added: int,
+    delta_removed: int,
+    delta_changed: int,
+) -> str:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO watchlist_refresh_runs (
+            include_peps, postgres_synced, sanctions_rows, peps_rows,
+            uk_hash, prev_uk_hash, uk_changed, uk_row_count,
+            delta_added, delta_removed, delta_changed
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING refresh_run_id
+        """,
+        include_peps,
+        postgres_synced,
+        int(sanctions_rows or 0),
+        int(peps_rows or 0),
+        uk_hash or "",
+        prev_uk_hash,
+        bool(uk_changed),
+        int(uk_row_count or 0),
+        int(delta_added or 0),
+        int(delta_removed or 0),
+        int(delta_changed or 0),
+    )
+    return str(row["refresh_run_id"])
+
+
+async def finalize_refresh_run(
+    conn,
+    *,
+    refresh_run_id: str,
+    candidate_count: int,
+    queued_count: int,
+    already_pending_count: int,
+    reused_count: int,
+    failed_count: int,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE watchlist_refresh_runs
+        SET candidate_count = $2,
+            queued_count = $3,
+            already_pending_count = $4,
+            reused_count = $5,
+            failed_count = $6
+        WHERE refresh_run_id = $1::uuid
+        """,
+        refresh_run_id,
+        int(candidate_count or 0),
+        int(queued_count or 0),
+        int(already_pending_count or 0),
+        int(reused_count or 0),
+        int(failed_count or 0),
+    )
+
+
+async def replace_uk_snapshot_entries(
+    conn,
+    *,
+    refresh_run_id: str,
+    entries: List[Dict[str, str]],
+) -> None:
+    if not entries:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO watchlist_uk_snapshot_entries (
+            refresh_run_id, fingerprint, entity_id, name_norm, birth_date, dataset, regime
+        )
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT DO NOTHING
+        """,
+        [
+            (
+                refresh_run_id,
+                e.get("fingerprint"),
+                e.get("entity_id") or None,
+                e.get("name_norm") or "",
+                e.get("birth_date") or None,
+                e.get("dataset") or None,
+                e.get("regime") or None,
+            )
+            for e in entries
+        ],
+    )
+
+
+async def get_uk_snapshot_entries(conn, refresh_run_id: str) -> List[Dict[str, str]]:
+    rows = await conn.fetch(
+        """
+        SELECT fingerprint, entity_id, name_norm, birth_date, dataset, regime
+        FROM watchlist_uk_snapshot_entries
+        WHERE refresh_run_id = $1::uuid
+        """,
+        refresh_run_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def shortlist_screened_entities_by_terms(
+    conn,
+    *,
+    terms: List[str],
+    max_candidates: int = 10000,
+) -> List[Dict[str, Any]]:
+    cleaned = sorted({t.strip().lower() for t in terms if t and len(t.strip()) >= 4})
+    if not cleaned:
+        return []
+    max_candidates = max(1, min(500000, int(max_candidates)))
+    rows = await conn.fetch(
+        """
+        WITH t AS (
+            SELECT UNNEST($1::text[]) AS term
+        )
+        SELECT DISTINCT s.entity_key, s.display_name, s.date_of_birth, s.entity_type
+        FROM screened_entities s
+        JOIN t ON s.normalized_name ILIKE ('%' || t.term || '%')
+        ORDER BY s.entity_key
+        LIMIT $2
+        """,
+        cleaned,
+        max_candidates,
+    )
+    return [dict(r) for r in rows]
+
+
+async def mark_manual_overrides_stale(conn, *, latest_uk_hash: str) -> int:
+    result = await conn.execute(
+        """
+        UPDATE screened_entities
+        SET manual_override_stale = TRUE,
+            updated_at = NOW()
+        WHERE manual_override_uk_hash IS NOT NULL
+          AND COALESCE(manual_override_uk_hash, '') <> COALESCE($1, '')
+          AND manual_override_stale = FALSE
+        """,
+        latest_uk_hash or "",
+    )
+    try:
+        return int(result.split()[-1]) if result else 0
+    except (ValueError, IndexError):
+        return 0
+
+
+async def get_refresh_run_summary(conn, *, limit: int = 14) -> Dict[str, Any]:
+    limit = max(1, min(90, int(limit)))
+    latest = await conn.fetchrow(
+        """
+        SELECT *
+        FROM watchlist_refresh_runs
+        ORDER BY ran_at DESC
+        LIMIT 1
+        """
+    )
+    runs = await conn.fetch(
+        """
+        SELECT *
+        FROM watchlist_refresh_runs
+        ORDER BY ran_at DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    latest_id = str(latest["refresh_run_id"]) if latest else None
+    transitions: List[Dict[str, Any]] = []
+    if latest_id:
+        trows = await conn.fetch(
+            """
+            SELECT COALESCE(transition, 'unknown') AS transition, COUNT(*)::int AS n
+            FROM screening_jobs
+            WHERE refresh_run_id = $1::uuid
+              AND reason = 'uk_delta_rescreen'
+            GROUP BY COALESCE(transition, 'unknown')
+            ORDER BY n DESC
+            """,
+            latest_id,
+        )
+        transitions = [dict(r) for r in trows]
+    return {
+        "latest": _to_json_safe(dict(latest)) if latest else None,
+        "runs": _to_json_safe([dict(r) for r in runs]),
+        "latest_transitions": _to_json_safe(transitions),
+    }
 
 
 async def search_screened_entities(
@@ -346,12 +678,16 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
     If status is 'completed', result is loaded from screened_entities.
     """
     row = await conn.fetchrow(
-        "SELECT status, entity_key, error_message FROM screening_jobs WHERE job_id = $1",
+        "SELECT status, entity_key, error_message, reason, previous_status, result_status, transition FROM screening_jobs WHERE job_id = $1",
         job_id,
     )
     if row is None:
         return None
     out = {"status": row["status"], "job_id": job_id, "entity_key": row["entity_key"]}
+    out["reason"] = row["reason"]
+    out["previous_status"] = row["previous_status"]
+    out["result_status"] = row["result_status"]
+    out["transition"] = row["transition"]
     if row["error_message"]:
         out["error_message"] = row["error_message"]
     if row["status"] == "completed":
@@ -401,6 +737,16 @@ async def mark_false_positive(
         result = dict(rj) if hasattr(rj, "items") else {}
 
     previous_summary = dict(result.get("Check Summary") or {})
+    latest_run = await conn.fetchrow(
+        """
+        SELECT refresh_run_id, uk_hash
+        FROM watchlist_refresh_runs
+        ORDER BY ran_at DESC
+        LIMIT 1
+        """
+    )
+    latest_hash = (latest_run["uk_hash"] if latest_run else None) or None
+    latest_run_id = str(latest_run["refresh_run_id"]) if latest_run else None
     now = datetime.now(timezone.utc)
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     valid_until = now + timedelta(days=365)
@@ -443,7 +789,11 @@ async def mark_false_positive(
             last_requestor = $9,
             last_screened_at = $10,
             screening_valid_until = $11,
-            updated_at = $10
+            updated_at = $10,
+            screened_against_uk_hash = $12,
+            screened_against_refresh_run_id = $13::uuid,
+            manual_override_uk_hash = $12,
+            manual_override_stale = FALSE
         WHERE entity_key = $1
         """,
         entity_key,
@@ -457,6 +807,8 @@ async def mark_false_positive(
         actor,
         now,
         valid_until,
+        latest_hash,
+        latest_run_id,
     )
     return result
 
@@ -493,7 +845,13 @@ async def list_screening_jobs(
             j.date_of_birth,
             j.entity_type,
             j.requestor,
+            j.reason,
+            j.refresh_run_id,
+            j.force_rescreen,
             j.status,
+            j.previous_status,
+            j.result_status,
+            j.transition,
             j.created_at,
             j.started_at,
             j.finished_at,

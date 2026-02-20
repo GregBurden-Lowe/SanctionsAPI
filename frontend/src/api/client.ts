@@ -102,6 +102,15 @@ export async function markFalsePositive(entity_key: string, reason?: string): Pr
   })
 }
 
+export async function getRescreenSummary(limit = 14): Promise<Response> {
+  const sp = new URLSearchParams()
+  sp.set('limit', String(limit))
+  return fetch(resolve(`/admin/screening/rescreen-summary?${sp.toString()}`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
 export interface ApiUser {
   id: string
   email: string

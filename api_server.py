@@ -85,6 +85,8 @@ from utils import (
     perform_postgres_watchlist_check,
     refresh_opensanctions_data,
     sync_watchlist_entities_postgres,
+    build_uk_sanctions_snapshot,
+    compute_uk_snapshot_delta,
     derive_entity_key,
     derive_entity_key_variants,
     _normalize_text,
@@ -949,6 +951,30 @@ async def admin_mark_false_positive(
     }
 
 
+@app.get("/admin/screening/rescreen-summary", dependencies=[Depends(require_admin)])
+@limiter.limit("60/minute")
+async def admin_rescreen_summary(
+    request: Request,
+    payload: dict = Depends(require_admin),
+    limit: int = 14,
+):
+    """Admin view: recent UK list refresh runs and latest transition summary."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    async with pool.acquire() as conn:
+        summary = await screening_db.get_refresh_run_summary(conn, limit=limit)
+    audit_log(
+        "admin",
+        action="rescreen_summary",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"limit": max(1, min(90, limit))},
+    )
+    return summary
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
@@ -964,6 +990,7 @@ async def admin_mark_false_positive(
 @app.options("/admin/screening/jobs/bulk")
 @app.options("/admin/screening/jobs")
 @app.options("/admin/screening/false-positive")
+@app.options("/admin/screening/rescreen-summary")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():
@@ -1051,6 +1078,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
             )
             # Persist beta checks so Search database can find them by returned entity_key.
             try:
+                latest_meta = await screening_db.get_latest_uk_hash(conn)
                 await screening_db.upsert_screening(
                     conn,
                     entity_key=entity_key,
@@ -1060,6 +1088,8 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                     entity_type=entity_type,
                     requestor=requestor,
                     result=results,
+                    screened_against_uk_hash=latest_meta.get("uk_hash"),
+                    screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
                 )
             except Exception as e:
                 logger.warning("postgres_beta upsert failed entity_key=%s: %s", entity_key[:16], e)
@@ -1112,9 +1142,12 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
         name=name, dob=dob, entity_type=entity_type, requestor=requestor,
     )
     async with pool.acquire() as conn:
+        latest_meta = await screening_db.get_latest_uk_hash(conn)
         await screening_db.upsert_screening(
             conn, entity_key=entity_key, display_name=name, normalized_name=_normalize_text(name),
             date_of_birth=dob, entity_type=entity_type, requestor=requestor, result=results,
+            screened_against_uk_hash=latest_meta.get("uk_hash"),
+            screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
         )
     return { **results, "entity_key": entity_key }
 
@@ -1269,6 +1302,7 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
         refresh_opensanctions_data(include_peps=body.include_peps)
         postgres_synced = False
         postgres_rows = {"sanctions": 0, "peps": 0}
+        refresh_run_info = None
         if body.sync_postgres:
             pool = await screening_db.get_pool()
             if pool is None:
@@ -1283,11 +1317,135 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
                     include_peps=body.include_peps,
                 )
             postgres_synced = True
+
+        # Delta-driven UK list monitoring and targeted re-screening.
+        pool = await screening_db.get_pool()
+        if pool is not None:
+            sanctions_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
+            uk_snapshot = build_uk_sanctions_snapshot(sanctions_csv)
+            auto_delta_enabled = os.environ.get("UK_DELTA_RESCREEN_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+            max_terms = max(10, int(os.environ.get("UK_DELTA_MAX_TERMS", "250")))
+            max_candidates = max(100, int(os.environ.get("UK_DELTA_MAX_CANDIDATES", "15000")))
+            system_requestor = os.environ.get("UK_DELTA_SYSTEM_REQUESTOR", "system:uk-delta-rescreen").strip() or "system:uk-delta-rescreen"
+
+            async with pool.acquire() as conn:
+                previous_run = await screening_db.get_latest_refresh_run(conn)
+                previous_hash = (previous_run or {}).get("uk_hash") if previous_run else None
+                previous_entries = []
+                if previous_run:
+                    previous_entries = await screening_db.get_uk_snapshot_entries(
+                        conn,
+                        str(previous_run["refresh_run_id"]),
+                    )
+
+                delta = compute_uk_snapshot_delta(
+                    uk_snapshot.get("entries", []),
+                    previous_entries,
+                )
+                uk_hash = (uk_snapshot.get("uk_hash") or "").strip()
+                uk_changed = bool(not previous_hash or uk_hash != (previous_hash or ""))
+
+                refresh_run_id = await screening_db.create_refresh_run(
+                    conn,
+                    include_peps=body.include_peps,
+                    postgres_synced=postgres_synced,
+                    sanctions_rows=int(postgres_rows.get("sanctions", 0)),
+                    peps_rows=int(postgres_rows.get("peps", 0)),
+                    uk_hash=uk_hash,
+                    prev_uk_hash=previous_hash,
+                    uk_changed=uk_changed,
+                    uk_row_count=int(uk_snapshot.get("row_count", 0)),
+                    delta_added=int(delta.get("added", 0)),
+                    delta_removed=int(delta.get("removed", 0)),
+                    delta_changed=int(delta.get("changed", 0)),
+                )
+                await screening_db.replace_uk_snapshot_entries(
+                    conn,
+                    refresh_run_id=refresh_run_id,
+                    entries=uk_snapshot.get("entries", []),
+                )
+
+                candidate_count = 0
+                queued_count = 0
+                already_pending_count = 0
+                reused_count = 0
+                failed_count = 0
+                stale_overrides_marked = 0
+
+                if uk_changed:
+                    stale_overrides_marked = await screening_db.mark_manual_overrides_stale(
+                        conn,
+                        latest_uk_hash=uk_hash,
+                    )
+                    if auto_delta_enabled:
+                        candidate_terms = (delta.get("candidate_terms") or [])[:max_terms]
+                        candidates = await screening_db.shortlist_screened_entities_by_terms(
+                            conn,
+                            terms=candidate_terms,
+                            max_candidates=max_candidates,
+                        )
+                        candidate_count = len(candidates)
+                        for candidate in candidates:
+                            entity_key = str(candidate.get("entity_key") or "").strip()
+                            if not entity_key:
+                                failed_count += 1
+                                continue
+                            if await screening_db.has_pending_or_running_job(conn, entity_key):
+                                already_pending_count += 1
+                                continue
+                            try:
+                                dob_raw = candidate.get("date_of_birth")
+                                dob_str = dob_raw.isoformat() if hasattr(dob_raw, "isoformat") else (str(dob_raw) if dob_raw else None)
+                                await screening_db.enqueue_job(
+                                    conn,
+                                    entity_key=entity_key,
+                                    name=str(candidate.get("display_name") or ""),
+                                    date_of_birth=dob_str,
+                                    entity_type=str(candidate.get("entity_type") or "Person"),
+                                    requestor=system_requestor,
+                                    reason="uk_delta_rescreen",
+                                    refresh_run_id=refresh_run_id,
+                                    force_rescreen=True,
+                                )
+                                queued_count += 1
+                            except Exception:
+                                failed_count += 1
+
+                await screening_db.finalize_refresh_run(
+                    conn,
+                    refresh_run_id=refresh_run_id,
+                    candidate_count=candidate_count,
+                    queued_count=queued_count,
+                    already_pending_count=already_pending_count,
+                    reused_count=reused_count,
+                    failed_count=failed_count,
+                )
+
+                refresh_run_info = {
+                    "refresh_run_id": refresh_run_id,
+                    "uk_hash": uk_hash,
+                    "uk_changed": uk_changed,
+                    "uk_row_count": int(uk_snapshot.get("row_count", 0)),
+                    "delta": {
+                        "added": int(delta.get("added", 0)),
+                        "removed": int(delta.get("removed", 0)),
+                        "changed": int(delta.get("changed", 0)),
+                    },
+                    "rescreen": {
+                        "enabled": auto_delta_enabled,
+                        "candidate_count": candidate_count,
+                        "queued_count": queued_count,
+                        "already_pending_count": already_pending_count,
+                        "failed_count": failed_count,
+                        "stale_overrides_marked": stale_overrides_marked,
+                    },
+                }
         return {
             "status": "ok",
             "include_peps": body.include_peps,
             "postgres_synced": postgres_synced,
             "postgres_rows": postgres_rows,
+            "refresh_run": refresh_run_info,
         }
     except Exception as e:
         logger.exception("Refresh OpenSanctions failed: %s", e)

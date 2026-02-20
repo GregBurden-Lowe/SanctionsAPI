@@ -41,7 +41,7 @@ def main():
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         """
-                        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor
+                        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor, reason, refresh_run_id, force_rescreen
                         FROM screening_jobs
                         WHERE status = 'pending'
                         ORDER BY created_at
@@ -62,6 +62,9 @@ def main():
                 dob = row["date_of_birth"]
                 entity_type = row["entity_type"] or "Person"
                 requestor = row["requestor"] or ""
+                reason = row.get("reason") or "manual"
+                refresh_run_id = row.get("refresh_run_id")
+                force_rescreen = bool(row.get("force_rescreen"))
 
                 # Mark running
                 with conn.cursor() as cur:
@@ -71,18 +74,52 @@ def main():
                     )
                 conn.commit()
 
-                # Idempotent: if a valid screening already exists, reuse it and mark job completed
+                # Previous result status for transition tracking
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT status, result_json FROM screened_entities WHERE entity_key = %s",
+                        (entity_key,),
+                    )
+                    existing_any = cur.fetchone()
+                previous_status = (existing_any or {}).get("status")
+
+                # Idempotent reuse for non-forced jobs
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         "SELECT result_json FROM screened_entities WHERE entity_key = %s AND screening_valid_until > NOW()",
                         (entity_key,),
                     )
-                    existing = cur.fetchone()
-                if existing:
+                    existing_valid = cur.fetchone()
+                if existing_valid and not force_rescreen:
+                    existing_result = existing_valid.get("result_json") or {}
+                    if isinstance(existing_result, str):
+                        try:
+                            existing_result = json.loads(existing_result)
+                        except Exception:
+                            existing_result = {}
+                    result_status = ((existing_result or {}).get("Check Summary") or {}).get("Status") if isinstance(existing_result, dict) else None
+                    transition = "unchanged"
+                    if previous_status and result_status and previous_status != result_status:
+                        p = previous_status.lower()
+                        r = result_status.lower()
+                        if p.startswith("cleared") and r.startswith("fail"):
+                            transition = "cleared_to_fail"
+                        elif p.startswith("fail") and r.startswith("cleared"):
+                            transition = "fail_to_cleared"
+                        else:
+                            transition = "changed"
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE screening_jobs SET status = 'completed', finished_at = NOW() WHERE job_id = %s",
-                            (job_id,),
+                            """
+                            UPDATE screening_jobs
+                            SET status = 'completed',
+                                finished_at = NOW(),
+                                previous_status = %s,
+                                result_status = %s,
+                                transition = %s
+                            WHERE job_id = %s
+                            """,
+                            (previous_status, result_status, transition, job_id),
                         )
                     conn.commit()
                     logger.info("Job %s: reused existing valid screening", job_id)
@@ -110,6 +147,20 @@ def main():
                 confidence = result.get("Confidence") or ""
                 score = float(result.get("Score") or 0)
                 pep_flag = bool(result.get("Is PEP"))
+                result_status = (result.get("Check Summary") or {}).get("Status") or "Unknown"
+                transition = "new_result"
+                if previous_status and result_status:
+                    if previous_status == result_status:
+                        transition = "unchanged"
+                    else:
+                        p = previous_status.lower()
+                        r = result_status.lower()
+                        if p.startswith("cleared") and r.startswith("fail"):
+                            transition = "cleared_to_fail"
+                        elif p.startswith("fail") and r.startswith("cleared"):
+                            transition = "fail_to_cleared"
+                        else:
+                            transition = "changed"
                 display_name = name
                 normalized_name = _normalize_text(name)
                 dob_date = None
@@ -120,6 +171,31 @@ def main():
                     except Exception:
                         pass
 
+                screened_against_uk_hash = None
+                screened_against_refresh_run_id = None
+                try:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        if refresh_run_id:
+                            cur.execute(
+                                "SELECT refresh_run_id, uk_hash FROM watchlist_refresh_runs WHERE refresh_run_id = %s::uuid",
+                                (str(refresh_run_id),),
+                            )
+                        else:
+                            cur.execute(
+                                """
+                                SELECT refresh_run_id, uk_hash
+                                FROM watchlist_refresh_runs
+                                ORDER BY ran_at DESC
+                                LIMIT 1
+                                """
+                            )
+                        run_row = cur.fetchone()
+                    if run_row:
+                        screened_against_refresh_run_id = str(run_row.get("refresh_run_id"))
+                        screened_against_uk_hash = run_row.get("uk_hash")
+                except Exception:
+                    screened_against_refresh_run_id = str(refresh_run_id) if refresh_run_id else None
+
                 # Upsert screened_entities
                 with conn.cursor() as cur:
                     cur.execute(
@@ -128,8 +204,10 @@ def main():
                             entity_key, display_name, normalized_name, date_of_birth, entity_type,
                             last_screened_at, screening_valid_until,
                             status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
-                            result_json, last_requestor, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            result_json, last_requestor, updated_at,
+                            screened_against_uk_hash, screened_against_refresh_run_id,
+                            manual_override_uk_hash, manual_override_stale
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
                         ON CONFLICT (entity_key) DO UPDATE SET
                             display_name = EXCLUDED.display_name,
                             normalized_name = EXCLUDED.normalized_name,
@@ -145,7 +223,11 @@ def main():
                             pep_flag = EXCLUDED.pep_flag,
                             result_json = EXCLUDED.result_json,
                             last_requestor = EXCLUDED.last_requestor,
-                            updated_at = EXCLUDED.updated_at
+                            updated_at = EXCLUDED.updated_at,
+                            screened_against_uk_hash = EXCLUDED.screened_against_uk_hash,
+                            screened_against_refresh_run_id = EXCLUDED.screened_against_refresh_run_id,
+                            manual_override_uk_hash = NULL,
+                            manual_override_stale = FALSE
                         """,
                         (
                             entity_key,
@@ -164,14 +246,24 @@ def main():
                             json.dumps(result),
                             requestor,
                             now,
+                            screened_against_uk_hash,
+                            screened_against_refresh_run_id,
                         ),
                     )
                     cur.execute(
-                        "UPDATE screening_jobs SET status = 'completed', finished_at = NOW() WHERE job_id = %s",
-                        (job_id,),
+                        """
+                        UPDATE screening_jobs
+                        SET status = 'completed',
+                            finished_at = NOW(),
+                            previous_status = %s,
+                            result_status = %s,
+                            transition = %s
+                        WHERE job_id = %s
+                        """,
+                        (previous_status, result_status, transition, job_id),
                     )
                 conn.commit()
-                logger.info("Job %s: completed", job_id)
+                logger.info("Job %s: completed reason=%s transition=%s", job_id, reason, transition)
 
             except Exception as e:
                 conn.rollback()

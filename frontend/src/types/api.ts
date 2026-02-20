@@ -79,6 +79,25 @@ export interface RefreshResponse {
     sanctions: number
     peps: number
   }
+  refresh_run?: {
+    refresh_run_id: string
+    uk_hash: string
+    uk_changed: boolean
+    uk_row_count: number
+    delta: {
+      added: number
+      removed: number
+      changed: number
+    }
+    rescreen: {
+      enabled: boolean
+      candidate_count: number
+      queued_count: number
+      already_pending_count: number
+      failed_count: number
+      stale_overrides_marked: number
+    }
+  } | null
 }
 
 export interface RefreshErrorResponse {
@@ -93,11 +112,44 @@ export interface ScreeningJob {
   date_of_birth: string | null
   entity_type: string
   requestor: string
+  reason?: string
+  refresh_run_id?: string | null
+  force_rescreen?: boolean
   status: 'pending' | 'running' | 'completed' | 'failed'
+  previous_status?: string | null
+  result_status?: string | null
+  transition?: string | null
   created_at: string
   started_at: string | null
   finished_at: string | null
   error_message: string | null
   screening_status: string | null
   screening_risk_level: string | null
+}
+
+export interface RefreshRunRecord {
+  refresh_run_id: string
+  ran_at: string
+  include_peps: boolean
+  postgres_synced: boolean
+  sanctions_rows: number
+  peps_rows: number
+  uk_hash: string | null
+  prev_uk_hash: string | null
+  uk_changed: boolean
+  uk_row_count: number
+  delta_added: number
+  delta_removed: number
+  delta_changed: number
+  candidate_count: number
+  queued_count: number
+  already_pending_count: number
+  reused_count: number
+  failed_count: number
+}
+
+export interface RefreshRunSummaryResponse {
+  latest: RefreshRunRecord | null
+  runs: RefreshRunRecord[]
+  latest_transitions: Array<{ transition: string; n: number }>
 }
