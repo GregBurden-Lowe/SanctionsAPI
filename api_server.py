@@ -21,9 +21,62 @@ from slowapi.errors import RateLimitExceeded
 class SPAStaticFiles(StaticFiles):
     """Serve static files but fall back to index.html for missing paths so SPA client-side routing works on refresh."""
 
+    _NO_FALLBACK_PREFIXES = (
+        "api/",
+        "auth/",
+        "opcheck",
+        "internal/",
+        "refresh_opensanctions",
+        "health",
+        ".well-known/",
+    )
+
+    @staticmethod
+    def _is_hidden_or_sensitive_path(path: str) -> bool:
+        lowered = path.lower()
+        if lowered.startswith("."):
+            return True
+        parts = [p for p in lowered.split("/") if p]
+        if any(p.startswith(".") for p in parts):
+            return True
+        sensitive_suffixes = (
+            ".env",
+            ".ini",
+            ".sql",
+            ".log",
+            ".bak",
+            ".pem",
+            ".key",
+            ".crt",
+            ".yml",
+            ".yaml",
+            ".toml",
+            ".cfg",
+            ".conf",
+        )
+        return lowered.endswith(sensitive_suffixes)
+
+    @staticmethod
+    def _should_spa_fallback(path: str) -> bool:
+        normalized = (path or "").lstrip("/")
+        if not normalized:
+            return True
+        lowered = normalized.lower()
+        if any(lowered.startswith(prefix) for prefix in SPAStaticFiles._NO_FALLBACK_PREFIXES):
+            return False
+        if SPAStaticFiles._is_hidden_or_sensitive_path(lowered):
+            return False
+        # Treat extension-like paths as file requests, not client-side SPA routes.
+        tail = lowered.rsplit("/", 1)[-1]
+        if "." in tail:
+            return False
+        return True
+
     def lookup_path(self, path: str):
         full_path, stat_result = super().lookup_path(path)
         if stat_result is None:
+            if not self._should_spa_fallback(path):
+                return full_path, stat_result
             return super().lookup_path("index.html")
         return full_path, stat_result
 
@@ -184,6 +237,23 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 _GENERIC_ERROR_MESSAGE = "An error occurred. Please try again or contact support."
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Set baseline security headers at app level (Nginx can still override/augment)."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    proto = (request.headers.get("x-forwarded-proto") or "").lower()
+    if proto == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    # Prevent token-bearing auth responses from being cached by shared intermediaries.
+    if request.url.path.startswith("/auth/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 @app.exception_handler(HTTPException)
