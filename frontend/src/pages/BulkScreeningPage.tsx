@@ -39,7 +39,8 @@ function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[];
       errors.push(`Row ${i + 1}: requestor is required (or set Requested By).`)
       continue
     }
-    const entity_type: 'Person' | 'Organization' = entityRaw === 'organization' ? 'Organization' : 'Person'
+    const entity_type: 'Person' | 'Organization' =
+      entityRaw === 'organization' || entityRaw === 'organisation' ? 'Organization' : 'Person'
     rows.push({
       name,
       dob: dob || undefined,
@@ -144,7 +145,7 @@ export function BulkScreeningPage() {
                 onChange={(e) => setCsvText(e.target.value)}
                 rows={10}
                 className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary font-mono"
-                placeholder={'name,dob,entity_type,requestor\nVladimir Putin,07-10-1952,Person,\nACME Ltd,,Organization,'}
+                placeholder={'name,dob,entity_type,requestor\nVladimir Putin,07-10-1952,Person,\nACME Ltd,,Organisation,'}
               />
             </div>
             {error && <ErrorBox message={error} />}

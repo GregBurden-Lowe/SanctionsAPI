@@ -84,6 +84,10 @@ function escapeHtml(input: string): string {
     .replace(/'/g, '&#39;')
 }
 
+function formatEntityTypeLabel(entityType: string): string {
+  return entityType === 'Organization' ? 'Organisation' : entityType
+}
+
 function getGuidanceText(result: OpCheckResponse): string {
   if (result['Is Sanctioned']) {
     return 'Potential sanctions match. Stop and escalate for enhanced review before proceeding.'
@@ -188,8 +192,8 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       <section class="panel">
         <h2>Screening Request</h2>
         <table class="kv-table">
-          <tr><th>Name / Organization</th><td>${escapeHtml(search.searchName || '—')}</td></tr>
-          <tr><th>Entity Type</th><td>${escapeHtml(search.entityType || '—')}</td></tr>
+          <tr><th>Name / Organisation</th><td>${escapeHtml(search.searchName || '—')}</td></tr>
+          <tr><th>Entity Type</th><td>${escapeHtml(formatEntityTypeLabel(search.entityType || '—'))}</td></tr>
           <tr><th>Date of Birth Input</th><td>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</td></tr>
           <tr><th>Requested By</th><td>${escapeHtml(search.requestor || '—')}</td></tr>
         </table>

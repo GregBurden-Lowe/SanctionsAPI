@@ -36,6 +36,10 @@ function formatTopMatch(m: TopMatch): { name: string; score: number } {
   return { name: String(m), score: 0 }
 }
 
+function formatEntityTypeLabel(entityType: string): string {
+  return entityType === 'Organization' ? 'Organisation' : entityType
+}
+
 export function ScreeningPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -130,7 +134,7 @@ export function ScreeningPage() {
                 className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
               >
                 <option value="Person">Person</option>
-                <option value="Organization">Organization</option>
+                <option value="Organization">Organisation</option>
               </select>
             </div>
                 </div>
@@ -200,7 +204,7 @@ function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) 
           </div>
           <div>
             <dt className="text-xs font-medium text-text-muted">Entity type</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.entityType || '—'}</dd>
+            <dd className="text-text-primary mt-0.5">{formatEntityTypeLabel(searchDetails.entityType || '—')}</dd>
           </div>
           <div>
             <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
