@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import secrets
 import time
 from typing import Optional, List, Any
 
@@ -53,6 +55,20 @@ async def ensure_auth_schema(conn) -> None:
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_email_time
         ON auth_login_attempts (email, attempted_at DESC)
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name         TEXT NOT NULL,
+            key_hash     TEXT NOT NULL UNIQUE,
+            role         TEXT NOT NULL,
+            active       BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_used_at TIMESTAMPTZ
+        )
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys (active)
     """)
 
 
@@ -288,3 +304,113 @@ async def grant_access_request(conn, request_id: str, password: str) -> dict:
     user = await create_user(conn, email, password, must_change_password=True, is_admin=False)
     await conn.execute("DELETE FROM access_requests WHERE email = $1", email)
     return user
+
+
+def _hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+async def create_api_key(conn, *, name: str, role: str = "screening") -> dict:
+    """
+    Create an API key record and return metadata + plaintext key once.
+    Only key_hash is stored in DB.
+    """
+    key_plain = "sak_" + secrets.token_urlsafe(32)
+    key_hash = _hash_api_key(key_plain)
+    row = await conn.fetchrow(
+        """
+        INSERT INTO api_keys (name, key_hash, role, active)
+        VALUES ($1, $2, $3, TRUE)
+        RETURNING id, name, role, active, created_at, last_used_at
+        """,
+        name.strip(),
+        key_hash,
+        role.strip(),
+    )
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "role": row["role"],
+        "active": bool(row["active"]),
+        "created_at": row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+        "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] and hasattr(row["last_used_at"], "isoformat") else (str(row["last_used_at"]) if row["last_used_at"] else None),
+        "api_key": key_plain,
+    }
+
+
+async def list_api_keys(conn) -> List[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT id, name, role, active, created_at, last_used_at
+        FROM api_keys
+        ORDER BY created_at DESC
+        """
+    )
+    out: List[dict] = []
+    for r in rows:
+        out.append(
+            {
+                "id": str(r["id"]),
+                "name": r["name"],
+                "role": r["role"],
+                "active": bool(r["active"]),
+                "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
+                "last_used_at": r["last_used_at"].isoformat() if r["last_used_at"] and hasattr(r["last_used_at"], "isoformat") else (str(r["last_used_at"]) if r["last_used_at"] else None),
+            }
+        )
+    return out
+
+
+async def set_api_key_active(conn, api_key_id: str, *, active: bool) -> bool:
+    row = await conn.fetchrow(
+        """
+        UPDATE api_keys
+        SET active = $2
+        WHERE id = $1::uuid
+        RETURNING id
+        """,
+        api_key_id,
+        bool(active),
+    )
+    return row is not None
+
+
+async def delete_api_key(conn, api_key_id: str) -> bool:
+    row = await conn.fetchrow(
+        """
+        DELETE FROM api_keys
+        WHERE id = $1::uuid
+        RETURNING id
+        """,
+        api_key_id,
+    )
+    return row is not None
+
+
+async def get_active_api_key_by_token(conn, token: str) -> Optional[dict]:
+    """
+    Resolve active API key by presented bearer token.
+    """
+    key_hash = _hash_api_key(token)
+    row = await conn.fetchrow(
+        """
+        SELECT id, name, role, active
+        FROM api_keys
+        WHERE key_hash = $1
+          AND active = TRUE
+        LIMIT 1
+        """,
+        key_hash,
+    )
+    return dict(row) if row is not None else None
+
+
+async def touch_api_key_last_used(conn, api_key_id: str) -> None:
+    await conn.execute(
+        """
+        UPDATE api_keys
+        SET last_used_at = NOW()
+        WHERE id = $1::uuid
+        """,
+        api_key_id,
+    )
