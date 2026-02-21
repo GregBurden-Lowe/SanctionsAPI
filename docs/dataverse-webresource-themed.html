@@ -441,20 +441,6 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-.verify-card {
-  margin-top: 18px;
-  border: 1px dashed #93c5fd;
-  border-radius: 12px;
-  padding: 14px;
-  background: #f8fbff;
-}
-
-.verify-grid {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
-}
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
@@ -483,8 +469,7 @@ button:disabled {
   }
 
   .grid,
-  .report-meta,
-  .verify-grid {
+  .report-meta {
     grid-template-columns: 1fr;
   }
 
@@ -571,15 +556,6 @@ button:disabled {
         <div class="status" id="status"></div>
 
         <div class="report" id="report" aria-live="polite"></div>
-
-        <div class="verify-card">
-          <h3 style="margin:0 0 8px;">Verify Document Token</h3>
-          <div class="verify-grid">
-            <input id="verifyToken" class="mono" placeholder="Paste validation token (e.g. VER1.REF.2025-08-27T13:00:00Z.A1B2C3D4)" />
-            <button id="verifyBtn" class="no-print">Verify</button>
-          </div>
-          <div id="verifyResult" class="status" style="margin-top:8px;"></div>
-        </div>
       </div>
     </div>
   </div>
@@ -616,16 +592,12 @@ button:disabled {
       report: document.getElementById("report"),
       currentUserDisplay: document.getElementById("currentUserDisplay"),
       userAvatar: document.getElementById("userAvatar"),
-      verifyToken: document.getElementById("verifyToken"),
-      verifyBtn: document.getElementById("verifyBtn"),
-      verifyResult: document.getElementById("verifyResult"),
     };
 
     getCurrentUser();
     el.runBtn.addEventListener("click", runCheck);
     el.pdfBtn.addEventListener("click", downloadPDF);
     el.clearBtn.addEventListener("click", clearForm);
-    el.verifyBtn.addEventListener("click", verifyTokenHandler);
 
     function clearForm() {
       el.name.value = "";
@@ -797,51 +769,6 @@ button:disabled {
       return h >>> 0;
     }
 
-    function tenantPepper() {
-      const host = window.location.host.toLowerCase();
-      const seed = `${host}|SCv1|${host.length}`;
-      return simpleHash(seed).toString(16).toUpperCase();
-    }
-
-    function docChecksum(payloadObj) {
-      const p = JSON.stringify({
-        subject: payloadObj.name ?? "",
-        dob: payloadObj.dob ?? "",
-        type: payloadObj.entity_type ?? "",
-        requestor: payloadObj?.user?.fullname ?? "",
-        issuedAt: payloadObj.issuedAt ?? "",
-        ref: payloadObj.ref ?? "",
-      });
-      const mix = `${p}|${tenantPepper()}`;
-      return simpleHash(mix).toString(16).toUpperCase().slice(0,8);
-    }
-
-    function buildValidationToken(ref, issuedAtIso) {
-      const sig = simpleHash(`${ref}|${issuedAtIso}|${tenantPepper()}`).toString(16).toUpperCase().slice(0,8);
-      return `VER1.${ref}.${issuedAtIso}.${sig}`;
-    }
-
-    function verifyTokenHandler() {
-      const token = (el.verifyToken.value || "").trim();
-      const ok = verifyValidationToken(token);
-      el.verifyResult.textContent = ok
-        ? "Token is valid for this tenant (pattern and signature check passed)."
-        : "Invalid token for this tenant (signature check failed).";
-      el.verifyResult.classList.toggle("success", ok);
-      el.verifyResult.classList.toggle("error", !ok);
-    }
-
-    function verifyValidationToken(token) {
-      if (!token || !token.startsWith("VER1.")) return false;
-      const parts = token.split(".");
-      if (parts.length < 4) return false;
-      const ref = parts[1];
-      const issuedAt = parts.slice(2, parts.length-1).join(".");
-      const sig = parts[parts.length-1];
-      const expected = simpleHash(`${ref}|${issuedAt}|${tenantPepper()}`).toString(16).toUpperCase().slice(0,8);
-      return expected === sig;
-    }
-
     async function runCheck() {
       const name = el.name.value.trim();
       const dob = el.dob.value ? el.dob.value : null;
@@ -857,25 +784,23 @@ button:disabled {
         const issuedAt = new Date().toISOString();
         const ref = generateReference();
 
-        const resp = await fetch(`${API_BASE}/opcheck`, {
+        const resp = await fetch(`${API_BASE}/opcheck/dataverse`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name, dob, entity_type, requestor: user.fullname })
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        const entityId = data?.entity_id || data?.entity_key || "";
 
-        const checksum = docChecksum({ name, dob, entity_type, user, issuedAt, ref });
-        const token = buildValidationToken(ref, issuedAt);
-
-        currentReport = { name, dob, entity_type, data, user, timestamp: new Date(issuedAt), ref, checksum, token };
+        currentReport = { name, dob, entity_type, data, user, timestamp: new Date(issuedAt), ref, entityId };
 
         if (FLOW_URL) {
           try {
             const auditPayload = {
               request: { name, dob, entity_type, requestor: user.fullname, timestamp: issuedAt, search_ref: ref },
               result: data,
-              client_extras: { data_sources: DATA_SOURCES_TEXT, validation_token: token }
+              client_extras: { data_sources: DATA_SOURCES_TEXT, entity_id: entityId }
             };
             fetch(FLOW_URL, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(auditPayload) })
               .catch(e=>console.warn("[PA] audit failed", e));
@@ -915,7 +840,7 @@ button:disabled {
 
     function renderReport() {
       if (!currentReport) return;
-      const { name, dob, entity_type, data, user, timestamp, ref, checksum, token } = currentReport;
+      const { name, dob, entity_type, data, user, timestamp, ref, entityId } = currentReport;
       const s = data?.["Check Summary"] || {};
       const generated = timestamp.toLocaleString();
       const statusBadge = getStatusBadge(data);
@@ -1006,13 +931,13 @@ button:disabled {
             </div>
 
             <div class="section">
-              <h3>Verification & Authentication</h3>
+              <h3>Audit Entity Record</h3>
               <table class="kv-table">
-                <tr><td class="key">Document Checksum</td><td><code class="mono" id="checksumText">${checksum}</code></td></tr>
-                <tr><td class="key">Validation Token</td><td><code class="mono" id="tokenText">${token}</code></td></tr>
+                <tr><td class="key">Entity ID</td><td><code class="mono">${escapeHtml(entityId || "Not returned")}</code></td></tr>
+                <tr><td class="key">Search Reference</td><td><code class="mono">${ref}</code></td></tr>
                 <tr><td class="key">Issued At (UTC)</td><td><code class="mono">${timestamp.toISOString()}</code></td></tr>
               </table>
-              <div style="font-size:12px;color:#666;margin-top:6px;">Anyone in your tenant can paste the token above into the Verify Document box to confirm it was generated by this tool (host-bound signature).</div>
+              <div style="font-size:12px;color:#666;margin-top:6px;">Use Entity ID as the auditable record key to cross-check against the screened entity database.</div>
             </div>
 
             <div class="section">
@@ -1044,8 +969,7 @@ button:disabled {
 
         const user = getCurrentUserInfo();
         const ref = currentReport?.ref || "";
-        const checksum = currentReport?.checksum || "";
-        const token = currentReport?.token || "";
+        const entityId = currentReport?.entityId || currentReport?.data?.entity_id || currentReport?.data?.entity_key || "";
         const issuedAt = currentReport?.timestamp?.toISOString() || new Date().toISOString();
         const subject = (document.getElementById("name").value || "").trim();
         const dob = (document.getElementById("dob").value || "").trim() || "Not provided";
@@ -1062,12 +986,11 @@ button:disabled {
 
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(12);
-        pdf.text("Verification Summary (selectable text)", margin, margin + 56);
+        pdf.text("Audit Summary (selectable text)", margin, margin + 56);
 
         const kv = [
+          ["Entity ID", entityId || "Not returned"],
           ["Reference (REF)", ref],
-          ["Validation Token", token],
-          ["Document Checksum", checksum],
           ["Issued At (UTC)", issuedAt],
           ["Performed by", user?.fullname || "Unknown"],
           ["Subject Name", subject],
@@ -1166,7 +1089,7 @@ button:disabled {
           title: `Sanctions & PEP Report - ${subject}`,
           subject: "Compliance screening",
           author: user?.fullname || "Sanctions Client",
-          keywords: `sanctions,pep,compliance,ref:${ref},token:${token},checksum:${checksum}`,
+          keywords: `sanctions,pep,compliance,ref:${ref},entity_id:${entityId}`,
           creator: "sanctions-check.co.uk"
         });
 
@@ -1195,12 +1118,6 @@ button:disabled {
         .replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/'/g,"&#039;");
     }
 
-    function copyText(id) {
-      const elx = document.getElementById(id);
-      if (!elx) return;
-      const val = elx.textContent || elx.innerText || "";
-      navigator.clipboard?.writeText(val).then(()=>toast("Copied token.", false)).catch(()=>{});
-    }
   </script>
 </body>
 </html>

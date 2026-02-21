@@ -1001,6 +1001,7 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
 
 
 @app.options("/opcheck")
+@app.options("/opcheck/dataverse")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
 @app.options("/auth/config")
@@ -1041,13 +1042,19 @@ def _opcheck_queue_threshold() -> int:
         return 5
 
 
-@app.post("/opcheck")
-@limiter.limit("60/minute")
-async def check_opensanctions(request: Request, data: OpCheckRequest):
+def _attach_entity_id(result: dict, entity_key: str) -> dict:
     """
-    Screen an entity. With DB: 200 = result (reused or completed synchronously); 202 = queued due to load.
-    Reuse always first. When no cache: if queue pressure is below threshold, run sync (200); else enqueue (202).
+    Dataverse-friendly response shape:
+    - entity_key keeps current API behavior.
+    - entity_id is an alias for downstream systems expecting an explicit ID field.
     """
+    out = dict(result or {})
+    out["entity_key"] = entity_key
+    out["entity_id"] = entity_key
+    return out
+
+
+async def _check_opensanctions_impl(data: OpCheckRequest):
     if not data.requestor or not data.requestor.strip():
         return JSONResponse(
             status_code=400,
@@ -1093,7 +1100,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                     break
             if cached is not None:
                 logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
-                return {**cached, "entity_key": cached_key}
+                return _attach_entity_id(cached, cached_key)
 
             results = await perform_postgres_watchlist_check(
                 conn,
@@ -1119,14 +1126,14 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                 )
             except Exception as e:
                 logger.warning("postgres_beta upsert failed entity_key=%s: %s", entity_key[:16], e)
-        return {**results, "entity_key": entity_key}
-
-    if pool is None:
-        # No DB: run check synchronously
-        return _run_check_sync(data)
+        return _attach_entity_id(results, entity_key)
 
     entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
     entity_key = entity_key_candidates[0]
+    if pool is None:
+        # No DB: run check synchronously
+        return _attach_entity_id(_run_check_sync(data), entity_key)
+
     async with pool.acquire() as conn:
         cached = None
         cached_key = entity_key
@@ -1138,7 +1145,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
         if cached is not None:
             # Reuse always first, regardless of load
             logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
-            return { **cached, "entity_key": cached_key }
+            return _attach_entity_id(cached, cached_key)
 
         # Queue pressure check: under threshold => sync; at or over => enqueue (graceful load protection)
         count = await screening_db.get_pending_running_count(conn)
@@ -1157,6 +1164,8 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
                 content={
                     "status": "queued",
                     "job_id": job_id,
+                    "entity_key": entity_key,
+                    "entity_id": entity_key,
                     "message": "Screening queued (load protection). Poll GET /opcheck/jobs/{job_id} for outcome.",
                 },
                 headers={"Location": f"/opcheck/jobs/{job_id}"},
@@ -1175,7 +1184,27 @@ async def check_opensanctions(request: Request, data: OpCheckRequest):
             screened_against_uk_hash=latest_meta.get("uk_hash"),
             screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
         )
-    return { **results, "entity_key": entity_key }
+    return _attach_entity_id(results, entity_key)
+
+
+@app.post("/opcheck")
+@limiter.limit("60/minute")
+async def check_opensanctions(request: Request, data: OpCheckRequest):
+    """
+    Screen an entity. With DB: 200 = result (reused or completed synchronously); 202 = queued due to load.
+    Reuse always first. When no cache: if queue pressure is below threshold, run sync (200); else enqueue (202).
+    """
+    return await _check_opensanctions_impl(data)
+
+
+@app.post("/opcheck/dataverse")
+@limiter.limit("60/minute")
+async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest):
+    """
+    Dataverse-facing opcheck route. Behavior is intentionally identical to /opcheck,
+    and responses include entity_id (alias of entity_key) for downstream linking.
+    """
+    return await _check_opensanctions_impl(data)
 
 
 @app.get("/opcheck/jobs/{job_id}")
