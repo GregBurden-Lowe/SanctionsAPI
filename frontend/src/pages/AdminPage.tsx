@@ -73,9 +73,14 @@ export function AdminPage() {
               OpenSanctions refresh is now API/cron driven and syncs Postgres by default. Use your 22:00 droplet cron job to keep watchlist tables current.
             </p>
             <div>
-              <Button type="button" variant="secondary" onClick={() => navigate('/admin/docs')}>
-                Open API docs
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="secondary" onClick={() => navigate('/admin/docs')}>
+                  Open API docs
+                </Button>
+                <Button type="button" variant="secondary" onClick={() => navigate('/admin/api-keys')}>
+                  Manage API keys
+                </Button>
+              </div>
             </div>
           </CardBody>
         </Card>

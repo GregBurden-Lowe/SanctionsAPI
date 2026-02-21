@@ -60,6 +60,14 @@ function QueueIcon() {
   )
 }
 
+function KeyIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a5 5 0 11-9.9 1H2v2h2v2h2v2h3l1.3-1.3A5 5 0 0115 7z" />
+    </svg>
+  )
+}
+
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
   return (
@@ -90,6 +98,11 @@ export function AppShell() {
           {user?.is_admin && (
             <NavItem to="/admin/jobs" icon={<QueueIcon />}>
               Screening jobs
+            </NavItem>
+          )}
+          {user?.is_admin && (
+            <NavItem to="/admin/api-keys" icon={<KeyIcon />}>
+              API keys
             </NavItem>
           )}
         </nav>

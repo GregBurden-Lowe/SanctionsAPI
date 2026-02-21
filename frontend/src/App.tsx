@@ -10,6 +10,7 @@ import { SearchDatabasePage } from '@/pages/SearchDatabasePage'
 import { BulkScreeningPage } from '@/pages/BulkScreeningPage'
 import { ScreeningJobsPage } from '@/pages/ScreeningJobsPage'
 import { AdminApiDocsPage } from '@/pages/AdminApiDocsPage'
+import { ApiKeysPage } from '@/pages/ApiKeysPage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -95,6 +96,14 @@ export default function App() {
               element={
                 <AdminRoute>
                   <AdminApiDocsPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="admin/api-keys"
+              element={
+                <AdminRoute>
+                  <ApiKeysPage />
                 </AdminRoute>
               }
             />
