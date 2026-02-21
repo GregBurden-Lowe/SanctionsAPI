@@ -43,7 +43,7 @@ export function AdminApiDocsPage() {
   return (
     <div className="px-10 pb-10">
       <div className="max-w-5xl space-y-6">
-        <SectionHeader title="API Docs" meta="Authenticated admin access" />
+        <SectionHeader title="API Docs" />
         <Card>
           <CardHeader>
             <CardTitle>OpenAPI schema</CardTitle>
@@ -105,4 +105,3 @@ export function AdminApiDocsPage() {
     </div>
   )
 }
-

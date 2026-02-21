@@ -82,7 +82,7 @@ export function ScreeningJobsPage() {
   return (
     <div className="px-10 pb-10">
       <div className="max-w-6xl space-y-6">
-        <SectionHeader title="Screening jobs" meta="Queue and worker progress" />
+        <SectionHeader title="Screening jobs" />
         <Card>
           <CardHeader>
             <CardTitle>Job monitor</CardTitle>

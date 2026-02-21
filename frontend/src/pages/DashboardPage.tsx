@@ -46,7 +46,7 @@ export function DashboardPage() {
   return (
     <div className="px-10 pb-10">
       <div className="max-w-7xl space-y-6">
-        <SectionHeader title="Dashboard" meta="High-level risk and operations" />
+        <SectionHeader title="Dashboard" />
 
         <div className="flex items-center gap-3">
           <Button type="button" variant="secondary" onClick={() => void loadSummary()} disabled={loading}>
@@ -168,7 +168,7 @@ export function DashboardPage() {
                 UK list changed: <span className="font-semibold text-text-primary">{latestRefresh ? (latestRefresh.uk_changed ? 'Yes' : 'No') : '—'}</span>
               </p>
               <p className="text-sm text-text-secondary">
-                Delta (A/R/C):{' '}
+                Added/Removed/Changed:{' '}
                 <span className="font-semibold text-text-primary">
                   {latestRefresh
                     ? `${latestRefresh.delta_added}/${latestRefresh.delta_removed}/${latestRefresh.delta_changed}`

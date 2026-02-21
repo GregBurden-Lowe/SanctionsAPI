@@ -137,7 +137,7 @@ export function SearchDatabasePage() {
   return (
     <div className="px-10 pb-10">
       <div className="max-w-6xl space-y-6">
-        <SectionHeader title="Search database" meta="Stored screening evidence" />
+        <SectionHeader title="Search database" />
         <Card>
           <CardHeader>
             <CardTitle>Search screened entities</CardTitle>

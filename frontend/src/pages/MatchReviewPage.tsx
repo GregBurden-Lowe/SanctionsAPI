@@ -176,7 +176,7 @@ export function MatchReviewPage() {
   return (
     <div className="px-10 pb-10">
       <div className="max-w-7xl space-y-6">
-        <SectionHeader title="Match review queue" meta="Potential matches requiring analyst review" />
+        <SectionHeader title="Match review queue" />
 
         <Card>
           <CardHeader>
