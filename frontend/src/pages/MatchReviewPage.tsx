@@ -8,6 +8,7 @@ import {
   type ReviewQueueItem,
 } from '@/api/client'
 import type { ReviewOutcome, ReviewStatus } from '@/types/api'
+import { useAuth } from '@/context/AuthContext'
 
 const REASON_OPTIONS: OpCheckParams['reason_for_check'][] = [
   'Client Onboarding',
@@ -40,6 +41,7 @@ function formatDate(iso: string | null): string {
 }
 
 export function MatchReviewPage() {
+  const { user } = useAuth()
   const [items, setItems] = useState<ReviewQueueItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -47,11 +49,16 @@ export function MatchReviewPage() {
   const [businessReference, setBusinessReference] = useState('')
   const [reasonForCheck, setReasonForCheck] = useState<'' | OpCheckParams['reason_for_check']>('')
   const [includeCleared, setIncludeCleared] = useState(false)
+  const [myMatchesOnly, setMyMatchesOnly] = useState(false)
   const [selected, setSelected] = useState<ReviewQueueItem | null>(null)
   const [reviewOutcome, setReviewOutcome] = useState<ReviewOutcome>(REVIEW_OUTCOME_OPTIONS[0])
   const [reviewNotes, setReviewNotes] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const currentUsername = (user?.username || '').trim().toLowerCase()
+  const visibleItems = myMatchesOnly
+    ? items.filter((item) => (item.review_claimed_by || '').trim().toLowerCase() === currentUsername)
+    : items
 
   const load = async () => {
     setLoading(true)
@@ -229,6 +236,14 @@ export function MatchReviewPage() {
                   />
                   Include cleared
                 </label>
+                <label className="inline-flex items-center gap-2 text-xs text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={myMatchesOnly}
+                    onChange={(e) => setMyMatchesOnly(e.target.checked)}
+                  />
+                  My matches
+                </label>
               </div>
             </div>
             {error && <ErrorBox message={error} />}
@@ -238,12 +253,12 @@ export function MatchReviewPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Review queue ({items.length})</CardTitle>
+            <CardTitle>Review queue ({visibleItems.length})</CardTitle>
           </CardHeader>
           <CardBody>
             {loading ? (
               <p className="text-sm text-text-secondary">Loading…</p>
-            ) : items.length === 0 ? (
+            ) : visibleItems.length === 0 ? (
               <p className="text-sm text-text-secondary">No queue items found.</p>
             ) : (
               <div className="overflow-x-auto">
@@ -263,7 +278,7 @@ export function MatchReviewPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map((row) => (
+                    {visibleItems.map((row) => (
                       <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
                         <td className="py-2 pr-4 text-text-secondary">

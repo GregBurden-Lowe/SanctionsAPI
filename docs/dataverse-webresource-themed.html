@@ -547,6 +547,14 @@ button:disabled {
               <option value="Organization">Organization/Entity</option>
             </select>
           </div>
+          <div class="col-2 form-group">
+            <label for="businessRef">Business reference *</label>
+            <input id="businessRef" placeholder="e.g. CLAIM-12345" />
+          </div>
+          <div class="col-2 form-group">
+            <label for="reasonForCheck">Reason for check *</label>
+            <select id="reasonForCheck"></select>
+          </div>
           <div class="col-4 btns no-print">
             <button class="primary" id="runBtn">Run Compliance Check</button>
             <button id="pdfBtn" disabled>Download Report</button>
@@ -565,6 +573,15 @@ button:disabled {
     const API_BASE = "https://sanctions-check.co.uk";
     const FLOW_URL = "";
     const DATA_SOURCES_TEXT = "United Nations; European Union; US OFAC; UK HM Treasury (OFSI)";
+    const DEFAULT_REASON_FOR_CHECK = "Ad-Hoc Compliance Review";
+    const REASON_FOR_CHECK_OPTIONS = [
+      "Client Onboarding",
+      "Claim Payment",
+      "Business Partner Payment",
+      "Business Partner Due Diligence",
+      "Periodic Re-Screen",
+      "Ad-Hoc Compliance Review",
+    ];
 
     const ICONS = {
       UN: `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><circle cx="32" cy="32" r="30" fill="#009edb"/><circle cx="32" cy="32" r="14" fill="#fff"/><circle cx="32" cy="32" r="9" fill="#009edb"/></svg>`,
@@ -586,6 +603,8 @@ button:disabled {
       name: document.getElementById("name"),
       dob: document.getElementById("dob"),
       etype: document.getElementById("etype"),
+      businessRef: document.getElementById("businessRef"),
+      reasonForCheck: document.getElementById("reasonForCheck"),
       runBtn: document.getElementById("runBtn"),
       pdfBtn: document.getElementById("pdfBtn"),
       clearBtn: document.getElementById("clearBtn"),
@@ -596,6 +615,7 @@ button:disabled {
     };
 
     getCurrentUser();
+    initRequiredFields();
     el.runBtn.addEventListener("click", runCheck);
     el.pdfBtn.addEventListener("click", downloadPDF);
     el.clearBtn.addEventListener("click", clearForm);
@@ -604,10 +624,40 @@ button:disabled {
       el.name.value = "";
       el.dob.value = "";
       el.etype.value = "Person";
+      el.businessRef.value = generateDefaultBusinessReference();
+      el.reasonForCheck.value = DEFAULT_REASON_FOR_CHECK;
       el.report.innerHTML = "";
       el.status.textContent = "";
       el.pdfBtn.disabled = true;
       currentReport = null;
+    }
+
+    function initRequiredFields() {
+      if (el.reasonForCheck) {
+        const optionsHtml = REASON_FOR_CHECK_OPTIONS
+          .map((option) => `<option value="${option}">${option}</option>`)
+          .join("");
+        el.reasonForCheck.innerHTML = optionsHtml;
+        el.reasonForCheck.value = DEFAULT_REASON_FOR_CHECK;
+      }
+      if (el.businessRef && !el.businessRef.value.trim()) {
+        el.businessRef.value = generateDefaultBusinessReference();
+      }
+    }
+
+    function generateDefaultBusinessReference() {
+      const recordId = getDataverseRecordId();
+      if (recordId) return recordId;
+      return generateReference();
+    }
+
+    function getDataverseRecordId() {
+      const x = getXrm();
+      try {
+        const id = x?.Page?.data?.entity?.getId?.();
+        if (id) return String(id).replace(/[{}]/g, "");
+      } catch {}
+      return null;
     }
 
     function getXrm() {
@@ -774,32 +824,50 @@ button:disabled {
       const name = el.name.value.trim();
       const dob = el.dob.value ? el.dob.value : null;
       const entity_type = el.etype.value;
+      const business_reference = el.businessRef.value.trim();
+      const reason_for_check = el.reasonForCheck.value;
       const user = getCurrentUserInfo();
 
       if (!name) { toast("Please enter a name to search.", true); return; }
+      if (!business_reference) { toast("Please provide a business reference.", true); return; }
+      if (!REASON_FOR_CHECK_OPTIONS.includes(reason_for_check)) { toast("Please select a valid reason for check.", true); return; }
       if (!user || !user.fullname) { toast("Unable to detect current user.", true); return; }
 
       setBusy(true); toast("Performing compliance check...");
 
       try {
         const issuedAt = new Date().toISOString();
-        const ref = generateReference();
 
         const resp = await fetch(`${API_BASE}/opcheck/dataverse`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, dob, entity_type, requestor: user.fullname })
+          body: JSON.stringify({
+            name,
+            dob,
+            entity_type,
+            business_reference,
+            reason_for_check,
+            requestor: user.fullname
+          })
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const entityId = data?.entity_id || data?.entity_key || "";
 
-        currentReport = { name, dob, entity_type, data, user, timestamp: new Date(issuedAt), ref, entityId };
+        currentReport = { name, dob, entity_type, data, user, timestamp: new Date(issuedAt), business_reference, reason_for_check, entityId };
 
         if (FLOW_URL) {
           try {
             const auditPayload = {
-              request: { name, dob, entity_type, requestor: user.fullname, timestamp: issuedAt, search_ref: ref },
+              request: {
+                name,
+                dob,
+                entity_type,
+                requestor: user.fullname,
+                timestamp: issuedAt,
+                business_reference,
+                reason_for_check,
+              },
               result: data,
               client_extras: { data_sources: DATA_SOURCES_TEXT, entity_id: entityId }
             };
@@ -945,6 +1013,7 @@ button:disabled {
       const docIdSeed = [
         entityRef || "",
         search.searchName || "",
+        search.businessReference || "",
         search.requestor || "",
         checkedAt || "",
         String(result.Score ?? ""),
@@ -1010,6 +1079,8 @@ button:disabled {
               <tr><th>Entity Type</th><td>${escapeHtml(pdfFormatEntityTypeLabel(search.entityType || "—"))}</td></tr>
               <tr><th>Date of Birth Input</th><td>${escapeHtml(search.searchDob?.trim() ? search.searchDob : "Not provided")}</td></tr>
               <tr><th>Requested By</th><td>${escapeHtml(search.requestor || "—")}</td></tr>
+              <tr><th>Business Reference</th><td>${escapeHtml(search.businessReference || "—")}</td></tr>
+              <tr><th>Reason for Check</th><td>${escapeHtml(search.reasonForCheck || "—")}</td></tr>
             </table>
           </section>
 
@@ -1262,7 +1333,7 @@ button:disabled {
 
     function renderReport() {
       if (!currentReport) return;
-      const { name, dob, entity_type, data, user, timestamp, ref, entityId } = currentReport;
+      const { name, dob, entity_type, data, user, timestamp, business_reference, reason_for_check, entityId } = currentReport;
       const s = data?.["Check Summary"] || {};
       const generated = timestamp.toLocaleString();
       const statusBadge = getStatusBadge(data);
@@ -1299,7 +1370,7 @@ button:disabled {
           <div class="report-header">
             <div class="report-title">
               <h2>Sanctions & PEP Screening Report</h2>
-              <div class="report-ref">REF: ${ref}</div>
+              <div class="report-ref">REF: ${escapeHtml(business_reference)}</div>
             </div>
             <div class="report-meta">
               <div><div class="meta-label">Generated</div><div class="meta-value">${generated}</div></div>
@@ -1317,7 +1388,8 @@ button:disabled {
                 <tr><td class="key">Date of Birth</td><td>${dob || "Not provided"}</td></tr>
                 <tr><td class="key">Entity Type</td><td>${escapeHtml(entity_type)}</td></tr>
                 <tr><td class="key">Performed by</td><td>${escapeHtml(user.fullname)}</td></tr>
-                <tr><td class="key">Search Reference</td><td><code class="mono">${ref}</code></td></tr>
+                <tr><td class="key">Business Reference</td><td><code class="mono">${escapeHtml(business_reference)}</code></td></tr>
+                <tr><td class="key">Reason for check</td><td>${escapeHtml(reason_for_check)}</td></tr>
               </table>
             </div>
 
@@ -1356,7 +1428,8 @@ button:disabled {
               <h3>Audit Entity Record</h3>
               <table class="kv-table">
                 <tr><td class="key">Entity ID</td><td><code class="mono">${escapeHtml(entityId || "Not returned")}</code></td></tr>
-                <tr><td class="key">Search Reference</td><td><code class="mono">${ref}</code></td></tr>
+                <tr><td class="key">Business Reference</td><td><code class="mono">${escapeHtml(business_reference)}</code></td></tr>
+                <tr><td class="key">Reason for check</td><td>${escapeHtml(reason_for_check)}</td></tr>
                 <tr><td class="key">Issued At (UTC)</td><td><code class="mono">${timestamp.toISOString()}</code></td></tr>
               </table>
               <div style="font-size:12px;color:#666;margin-top:6px;">Use Entity ID as the auditable record key to cross-check against the screened entity database.</div>
@@ -1385,6 +1458,8 @@ button:disabled {
           entityType: currentReport.entity_type || "Person",
           searchDob: currentReport.dob || "",
           requestor: currentReport.user?.fullname || "Unknown",
+          businessReference: currentReport.business_reference || "",
+          reasonForCheck: currentReport.reason_for_check || "",
           searchBackend: "postgres_beta",
         };
 

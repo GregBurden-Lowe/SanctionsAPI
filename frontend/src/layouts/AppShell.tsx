@@ -17,6 +17,14 @@ function HomeIcon() {
   )
 }
 
+function DashboardIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 13h7V3H3v10zm0 8h7v-6H3v6zm11 0h7V11h-7v10zm0-18v6h7V3h-7z" />
+    </svg>
+  )
+}
+
 function SettingsIcon() {
   return (
     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -82,6 +90,9 @@ export function AppShell() {
     <div className={appShellClass}>
       <aside className={sidebarClass}>
         <nav className="flex flex-col gap-1 mt-1" aria-label="Primary">
+          <NavItem to="/dashboard" icon={<DashboardIcon />}>
+            Dashboard
+          </NavItem>
           <NavItem to="/" icon={<HomeIcon />}>
             Screening
           </NavItem>

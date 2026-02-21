@@ -193,3 +193,41 @@ export interface RefreshRunSummaryResponse {
   runs: RefreshRunRecord[]
   latest_transitions: Array<{ transition: string; n: number }>
 }
+
+export interface DashboardSummaryResponse {
+  risk: {
+    open_high_risk_reviews: number
+    aged_reviews_over_24h: number
+    aged_reviews_over_72h: number
+  }
+  matches: {
+    new_matches_24h: number
+    new_matches_7d: number
+  }
+  throughput_today: {
+    claimed: number
+    completed: number
+    completion_rate_percent: number
+  }
+  outcome_mix_30d: Array<{
+    outcome: string
+    count: number
+  }>
+  data_freshness: {
+    last_refresh_at: string | null
+    hours_since_refresh: number | null
+    latest_refresh: {
+      refresh_run_id: string
+      ran_at: string
+      uk_changed: boolean
+      uk_row_count: number
+      delta_added: number
+      delta_removed: number
+      delta_changed: number
+      candidate_count: number
+      queued_count: number
+      already_pending_count: number
+      failed_count: number
+    } | null
+  }
+}

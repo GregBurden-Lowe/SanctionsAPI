@@ -137,6 +137,13 @@ export async function getAdminOpenApiSchema(): Promise<Response> {
   })
 }
 
+export async function getDashboardSummary(): Promise<Response> {
+  return fetch(resolve('/dashboard/summary'), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
 export interface ApiKeyItem {
   id: string
   name: string

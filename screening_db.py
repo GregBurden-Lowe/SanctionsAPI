@@ -696,6 +696,109 @@ async def get_refresh_run_summary(conn, *, limit: int = 14) -> Dict[str, Any]:
     }
 
 
+async def get_dashboard_summary(conn) -> Dict[str, Any]:
+    """
+    High-level operational dashboard summary.
+    """
+    overview = await conn.fetchrow(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE risk_level ILIKE 'High%'
+                  AND COALESCE(review_status, 'UNREVIEWED') <> 'COMPLETED'
+                  AND status NOT ILIKE 'Cleared%'
+            )::int AS open_high_risk_reviews,
+            COUNT(*) FILTER (
+                WHERE review_status = 'IN_REVIEW'
+                  AND review_claimed_at <= NOW() - INTERVAL '24 hours'
+            )::int AS aged_reviews_over_24h,
+            COUNT(*) FILTER (
+                WHERE review_status = 'IN_REVIEW'
+                  AND review_claimed_at <= NOW() - INTERVAL '72 hours'
+            )::int AS aged_reviews_over_72h,
+            COUNT(*) FILTER (
+                WHERE last_screened_at >= NOW() - INTERVAL '24 hours'
+                  AND (uk_sanctions_flag = TRUE OR pep_flag = TRUE)
+            )::int AS new_matches_24h,
+            COUNT(*) FILTER (
+                WHERE last_screened_at >= NOW() - INTERVAL '7 days'
+                  AND (uk_sanctions_flag = TRUE OR pep_flag = TRUE)
+            )::int AS new_matches_7d,
+            COUNT(*) FILTER (
+                WHERE review_claimed_at >= DATE_TRUNC('day', NOW())
+            )::int AS claimed_today,
+            COUNT(*) FILTER (
+                WHERE review_completed_at >= DATE_TRUNC('day', NOW())
+            )::int AS completed_today
+        FROM screened_entities
+        """
+    )
+    outcome_rows = await conn.fetch(
+        """
+        SELECT review_outcome AS outcome, COUNT(*)::int AS count
+        FROM screened_entities
+        WHERE review_status = 'COMPLETED'
+          AND review_completed_at >= NOW() - INTERVAL '30 days'
+          AND review_outcome IS NOT NULL
+        GROUP BY review_outcome
+        ORDER BY count DESC, review_outcome ASC
+        """
+    )
+    latest_refresh = await conn.fetchrow(
+        """
+        SELECT
+            refresh_run_id,
+            ran_at,
+            uk_changed,
+            uk_row_count,
+            delta_added,
+            delta_removed,
+            delta_changed,
+            candidate_count,
+            queued_count,
+            already_pending_count,
+            failed_count
+        FROM watchlist_refresh_runs
+        ORDER BY ran_at DESC
+        LIMIT 1
+        """
+    )
+
+    claimed_today = int((overview or {}).get("claimed_today") or 0)
+    completed_today = int((overview or {}).get("completed_today") or 0)
+    completion_rate = round((completed_today / claimed_today) * 100, 1) if claimed_today > 0 else 0.0
+
+    last_refresh_at = latest_refresh.get("ran_at") if latest_refresh else None
+    hours_since_refresh = None
+    if last_refresh_at is not None and isinstance(last_refresh_at, datetime):
+        hours_since_refresh = round((datetime.now(timezone.utc) - last_refresh_at).total_seconds() / 3600, 1)
+
+    return _to_json_safe(
+        {
+            "risk": {
+                "open_high_risk_reviews": int((overview or {}).get("open_high_risk_reviews") or 0),
+                "aged_reviews_over_24h": int((overview or {}).get("aged_reviews_over_24h") or 0),
+                "aged_reviews_over_72h": int((overview or {}).get("aged_reviews_over_72h") or 0),
+            },
+            "matches": {
+                "new_matches_24h": int((overview or {}).get("new_matches_24h") or 0),
+                "new_matches_7d": int((overview or {}).get("new_matches_7d") or 0),
+            },
+            "throughput_today": {
+                "claimed": claimed_today,
+                "completed": completed_today,
+                "completion_rate_percent": completion_rate,
+            },
+            "outcome_mix_30d": [dict(r) for r in outcome_rows],
+            "data_freshness": {
+                "last_refresh_at": last_refresh_at,
+                "hours_since_refresh": hours_since_refresh,
+                "latest_refresh": dict(latest_refresh) if latest_refresh else None,
+            },
+        }
+    )
+
+
 async def search_screened_entities(
     conn,
     name: Optional[str] = None,

@@ -26,6 +26,7 @@ class SPAStaticFiles(StaticFiles):
     _NO_FALLBACK_PREFIXES = (
         "api/",
         "auth/",
+        "dashboard/",
         "docs",
         "redoc",
         "openapi.json",
@@ -1191,6 +1192,7 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
 @app.options("/opcheck")
 @app.options("/opcheck/dataverse")
 @app.options("/opcheck/screened")
+@app.options("/dashboard/summary")
 @app.options("/review/queue")
 @app.options("/review/{entity_key}/claim")
 @app.options("/review/{entity_key}/complete")
@@ -1590,6 +1592,30 @@ async def get_opcheck_screened(
     except Exception as e:
         logger.exception("GET /opcheck/screened failed: %s", e)
         raise HTTPException(status_code=500, detail="Search failed. Please try again or contact support.")
+
+
+@app.get("/dashboard/summary", dependencies=[Depends(get_current_user)])
+@limiter.limit("120/minute")
+async def get_dashboard_summary(request: Request, payload: dict = Depends(get_current_user)):
+    """High-level dashboard metrics for operational monitoring."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Dashboard unavailable (configure DATABASE_URL)")
+    try:
+        async with pool.acquire() as conn:
+            summary = await screening_db.get_dashboard_summary(conn)
+        audit_log(
+            "data_access",
+            action="dashboard_summary",
+            actor=payload.get("sub"),
+            resource="dashboard/summary",
+            outcome="success",
+            ip=_client_ip(request),
+        )
+        return summary
+    except Exception as e:
+        logger.exception("GET /dashboard/summary failed: %s", e)
+        raise HTTPException(status_code=500, detail="Dashboard summary failed. Please try again or contact support.")
 
 
 @app.get("/review/queue", dependencies=[Depends(get_current_user)])
