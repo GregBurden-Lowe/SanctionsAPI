@@ -28,6 +28,14 @@ export interface OpCheckParams {
   name: string
   dob?: string | null
   entity_type?: string
+  business_reference: string
+  reason_for_check:
+    | 'Client Onboarding'
+    | 'Claim Payment'
+    | 'Business Partner Payment'
+    | 'Business Partner Due Diligence'
+    | 'Periodic Re-Screen'
+    | 'Ad-Hoc Compliance Review'
   requestor?: string | null
   search_backend?: 'original' | 'postgres_beta'
 }
@@ -40,6 +48,8 @@ export async function opcheck(params: OpCheckParams): Promise<Response> {
       name: params.name,
       dob: params.dob ?? null,
       entity_type: params.entity_type ?? 'Person',
+      business_reference: params.business_reference,
+      reason_for_check: params.reason_for_check,
       requestor: params.requestor ?? null,
       search_backend: params.search_backend ?? 'postgres_beta',
     }),
@@ -66,6 +76,14 @@ export interface BulkScreeningItem {
   dob?: string | null
   entity_type?: string
   requestor: string
+  business_reference: string
+  reason_for_check:
+    | 'Client Onboarding'
+    | 'Claim Payment'
+    | 'Business Partner Payment'
+    | 'Business Partner Due Diligence'
+    | 'Periodic Re-Screen'
+    | 'Ad-Hoc Compliance Review'
 }
 
 export async function enqueueBulkScreening(requests: BulkScreeningItem[]): Promise<Response> {
@@ -94,11 +112,11 @@ export async function listScreeningJobs(params: ListScreeningJobsParams = {}): P
   })
 }
 
-export async function markFalsePositive(entity_key: string, reason?: string): Promise<Response> {
+export async function markFalsePositive(entity_key: string, reason: string): Promise<Response> {
   return fetch(resolve('/admin/screening/false-positive'), {
     method: 'POST',
     headers: defaultHeaders(),
-    body: JSON.stringify({ entity_key, reason: reason ?? null }),
+    body: JSON.stringify({ entity_key, reason }),
   })
 }
 
@@ -114,6 +132,46 @@ export async function getRescreenSummary(limit = 14): Promise<Response> {
 export async function getAdminOpenApiSchema(): Promise<Response> {
   return fetch(resolve('/admin/openapi.json'), {
     method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export interface ApiKeyItem {
+  id: string
+  name: string
+  role: 'screening'
+  active: boolean
+  created_at: string
+  last_used_at: string | null
+}
+
+export interface ApiKeyCreated extends ApiKeyItem {
+  api_key: string
+}
+
+export async function listApiKeys(): Promise<Response> {
+  return fetch(resolve('/auth/api-keys'), { method: 'GET', headers: defaultHeaders() })
+}
+
+export async function createApiKey(name: string): Promise<Response> {
+  return fetch(resolve('/auth/api-keys'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ name, role: 'screening' }),
+  })
+}
+
+export async function setApiKeyActive(apiKeyId: string, active: boolean): Promise<Response> {
+  return fetch(resolve(`/auth/api-keys/${apiKeyId}`), {
+    method: 'PATCH',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ active }),
+  })
+}
+
+export async function deleteApiKey(apiKeyId: string): Promise<Response> {
+  return fetch(resolve(`/auth/api-keys/${apiKeyId}`), {
+    method: 'DELETE',
     headers: defaultHeaders(),
   })
 }
@@ -187,6 +245,7 @@ export async function signup(email: string): Promise<Response> {
 export interface SearchScreenedParams {
   name?: string
   entity_key?: string
+  business_reference?: string
   limit?: number
   offset?: number
 }
@@ -195,6 +254,7 @@ export async function searchScreened(params: SearchScreenedParams): Promise<Resp
   const sp = new URLSearchParams()
   if (params.name != null && params.name !== '') sp.set('name', params.name)
   if (params.entity_key != null && params.entity_key !== '') sp.set('entity_key', params.entity_key)
+  if (params.business_reference != null && params.business_reference !== '') sp.set('business_reference', params.business_reference)
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
   const qs = sp.toString()

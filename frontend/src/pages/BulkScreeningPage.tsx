@@ -8,7 +8,24 @@ type ParsedRow = {
   dob?: string
   entity_type: 'Person' | 'Organization'
   requestor: string
+  business_reference: string
+  reason_for_check:
+    | 'Client Onboarding'
+    | 'Claim Payment'
+    | 'Business Partner Payment'
+    | 'Business Partner Due Diligence'
+    | 'Periodic Re-Screen'
+    | 'Ad-Hoc Compliance Review'
 }
+
+const REASON_FOR_CHECK_OPTIONS = [
+  'Client Onboarding',
+  'Claim Payment',
+  'Business Partner Payment',
+  'Business Partner Due Diligence',
+  'Periodic Re-Screen',
+  'Ad-Hoc Compliance Review',
+] as const
 
 function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[]; errors: string[] } {
   const lines = text
@@ -30,6 +47,8 @@ function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[];
     const dob = cols[1] ?? ''
     const entityRaw = (cols[2] ?? 'Person').toLowerCase()
     const requestor = cols[3] || fallbackRequestor
+    const business_reference = cols[4] ?? ''
+    const reason_for_check_raw = cols[5] ?? ''
 
     if (!name) {
       errors.push(`Row ${i + 1}: name is required.`)
@@ -39,6 +58,14 @@ function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[];
       errors.push(`Row ${i + 1}: requestor is required (or set Requested By).`)
       continue
     }
+    if (!business_reference.trim()) {
+      errors.push(`Row ${i + 1}: business_reference is required.`)
+      continue
+    }
+    if (!REASON_FOR_CHECK_OPTIONS.includes(reason_for_check_raw as (typeof REASON_FOR_CHECK_OPTIONS)[number])) {
+      errors.push(`Row ${i + 1}: reason_for_check must be one of: ${REASON_FOR_CHECK_OPTIONS.join(', ')}`)
+      continue
+    }
     const entity_type: 'Person' | 'Organization' =
       entityRaw === 'organization' || entityRaw === 'organisation' ? 'Organization' : 'Person'
     rows.push({
@@ -46,6 +73,8 @@ function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[];
       dob: dob || undefined,
       entity_type,
       requestor,
+      business_reference: business_reference.trim(),
+      reason_for_check: reason_for_check_raw as ParsedRow['reason_for_check'],
     })
   }
   return { rows, errors }
@@ -93,6 +122,8 @@ export function BulkScreeningPage() {
         dob: r.dob ?? null,
         entity_type: r.entity_type,
         requestor: r.requestor,
+        business_reference: r.business_reference,
+        reason_for_check: r.reason_for_check,
       }))
       const res = await enqueueBulkScreening(payload)
       const data = await res.json().catch(() => ({}))
@@ -118,7 +149,7 @@ export function BulkScreeningPage() {
           </CardHeader>
           <CardBody className="space-y-4">
             <p className="text-sm text-text-secondary">
-              CSV columns: <code>name,dob,entity_type,requestor</code>. Header row optional. If <code>requestor</code> is blank, Requested By is used.
+              CSV columns: <code>name,dob,entity_type,requestor,business_reference,reason_for_check</code>. Header row optional. If <code>requestor</code> is blank, Requested By is used.
             </p>
             <Input
               label="Requested By"
@@ -145,7 +176,7 @@ export function BulkScreeningPage() {
                 onChange={(e) => setCsvText(e.target.value)}
                 rows={10}
                 className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary font-mono"
-                placeholder={'name,dob,entity_type,requestor\nVladimir Putin,07-10-1952,Person,\nACME Ltd,,Organisation,'}
+                placeholder={'name,dob,entity_type,requestor,business_reference,reason_for_check\nVladimir Putin,07-10-1952,Person,,CLAIM-10001,Claim Payment\nACME Ltd,,Organisation,,BP-7781,Business Partner Due Diligence'}
               />
             </div>
             {error && <ErrorBox message={error} />}

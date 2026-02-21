@@ -13,6 +13,14 @@ from datetime import datetime, timezone, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("screening_worker")
+REASON_FOR_CHECK_ALLOWED = frozenset({
+    "Client Onboarding",
+    "Claim Payment",
+    "Business Partner Payment",
+    "Business Partner Due Diligence",
+    "Periodic Re-Screen",
+    "Ad-Hoc Compliance Review",
+})
 
 def main():
     import psycopg2
@@ -41,7 +49,7 @@ def main():
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         """
-                        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor, reason, refresh_run_id, force_rescreen
+                        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen
                         FROM screening_jobs
                         WHERE status = 'pending'
                         ORDER BY created_at
@@ -62,9 +70,26 @@ def main():
                 dob = row["date_of_birth"]
                 entity_type = row["entity_type"] or "Person"
                 requestor = row["requestor"] or ""
+                business_reference = (row.get("business_reference") or "").strip()
+                reason_for_check = (row.get("reason_for_check") or "").strip()
                 reason = row.get("reason") or "manual"
                 refresh_run_id = row.get("refresh_run_id")
                 force_rescreen = bool(row.get("force_rescreen"))
+
+                validation_error = None
+                if not business_reference:
+                    validation_error = "business_reference is required"
+                elif reason_for_check not in REASON_FOR_CHECK_ALLOWED:
+                    validation_error = "reason_for_check is required and must be a valid enum value"
+                if validation_error:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE screening_jobs SET status = 'failed', finished_at = NOW(), error_message = %s WHERE job_id = %s",
+                            (validation_error, job_id),
+                        )
+                    conn.commit()
+                    logger.warning("Job %s failed validation: %s", job_id, validation_error)
+                    continue
 
                 # Mark running
                 with conn.cursor() as cur:
@@ -109,6 +134,17 @@ def main():
                         else:
                             transition = "changed"
                     with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE screened_entities
+                            SET last_requestor = %s,
+                                business_reference = %s,
+                                reason_for_check = %s,
+                                updated_at = NOW()
+                            WHERE entity_key = %s
+                            """,
+                            (requestor, business_reference, reason_for_check, entity_key),
+                        )
                         cur.execute(
                             """
                             UPDATE screening_jobs
@@ -204,10 +240,10 @@ def main():
                             entity_key, display_name, normalized_name, date_of_birth, entity_type,
                             last_screened_at, screening_valid_until,
                             status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
-                            result_json, last_requestor, updated_at,
+                            result_json, last_requestor, business_reference, reason_for_check, updated_at,
                             screened_against_uk_hash, screened_against_refresh_run_id,
                             manual_override_uk_hash, manual_override_stale
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
                         ON CONFLICT (entity_key) DO UPDATE SET
                             display_name = EXCLUDED.display_name,
                             normalized_name = EXCLUDED.normalized_name,
@@ -223,6 +259,8 @@ def main():
                             pep_flag = EXCLUDED.pep_flag,
                             result_json = EXCLUDED.result_json,
                             last_requestor = EXCLUDED.last_requestor,
+                            business_reference = EXCLUDED.business_reference,
+                            reason_for_check = EXCLUDED.reason_for_check,
                             updated_at = EXCLUDED.updated_at,
                             screened_against_uk_hash = EXCLUDED.screened_against_uk_hash,
                             screened_against_refresh_run_id = EXCLUDED.screened_against_refresh_run_id,
@@ -245,6 +283,8 @@ def main():
                             pep_flag,
                             json.dumps(result),
                             requestor,
+                            business_reference,
+                            reason_for_check,
                             now,
                             screened_against_uk_hash,
                             screened_against_refresh_run_id,

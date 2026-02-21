@@ -1,11 +1,12 @@
 # api_server.py
 
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime, timedelta
 import os
 import logging
 import secrets
+import json
 
 import jwt
 
@@ -13,7 +14,7 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, constr
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -322,6 +323,15 @@ class OpCheckRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
+    business_reference: constr(strip_whitespace=True, min_length=1) = Field(..., description="Business reference (required)")
+    reason_for_check: Literal[
+        "Client Onboarding",
+        "Claim Payment",
+        "Business Partner Payment",
+        "Business Partner Due Diligence",
+        "Periodic Re-Screen",
+        "Ad-Hoc Compliance Review",
+    ] = Field(..., description="Reason for check (required enum)")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
     search_backend: Optional[str] = Field("postgres_beta", description="'postgres_beta' (default) or 'original' (parquet)")
 
@@ -370,9 +380,18 @@ class SignupRequest(BaseModel):
     email: str = Field(..., description="User email (must be from an allowed domain); temp password is emailed via Resend")
 
 
+class ApiKeyCreateRequest(BaseModel):
+    name: constr(strip_whitespace=True, min_length=1) = Field(..., description="Display name for API key")
+    role: Literal["screening"] = Field("screening", description="API key role")
+
+
+class ApiKeyUpdateRequest(BaseModel):
+    active: bool = Field(..., description="Set whether API key is active")
+
+
 class FalsePositiveRequest(BaseModel):
     entity_key: str = Field(..., description="Entity key to clear as false positive")
-    reason: Optional[str] = Field(None, description="Optional analyst/admin reason")
+    reason: constr(strip_whitespace=True, min_length=1) = Field(..., description="Analyst/admin reason (required)")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -380,6 +399,15 @@ class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
+    business_reference: constr(strip_whitespace=True, min_length=1) = Field(..., description="Business reference (required)")
+    reason_for_check: Literal[
+        "Client Onboarding",
+        "Claim Payment",
+        "Business Partner Payment",
+        "Business Partner Due Diligence",
+        "Periodic Re-Screen",
+        "Ad-Hoc Compliance Review",
+    ] = Field(..., description="Reason for check (required enum)")
     requestor: Optional[str] = Field(None, description="User/system requesting the screening")
 
 
@@ -449,13 +477,62 @@ def _get_token_from_request(request: Request) -> str:
     return auth.replace("Bearer ", "", 1).strip()
 
 
+def _api_key_route_allowed(path: str) -> bool:
+    """API keys may access screening routes only."""
+    p = (path or "").strip()
+    return p == "/opcheck" or p.startswith("/opcheck/")
+
+
 async def get_current_user(request: Request) -> dict:
-    """Require valid GUI JWT; return payload dict with sub (email), is_admin, must_change_password."""
+    """Require valid GUI JWT, or API key for screening routes only."""
     token = _get_token_from_request(request)
     payload = _decode_token(token)
-    if not payload:
+    if payload:
+        payload["auth_type"] = "jwt"
+        return payload
+
+    pool = await screening_db.get_pool()
+    if pool is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return payload
+
+    async with pool.acquire() as conn:
+        api_key_row = await auth_db.get_active_api_key_by_token(conn, token)
+        if api_key_row is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        if not _api_key_route_allowed(request.url.path):
+            audit_log(
+                "auth",
+                action="api_key_auth",
+                actor=f"service_account:api_key:{api_key_row.get('name')}",
+                resource=request.url.path,
+                outcome="failure",
+                ip=_client_ip(request),
+                extra={"reason": "route_not_allowed", "api_key_id": str(api_key_row.get("id")), "role": api_key_row.get("role")},
+            )
+            raise HTTPException(status_code=403, detail="API keys may access screening routes only")
+
+        await auth_db.touch_api_key_last_used(conn, str(api_key_row["id"]))
+
+    context = {
+        "sub": f"service_account:api_key:{api_key_row.get('name')}",
+        "is_admin": False,
+        "must_change_password": False,
+        "auth_type": "api_key",
+        "api_key_id": str(api_key_row["id"]),
+        "api_key_name": api_key_row.get("name"),
+        "role": api_key_row.get("role"),
+    }
+    audit_log(
+        "auth",
+        action="api_key_auth",
+        actor=context["sub"],
+        resource=request.url.path,
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"api_key_id": context["api_key_id"], "api_key_name": context["api_key_name"], "role": context["role"]},
+    )
+    return context
 
 
 async def require_admin(request: Request) -> dict:
@@ -829,6 +906,90 @@ async def auth_import_users(request: Request, body: ImportUsersRequest, payload:
     return {"created": created, "skipped": skipped, "errors": errors}
 
 
+@app.get("/auth/api-keys", dependencies=[Depends(require_admin)])
+async def auth_list_api_keys(request: Request, payload: dict = Depends(require_admin)):
+    """List API keys (admin only)."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    async with pool.acquire() as conn:
+        items = await auth_db.list_api_keys(conn)
+    audit_log("admin", action="api_keys_list", actor=payload.get("sub"), outcome="success", ip=_client_ip(request), extra={"count": len(items)})
+    return {"items": items}
+
+
+@app.post("/auth/api-keys", dependencies=[Depends(require_admin)])
+async def auth_create_api_key(request: Request, body: ApiKeyCreateRequest, payload: dict = Depends(require_admin)):
+    """Create API key (admin only). Returns plaintext key once."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    async with pool.acquire() as conn:
+        created = await auth_db.create_api_key(conn, name=body.name, role=body.role)
+    audit_log(
+        "admin",
+        action="api_key_create",
+        actor=payload.get("sub"),
+        resource=created.get("id"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"name": created.get("name"), "role": created.get("role")},
+    )
+    return created
+
+
+@app.patch("/auth/api-keys/{api_key_id}", dependencies=[Depends(require_admin)])
+async def auth_update_api_key(
+    request: Request,
+    api_key_id: str,
+    body: ApiKeyUpdateRequest,
+    payload: dict = Depends(require_admin),
+):
+    """Activate/deactivate API key (admin only)."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    async with pool.acquire() as conn:
+        updated = await auth_db.set_api_key_active(conn, api_key_id, active=body.active)
+    if not updated:
+        raise HTTPException(status_code=404, detail="API key not found")
+    audit_log(
+        "admin",
+        action="api_key_update",
+        actor=payload.get("sub"),
+        resource=api_key_id,
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"active": body.active},
+    )
+    return {"status": "ok", "id": api_key_id, "active": body.active}
+
+
+@app.delete("/auth/api-keys/{api_key_id}", dependencies=[Depends(require_admin)])
+async def auth_delete_api_key(
+    request: Request,
+    api_key_id: str,
+    payload: dict = Depends(require_admin),
+):
+    """Delete API key (admin only)."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Unavailable")
+    async with pool.acquire() as conn:
+        deleted = await auth_db.delete_api_key(conn, api_key_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="API key not found")
+    audit_log(
+        "admin",
+        action="api_key_delete",
+        actor=payload.get("sub"),
+        resource=api_key_id,
+        outcome="success",
+        ip=_client_ip(request),
+    )
+    return {"status": "ok", "id": api_key_id}
+
+
 @app.post("/admin/testing/clear-screening-data", dependencies=[Depends(require_admin)])
 async def admin_clear_screening_data(request: Request, payload: dict = Depends(require_admin)):
     """
@@ -880,13 +1041,21 @@ async def admin_screening_jobs_bulk(request: Request, body: InternalScreeningBul
         s = r.get("status")
         if s in counts:
             counts[s] += 1
+    queued_job_ids = [str(r.get("job_id")) for r in results if r.get("status") == "queued" and r.get("job_id")]
     audit_log(
         "admin",
         action="bulk_screening_enqueue",
         actor=payload.get("sub"),
-        outcome="success",
+        outcome="ENQUEUED",
         ip=_client_ip(request),
-        extra={"total": len(results), **counts},
+        extra={
+            "total": len(results),
+            **counts,
+            "job_id": queued_job_ids[0] if queued_job_ids else None,
+            "job_ids_queued": queued_job_ids,
+            "business_reference": sorted({(r.business_reference or "").strip() for r in body.requests if (r.business_reference or "").strip()}),
+            "reason_for_check": sorted({str(r.reason_for_check) for r in body.requests if r.reason_for_check}),
+        },
     )
     return {"results": results, "counts": counts}
 
@@ -937,12 +1106,15 @@ async def admin_mark_false_positive(
     entity_key = (body.entity_key or "").strip()
     if not entity_key:
         raise HTTPException(status_code=400, detail="entity_key is required")
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason is required")
     async with pool.acquire() as conn:
         result = await screening_db.mark_false_positive(
             conn,
             entity_key=entity_key,
             actor=payload.get("sub") or "admin",
-            reason=body.reason,
+            reason=reason,
         )
     if result is None:
         raise HTTPException(status_code=404, detail="Screening record not found")
@@ -953,7 +1125,7 @@ async def admin_mark_false_positive(
         resource=entity_key,
         outcome="success",
         ip=_client_ip(request),
-        extra={"reason": (body.reason or "").strip() or None},
+        extra={"reason": reason},
     )
     return {
         "status": "ok",
@@ -1012,6 +1184,8 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
 @app.options("/auth/users")
 @app.options("/auth/users/import")
 @app.options("/auth/users/{user_id}")
+@app.options("/auth/api-keys")
+@app.options("/auth/api-keys/{api_key_id}")
 @app.options("/admin/testing/clear-screening-data")
 @app.options("/admin/screening/jobs/bulk")
 @app.options("/admin/screening/jobs")
@@ -1073,6 +1247,8 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob) or None
     entity_type = (data.entity_type or "Person")
     requestor = data.requestor.strip()
+    business_reference = data.business_reference.strip()
+    reason_for_check = data.reason_for_check
     search_backend = (data.search_backend or "postgres_beta").strip().lower()
     if search_backend not in ("original", "postgres_beta"):
         return JSONResponse(
@@ -1099,6 +1275,16 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                     cached_key = key_candidate
                     break
             if cached is not None:
+                try:
+                    await screening_db.update_cached_screening_metadata(
+                        conn,
+                        entity_key=cached_key,
+                        requestor=requestor,
+                        business_reference=business_reference,
+                        reason_for_check=reason_for_check,
+                    )
+                except Exception as e:
+                    logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
                 logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
                 return _attach_entity_id(cached, cached_key)
 
@@ -1120,6 +1306,8 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                     date_of_birth=dob,
                     entity_type=entity_type,
                     requestor=requestor,
+                    business_reference=business_reference,
+                    reason_for_check=reason_for_check,
                     result=results,
                     screened_against_uk_hash=latest_meta.get("uk_hash"),
                     screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
@@ -1143,6 +1331,16 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                 cached_key = key_candidate
                 break
         if cached is not None:
+            try:
+                await screening_db.update_cached_screening_metadata(
+                    conn,
+                    entity_key=cached_key,
+                    requestor=requestor,
+                    business_reference=business_reference,
+                    reason_for_check=reason_for_check,
+                )
+            except Exception as e:
+                logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
             # Reuse always first, regardless of load
             logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
             return _attach_entity_id(cached, cached_key)
@@ -1153,7 +1351,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
         if count >= threshold:
             job_id = await screening_db.enqueue_job(
                 conn, entity_key=entity_key, name=name, date_of_birth=dob,
-                entity_type=entity_type, requestor=requestor,
+                entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check,
             )
             logger.info(
                 "screening queued due to load job_id=%s entity_key=%s queue_depth=%s threshold=%s",
@@ -1180,7 +1378,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
         latest_meta = await screening_db.get_latest_uk_hash(conn)
         await screening_db.upsert_screening(
             conn, entity_key=entity_key, display_name=name, normalized_name=_normalize_text(name),
-            date_of_birth=dob, entity_type=entity_type, requestor=requestor, result=results,
+            date_of_birth=dob, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check, result=results,
             screened_against_uk_hash=latest_meta.get("uk_hash"),
             screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
         )
@@ -1189,25 +1387,141 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
 
 @app.post("/opcheck")
 @limiter.limit("60/minute")
-async def check_opensanctions(request: Request, data: OpCheckRequest):
+async def check_opensanctions(request: Request, data: OpCheckRequest, payload: dict = Depends(get_current_user)):
     """
     Screen an entity. With DB: 200 = result (reused or completed synchronously); 202 = queued due to load.
     Reuse always first. When no cache: if queue pressure is below threshold, run sync (200); else enqueue (202).
     """
-    return await _check_opensanctions_impl(data)
+    actor = payload.get("sub")
+    audit_log(
+        "screening",
+        action="screening_attempted",
+        actor=actor,
+        resource="opcheck",
+        outcome="attempted",
+        ip=_client_ip(request),
+        extra={"business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
+    )
+    try:
+        out = await _check_opensanctions_impl(data)
+        status_code = 200
+        decision = "Unknown"
+        entity_key = None
+        payload = out if isinstance(out, dict) else None
+        if isinstance(out, JSONResponse):
+            status_code = out.status_code
+            try:
+                payload = json.loads(out.body.decode("utf-8")) if out.body else {}
+            except Exception:
+                payload = {}
+        if isinstance(payload, dict):
+            summary = payload.get("Check Summary") if isinstance(payload.get("Check Summary"), dict) else {}
+            decision = (
+                summary.get("Status")
+                or ("Queued" if payload.get("status") == "queued" else None)
+                or payload.get("error")
+                or payload.get("detail")
+                or "Unknown"
+            )
+            entity_key = payload.get("entity_key")
+        audit_log(
+            "screening",
+            action="screening_completed",
+            actor=actor,
+            resource="opcheck",
+            outcome="success" if status_code < 400 else "failure",
+            ip=_client_ip(request),
+            extra={
+                "decision": str(decision),
+                "status_code": status_code,
+                "entity_key": entity_key,
+                "business_reference": data.business_reference,
+                "reason_for_check": data.reason_for_check,
+            },
+        )
+        return out
+    except Exception:
+        audit_log(
+            "screening",
+            action="screening_completed",
+            actor=actor,
+            resource="opcheck",
+            outcome="failure",
+            ip=_client_ip(request),
+            extra={"decision": "Unhandled exception", "business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
+        )
+        raise
 
 
 @app.post("/opcheck/dataverse")
 @limiter.limit("60/minute")
-async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest):
+async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, payload: dict = Depends(get_current_user)):
     """
     Dataverse-facing opcheck route. Behavior is intentionally identical to /opcheck,
     and responses include entity_id (alias of entity_key) for downstream linking.
     """
-    return await _check_opensanctions_impl(data)
+    actor = payload.get("sub")
+    audit_log(
+        "screening",
+        action="screening_attempted",
+        actor=actor,
+        resource="opcheck/dataverse",
+        outcome="attempted",
+        ip=_client_ip(request),
+        extra={"business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
+    )
+    try:
+        out = await _check_opensanctions_impl(data)
+        status_code = 200
+        decision = "Unknown"
+        entity_key = None
+        payload = out if isinstance(out, dict) else None
+        if isinstance(out, JSONResponse):
+            status_code = out.status_code
+            try:
+                payload = json.loads(out.body.decode("utf-8")) if out.body else {}
+            except Exception:
+                payload = {}
+        if isinstance(payload, dict):
+            summary = payload.get("Check Summary") if isinstance(payload.get("Check Summary"), dict) else {}
+            decision = (
+                summary.get("Status")
+                or ("Queued" if payload.get("status") == "queued" else None)
+                or payload.get("error")
+                or payload.get("detail")
+                or "Unknown"
+            )
+            entity_key = payload.get("entity_key")
+        audit_log(
+            "screening",
+            action="screening_completed",
+            actor=actor,
+            resource="opcheck/dataverse",
+            outcome="success" if status_code < 400 else "failure",
+            ip=_client_ip(request),
+            extra={
+                "decision": str(decision),
+                "status_code": status_code,
+                "entity_key": entity_key,
+                "business_reference": data.business_reference,
+                "reason_for_check": data.reason_for_check,
+            },
+        )
+        return out
+    except Exception:
+        audit_log(
+            "screening",
+            action="screening_completed",
+            actor=actor,
+            resource="opcheck/dataverse",
+            outcome="failure",
+            ip=_client_ip(request),
+            extra={"decision": "Unhandled exception", "business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
+        )
+        raise
 
 
-@app.get("/opcheck/jobs/{job_id}")
+@app.get("/opcheck/jobs/{job_id}", dependencies=[Depends(get_current_user)])
 @limiter.limit("60/minute")
 async def get_opcheck_job(request: Request, job_id: str):
     """Return job status; when completed, include the screening result."""
@@ -1227,12 +1541,16 @@ async def get_opcheck_screened(
     payload: dict = Depends(get_current_user),
     name: Optional[str] = None,
     entity_key: Optional[str] = None,
+    business_reference: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ):
     """Search screened_entities by name (partial) and/or entity_key (exact). Requires at least one. Auth required."""
-    if not (name or entity_key) or (not (name or "").strip() and not (entity_key or "").strip()):
-        raise HTTPException(status_code=400, detail="Provide at least one of name or entity_key")
+    if (
+        not (name or entity_key or business_reference)
+        or (not (name or "").strip() and not (entity_key or "").strip() and not (business_reference or "").strip())
+    ):
+        raise HTTPException(status_code=400, detail="Provide at least one of name, entity_key, or business_reference")
     pool = await screening_db.get_pool()
     if pool is None:
         raise HTTPException(status_code=503, detail="Search unavailable (configure DATABASE_URL)")
@@ -1241,7 +1559,12 @@ async def get_opcheck_screened(
     try:
         async with pool.acquire() as conn:
             items = await screening_db.search_screened_entities(
-                conn, name=(name or "").strip() or None, entity_key=(entity_key or "").strip() or None, limit=limit, offset=offset,
+                conn,
+                name=(name or "").strip() or None,
+                entity_key=(entity_key or "").strip() or None,
+                business_reference=(business_reference or "").strip() or None,
+                limit=limit,
+                offset=offset,
             )
         audit_log("data_access", action="screened_search", actor=payload.get("sub"), resource="opcheck/screened", outcome="success", ip=_client_ip(request), extra={"count": len(items)})
         return {"items": items}
@@ -1268,6 +1591,9 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
         return {"status": "error", "error": "missing_name"}
     if not requestor:
         return {"status": "error", "error": "missing_requestor"}
+    business_reference = (item.business_reference or "").strip()
+    if not business_reference:
+        return {"status": "error", "error": "missing_business_reference"}
     dob = (item.dob.strip() if isinstance(item.dob, str) else item.dob) or None
     entity_type = (item.entity_type or "Person")
 
@@ -1287,7 +1613,7 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
 
     job_id = await screening_db.enqueue_job(
         conn, entity_key=entity_key, name=name, date_of_birth=dob,
-        entity_type=entity_type, requestor=requestor,
+        entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=item.reason_for_check,
     )
     return {"status": "queued", "job_id": job_id}
 
@@ -1310,7 +1636,20 @@ async def internal_screening_jobs(request: Request, data: InternalScreeningReque
         outcome = await _internal_screening_outcome(conn, data)
     if outcome.get("status") == "error":
         raise HTTPException(status_code=400, detail=outcome.get("error", "validation error"))
-    logger.info("internal screening status=%s job_id=%s", outcome.get("status"), outcome.get("job_id"))
+    audit_log(
+        "screening",
+        action="internal_screening_enqueue",
+        actor=(data.requestor or "").strip() or "internal_api",
+        resource="internal/screening/jobs",
+        outcome="ENQUEUED",
+        ip=_client_ip(request),
+        extra={
+            "status": outcome.get("status"),
+            "job_id": outcome.get("job_id"),
+            "business_reference": data.business_reference,
+            "reason_for_check": data.reason_for_check,
+        },
+    )
     return outcome
 
 
@@ -1340,8 +1679,23 @@ async def internal_screening_jobs_bulk(request: Request, body: InternalScreening
         s = r.get("status")
         if s in counts:
             counts[s] += 1
-    logger.info("internal screening bulk total=%s reused=%s already_pending=%s queued=%s errors=%s",
-                len(results), counts["reused"], counts["already_pending"], counts["queued"], counts["error"])
+    queued_job_ids = [str(r.get("job_id")) for r in results if r.get("status") == "queued" and r.get("job_id")]
+    audit_log(
+        "screening",
+        action="internal_bulk_screening_enqueue",
+        actor="internal_api_bulk",
+        resource="internal/screening/jobs/bulk",
+        outcome="ENQUEUED",
+        ip=_client_ip(request),
+        extra={
+            "total": len(results),
+            **counts,
+            "job_id": queued_job_ids[0] if queued_job_ids else None,
+            "job_ids_queued": queued_job_ids,
+            "business_reference": sorted({(r.business_reference or "").strip() for r in body.requests if (r.business_reference or "").strip()}),
+            "reason_for_check": sorted({str(r.reason_for_check) for r in body.requests if r.reason_for_check}),
+        },
+    )
     return {"results": results}
 
 
@@ -1458,6 +1812,8 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
                                     date_of_birth=dob_str,
                                     entity_type=str(candidate.get("entity_type") or "Person"),
                                     requestor=system_requestor,
+                                    business_reference=f"UK-DELTA-{refresh_run_id}",
+                                    reason_for_check="Periodic Re-Screen",
                                     reason="uk_delta_rescreen",
                                     refresh_run_id=refresh_run_id,
                                     force_rescreen=True,

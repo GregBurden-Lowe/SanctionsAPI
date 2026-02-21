@@ -14,6 +14,14 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 _pool: Any = None
+_REASON_FOR_CHECK_ALLOWED = frozenset({
+    "Client Onboarding",
+    "Claim Payment",
+    "Business Partner Payment",
+    "Business Partner Due Diligence",
+    "Periodic Re-Screen",
+    "Ad-Hoc Compliance Review",
+})
 
 
 def _uk_sanctions_from_result(result: Dict[str, Any]) -> bool:
@@ -71,6 +79,8 @@ async def ensure_schema(conn) -> None:
             pep_flag        BOOLEAN NOT NULL DEFAULT FALSE,
             result_json     JSONB NOT NULL,
             last_requestor  TEXT,
+            business_reference TEXT,
+            reason_for_check TEXT,
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
@@ -86,6 +96,8 @@ async def ensure_schema(conn) -> None:
             date_of_birth   TEXT,
             entity_type     TEXT NOT NULL DEFAULT 'Person',
             requestor       TEXT NOT NULL,
+            business_reference TEXT,
+            reason_for_check TEXT,
             reason          TEXT NOT NULL DEFAULT 'manual',
             refresh_run_id  UUID,
             force_rescreen  BOOLEAN NOT NULL DEFAULT FALSE,
@@ -159,8 +171,24 @@ async def ensure_schema(conn) -> None:
         ADD COLUMN IF NOT EXISTS manual_override_stale BOOLEAN NOT NULL DEFAULT FALSE
     """)
     await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS business_reference TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS reason_for_check TEXT
+    """)
+    await conn.execute("""
         ALTER TABLE screening_jobs
         ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT 'manual'
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS business_reference TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS reason_for_check TEXT
     """)
     await conn.execute("""
         ALTER TABLE screening_jobs
@@ -221,11 +249,19 @@ async def upsert_screening(
     date_of_birth: Optional[str],
     entity_type: str,
     requestor: str,
+    business_reference: Optional[str],
+    reason_for_check: Optional[str],
     result: Dict[str, Any],
     screened_against_uk_hash: Optional[str] = None,
     screened_against_refresh_run_id: Optional[str] = None,
 ) -> None:
     """Insert or replace screened_entities row. Sets validity to last_screened_at + 12 months."""
+    business_reference_clean = (business_reference or "").strip()
+    reason_for_check_clean = (reason_for_check or "").strip()
+    if not business_reference_clean:
+        raise ValueError("business_reference is required")
+    if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
+        raise ValueError("reason_for_check is required and must be a valid enum value")
     now = datetime.now(timezone.utc)
     valid_until = now + timedelta(days=365)
     status = (result.get("Check Summary") or {}).get("Status") or "Unknown"
@@ -248,10 +284,10 @@ async def upsert_screening(
             entity_key, display_name, normalized_name, date_of_birth, entity_type,
             last_screened_at, screening_valid_until,
             status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
-            result_json, last_requestor, updated_at,
+            result_json, last_requestor, business_reference, reason_for_check, updated_at,
             screened_against_uk_hash, screened_against_refresh_run_id,
             manual_override_uk_hash, manual_override_stale
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::uuid, NULL, FALSE)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::uuid, NULL, FALSE)
         ON CONFLICT (entity_key) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             normalized_name = EXCLUDED.normalized_name,
@@ -267,6 +303,8 @@ async def upsert_screening(
             pep_flag = EXCLUDED.pep_flag,
             result_json = EXCLUDED.result_json,
             last_requestor = EXCLUDED.last_requestor,
+            business_reference = EXCLUDED.business_reference,
+            reason_for_check = EXCLUDED.reason_for_check,
             updated_at = EXCLUDED.updated_at,
             screened_against_uk_hash = EXCLUDED.screened_against_uk_hash,
             screened_against_refresh_run_id = EXCLUDED.screened_against_refresh_run_id,
@@ -288,9 +326,42 @@ async def upsert_screening(
         pep_flag,
         json.dumps(result),
         requestor,
+        business_reference_clean,
+        reason_for_check_clean,
         now,
         screened_against_uk_hash,
         screened_against_refresh_run_id,
+    )
+
+
+async def update_cached_screening_metadata(
+    conn,
+    *,
+    entity_key: str,
+    requestor: str,
+    business_reference: Optional[str],
+    reason_for_check: Optional[str],
+) -> None:
+    """Update request metadata when a cached screening is reused."""
+    business_reference_clean = (business_reference or "").strip()
+    reason_for_check_clean = (reason_for_check or "").strip()
+    if not business_reference_clean:
+        raise ValueError("business_reference is required")
+    if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
+        raise ValueError("reason_for_check is required and must be a valid enum value")
+    await conn.execute(
+        """
+        UPDATE screened_entities
+        SET last_requestor = $2,
+            business_reference = $3,
+            reason_for_check = $4,
+            updated_at = NOW()
+        WHERE entity_key = $1
+        """,
+        entity_key,
+        requestor,
+        business_reference_clean,
+        reason_for_check_clean,
     )
 
 
@@ -322,17 +393,25 @@ async def enqueue_job(
     date_of_birth: Optional[str],
     entity_type: str,
     requestor: str,
+    business_reference: Optional[str] = None,
+    reason_for_check: Optional[str] = None,
     reason: str = "manual",
     refresh_run_id: Optional[str] = None,
     force_rescreen: bool = False,
 ) -> str:
     """Insert a pending job; return job_id (UUID string)."""
+    business_reference_clean = (business_reference or "").strip()
+    reason_for_check_clean = (reason_for_check or "").strip()
+    if not business_reference_clean:
+        raise ValueError("business_reference is required")
+    if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
+        raise ValueError("reason_for_check is required and must be a valid enum value")
     row = await conn.fetchrow(
         """
         INSERT INTO screening_jobs (
-            entity_key, name, date_of_birth, entity_type, requestor, reason, refresh_run_id, force_rescreen, status
+            entity_key, name, date_of_birth, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen, status
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8, 'pending')
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10, 'pending')
         RETURNING job_id
         """,
         entity_key,
@@ -340,6 +419,8 @@ async def enqueue_job(
         date_of_birth,
         entity_type or "Person",
         requestor,
+        business_reference_clean,
+        reason_for_check_clean,
         reason or "manual",
         refresh_run_id,
         bool(force_rescreen),
@@ -575,6 +656,7 @@ async def search_screened_entities(
     conn,
     name: Optional[str] = None,
     entity_key: Optional[str] = None,
+    business_reference: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> List[Dict[str, Any]]:
@@ -595,6 +677,10 @@ async def search_screened_entities(
         pattern = f"%{name.strip()}%"
         conditions.append(f"(display_name ILIKE ${n} OR normalized_name ILIKE ${n})")
         args.append(pattern)
+    if business_reference and business_reference.strip():
+        n += 1
+        conditions.append(f"business_reference = ${n}")
+        args.append(business_reference.strip())
     if not conditions:
         return []
     limit = max(1, min(100, limit))
@@ -604,7 +690,7 @@ async def search_screened_entities(
     query = f"""
         SELECT entity_key, display_name, normalized_name, date_of_birth, entity_type,
                last_screened_at, screening_valid_until, status, risk_level, confidence, score,
-               uk_sanctions_flag, pep_flag, result_json, last_requestor, updated_at
+               uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check, updated_at
         FROM screened_entities
         WHERE {where_sql}
         ORDER BY last_screened_at DESC
@@ -845,6 +931,7 @@ async def list_screening_jobs(
             j.date_of_birth,
             j.entity_type,
             j.requestor,
+            j.reason_for_check,
             j.reason,
             j.refresh_run_id,
             j.force_rescreen,
