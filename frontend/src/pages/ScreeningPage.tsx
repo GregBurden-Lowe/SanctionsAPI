@@ -40,12 +40,25 @@ function formatEntityTypeLabel(entityType: string): string {
   return entityType === 'Organization' ? 'Organisation' : entityType
 }
 
+const REASON_FOR_CHECK_OPTIONS = [
+  'Client Onboarding',
+  'Claim Payment',
+  'Business Partner Payment',
+  'Business Partner Due Diligence',
+  'Periodic Re-Screen',
+  'Ad-Hoc Compliance Review',
+] as const
+
+type ReasonForCheck = (typeof REASON_FOR_CHECK_OPTIONS)[number]
+
 export function ScreeningPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [name, setName] = useState('')
   const [dob, setDob] = useState('')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>('Person')
+  const [businessReference, setBusinessReference] = useState('')
+  const [reasonForCheck, setReasonForCheck] = useState<ReasonForCheck>('Client Onboarding')
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -62,6 +75,7 @@ export function ScreeningPage() {
     setError(null)
     const nameTrim = name.trim()
     const dobTrim = dob.trim()
+    const businessReferenceTrim = businessReference.trim()
     const requestorTrim = requestor.trim()
     if (!nameTrim) {
       setError("Please provide 'name' to run a check.")
@@ -71,12 +85,18 @@ export function ScreeningPage() {
       setError("Please provide 'requestor' (your name) to run a check.")
       return
     }
+    if (!businessReferenceTrim) {
+      setError("Please provide 'business_reference' (business reference) to run a check.")
+      return
+    }
     setLoading(true)
     try {
       const res = await opcheck({
         name: nameTrim,
         dob: dobTrim || null,
         entity_type: entityType,
+        business_reference: businessReferenceTrim,
+        reason_for_check: reasonForCheck,
         requestor: requestorTrim,
         search_backend: 'postgres_beta',
       })
@@ -92,6 +112,8 @@ export function ScreeningPage() {
           searchName: nameTrim,
           entityType,
           searchDob: dobTrim,
+          businessReference: businessReferenceTrim,
+          reasonForCheck,
           requestor: requestorTrim,
           searchBackend: 'postgres_beta',
         },
@@ -145,6 +167,35 @@ export function ScreeningPage() {
               onChange={(e) => setDob(e.target.value)}
               placeholder="DD-MM-YYYY or YYYY"
             />
+                </div>
+                <div className="md:col-span-2">
+            <Input
+              label="Business reference"
+              value={businessReference}
+              onChange={(e) => setBusinessReference(e.target.value)}
+              placeholder="e.g. BR-2026-000123"
+              required
+            />
+                </div>
+                <div className="md:col-span-2">
+            <div>
+              <label htmlFor="reason_for_check" className="block text-xs font-medium text-text-primary mb-1">
+                Reason for check
+              </label>
+              <select
+                id="reason_for_check"
+                value={reasonForCheck}
+                onChange={(e) => setReasonForCheck(e.target.value as ReasonForCheck)}
+                className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+                required
+              >
+                {REASON_FOR_CHECK_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </div>
                 </div>
                 <div className="md:col-span-2">
             <Input
@@ -211,8 +262,16 @@ function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) 
             <dd className="text-text-primary mt-0.5">{searchDetails.searchDob?.trim() ? searchDetails.searchDob : 'Not provided'}</dd>
           </div>
           <div className="sm:col-span-2">
+            <dt className="text-xs font-medium text-text-muted">Reason for check</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.reasonForCheck || '—'}</dd>
+          </div>
+          <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Requestor</dt>
             <dd className="text-text-primary mt-0.5">{searchDetails.requestor || '—'}</dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-xs font-medium text-text-muted">Business reference</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.businessReference || '—'}</dd>
           </div>
         </dl>
       </CardBody>

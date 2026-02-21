@@ -31,6 +31,7 @@ export function SearchDatabasePage() {
   const { user } = useAuth()
   const [searchName, setSearchName] = useState('')
   const [searchEntityKey, setSearchEntityKey] = useState('')
+  const [searchBusinessReference, setSearchBusinessReference] = useState('')
   const [loading, setLoading] = useState(false)
   const [hasSearched, setHasSearched] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -45,8 +46,9 @@ export function SearchDatabasePage() {
     setError(null)
     const nameTrim = searchName.trim()
     const keyTrim = searchEntityKey.trim()
-    if (!nameTrim && !keyTrim) {
-      setError('Provide at least one of name or entity key.')
+    const businessReferenceTrim = searchBusinessReference.trim()
+    if (!nameTrim && !keyTrim && !businessReferenceTrim) {
+      setError('Provide at least one of name, entity key, or business reference.')
       return
     }
     setHasSearched(true)
@@ -55,6 +57,7 @@ export function SearchDatabasePage() {
       const res = await searchScreened({
         name: nameTrim || undefined,
         entity_key: keyTrim || undefined,
+        business_reference: businessReferenceTrim || undefined,
         limit: 50,
       })
       const data = await res.json()
@@ -77,11 +80,18 @@ export function SearchDatabasePage() {
       'Mark this screening result as a false positive and clear the sanction outcome?',
     )
     if (!confirmed) return
+    const reasonInput = window.prompt('Reason for false positive override (required):', '')
+    if (reasonInput === null) return
+    const reason = reasonInput.trim()
+    if (!reason) {
+      setOverrideError('Reason is required.')
+      return
+    }
     setOverrideLoading(true)
     setOverrideError(null)
     setOverrideSuccess(null)
     try {
-      const res = await markFalsePositive(detailRow.entity_key)
+      const res = await markFalsePositive(detailRow.entity_key, reason)
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setOverrideError((data as { detail?: string }).detail ?? 'Failed to clear false positive.')
@@ -134,7 +144,7 @@ export function SearchDatabasePage() {
           </CardHeader>
           <CardBody>
             <p className="text-sm text-text-secondary mb-4">
-              Search by name (partial match) or entity key (exact). Provide at least one.
+              Search by name (partial match), entity key (exact), or business reference (exact). Provide at least one.
             </p>
             <form onSubmit={handleSearch} className="space-y-4">
               <Input
@@ -148,6 +158,12 @@ export function SearchDatabasePage() {
                 value={searchEntityKey}
                 onChange={(e) => setSearchEntityKey(e.target.value)}
                 placeholder="Exact entity key from a screening"
+              />
+              <Input
+                label="Search by business reference"
+                value={searchBusinessReference}
+                onChange={(e) => setSearchBusinessReference(e.target.value)}
+                placeholder="Exact business reference"
               />
               {error && <ErrorBox message={error} />}
               <Button type="submit" disabled={loading}>
@@ -258,6 +274,8 @@ export function SearchDatabasePage() {
               <span className="font-medium">Entity key</span>{' '}
               <code className="text-xs bg-surface px-1 rounded">{detailRow.entity_key}</code>
               {' · '}
+              <span className="font-medium">Business reference</span> {detailRow.business_reference ?? '—'}
+              {' · '}
               <span className="font-medium">Requestor</span> {detailRow.last_requestor ?? '—'}
               {' · '}
               <span className="font-medium">Last screened</span> {formatDate(detailRow.last_screened_at)}
@@ -268,6 +286,8 @@ export function SearchDatabasePage() {
                 searchName: detailRow.display_name,
                 entityType: detailRow.entity_type,
                 searchDob: detailRow.date_of_birth ?? '',
+                businessReference: detailRow.business_reference ?? '',
+                reasonForCheck: detailRow.reason_for_check ?? '',
                 requestor: detailRow.last_requestor ?? '',
               }}
             />
