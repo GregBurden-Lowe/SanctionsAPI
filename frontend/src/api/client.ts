@@ -111,6 +111,13 @@ export async function getRescreenSummary(limit = 14): Promise<Response> {
   })
 }
 
+export async function getAdminOpenApiSchema(): Promise<Response> {
+  return fetch(resolve('/admin/openapi.json'), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
 export interface ApiUser {
   id: string
   email: string

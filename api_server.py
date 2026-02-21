@@ -24,6 +24,10 @@ class SPAStaticFiles(StaticFiles):
     _NO_FALLBACK_PREFIXES = (
         "api/",
         "auth/",
+        "docs",
+        "redoc",
+        "openapi.json",
+        "admin/openapi.json",
         "opcheck",
         "internal/",
         "refresh_opensanctions",
@@ -228,7 +232,14 @@ async def lifespan(app: FastAPI):
     await screening_db.close_pool()
 
 
-app = FastAPI(title="Sanctions/PEP Screening API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Sanctions/PEP Screening API",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 _RATE_LIMIT_STORAGE_URL = os.environ.get("RATE_LIMIT_STORAGE_URL", "").strip()
 if _RATE_LIMIT_STORAGE_URL:
     limiter = Limiter(key_func=_rate_limit_key, storage_uri=_RATE_LIMIT_STORAGE_URL)
@@ -975,6 +986,20 @@ async def admin_rescreen_summary(
     return summary
 
 
+@app.get("/admin/openapi.json", dependencies=[Depends(require_admin)])
+@limiter.limit("30/minute")
+async def admin_openapi_schema(request: Request, payload: dict = Depends(require_admin)):
+    """Return OpenAPI schema for authenticated admin users."""
+    audit_log(
+        "admin",
+        action="openapi_schema",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+    )
+    return app.openapi()
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/screened")
 @app.options("/refresh_opensanctions")
@@ -991,6 +1016,7 @@ async def admin_rescreen_summary(
 @app.options("/admin/screening/jobs")
 @app.options("/admin/screening/false-positive")
 @app.options("/admin/screening/rescreen-summary")
+@app.options("/admin/openapi.json")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():

@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Button, Card, CardHeader, CardTitle, CardBody, SectionHeader, ErrorBox } from '@/components'
 import { clearScreeningData, getRescreenSummary } from '@/api/client'
 import type { RefreshRunSummaryResponse } from '@/types/api'
 
 export function AdminPage() {
+  const navigate = useNavigate()
   const [clearing, setClearing] = useState(false)
   const [clearError, setClearError] = useState<string | null>(null)
   const [clearResponse, setClearResponse] = useState<{ status: string; screened_entities_removed: number; screening_jobs_removed: number } | null>(null)
@@ -66,10 +68,15 @@ export function AdminPage() {
           <CardHeader>
             <CardTitle>Data refresh mode</CardTitle>
           </CardHeader>
-          <CardBody>
+          <CardBody className="space-y-3">
             <p className="text-sm text-text-secondary">
               OpenSanctions refresh is now API/cron driven and syncs Postgres by default. Use your 22:00 droplet cron job to keep watchlist tables current.
             </p>
+            <div>
+              <Button type="button" variant="secondary" onClick={() => navigate('/admin/docs')}>
+                Open API docs
+              </Button>
+            </div>
           </CardBody>
         </Card>
         <Card>

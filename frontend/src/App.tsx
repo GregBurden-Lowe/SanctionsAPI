@@ -9,6 +9,7 @@ import { UsersPage } from '@/pages/UsersPage'
 import { SearchDatabasePage } from '@/pages/SearchDatabasePage'
 import { BulkScreeningPage } from '@/pages/BulkScreeningPage'
 import { ScreeningJobsPage } from '@/pages/ScreeningJobsPage'
+import { AdminApiDocsPage } from '@/pages/AdminApiDocsPage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -86,6 +87,14 @@ export default function App() {
               element={
                 <AdminRoute>
                   <ScreeningJobsPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="admin/docs"
+              element={
+                <AdminRoute>
+                  <AdminApiDocsPage />
                 </AdminRoute>
               }
             />
