@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 from typing import Optional, List, Literal
 from datetime import datetime, timedelta
+from enum import Enum
 import os
 import logging
 import secrets
@@ -30,6 +31,7 @@ class SPAStaticFiles(StaticFiles):
         "openapi.json",
         "admin/openapi.json",
         "opcheck",
+        "review/",
         "internal/",
         "refresh_opensanctions",
         "health",
@@ -392,6 +394,20 @@ class ApiKeyUpdateRequest(BaseModel):
 class FalsePositiveRequest(BaseModel):
     entity_key: str = Field(..., description="Entity key to clear as false positive")
     reason: constr(strip_whitespace=True, min_length=1) = Field(..., description="Analyst/admin reason (required)")
+
+
+class ReviewOutcome(str, Enum):
+    FALSE_POSITIVE_PROCEEDED = "False Positive - Proceeded"
+    FALSE_POSITIVE_PAYMENT_RELEASED = "False Positive - Payment Released"
+    CONFIRMED_MATCH_PAYMENT_BLOCKED = "Confirmed Match - Payment Blocked"
+    CONFIRMED_MATCH_ESCALATED = "Confirmed Match - Escalated to Compliance"
+    PENDING_EXTERNAL_REVIEW = "Pending External Review"
+    CANCELLED_NO_ACTION = "Cancelled / No Action Required"
+
+
+class ReviewCompleteRequest(BaseModel):
+    review_outcome: ReviewOutcome = Field(..., description="Mandatory structured review outcome")
+    review_notes: constr(strip_whitespace=True, min_length=10) = Field(..., description="Mandatory review notes (min 10 chars)")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -1175,6 +1191,9 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
 @app.options("/opcheck")
 @app.options("/opcheck/dataverse")
 @app.options("/opcheck/screened")
+@app.options("/review/queue")
+@app.options("/review/{entity_key}/claim")
+@app.options("/review/{entity_key}/complete")
 @app.options("/refresh_opensanctions")
 @app.options("/auth/config")
 @app.options("/auth/login")
@@ -1571,6 +1590,133 @@ async def get_opcheck_screened(
     except Exception as e:
         logger.exception("GET /opcheck/screened failed: %s", e)
         raise HTTPException(status_code=500, detail="Search failed. Please try again or contact support.")
+
+
+@app.get("/review/queue", dependencies=[Depends(get_current_user)])
+@limiter.limit("120/minute")
+async def get_review_queue(
+    request: Request,
+    payload: dict = Depends(get_current_user),
+    review_status: Optional[str] = None,
+    business_reference: Optional[str] = None,
+    reason_for_check: Optional[str] = None,
+    include_cleared: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Return potential-match review queue. By default excludes Cleared decisions unless include_cleared=true."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Review queue unavailable (configure DATABASE_URL)")
+    try:
+        async with pool.acquire() as conn:
+            items = await screening_db.list_review_queue(
+                conn,
+                review_status=(review_status or "").strip() or None,
+                business_reference=(business_reference or "").strip() or None,
+                reason_for_check=(reason_for_check or "").strip() or None,
+                include_cleared=bool(include_cleared),
+                limit=limit,
+                offset=offset,
+            )
+        return {"items": items}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("GET /review/queue failed: %s", e)
+        raise HTTPException(status_code=500, detail="Review queue failed. Please try again or contact support.")
+
+
+@app.post("/review/{entity_key}/claim", dependencies=[Depends(get_current_user)])
+@limiter.limit("120/minute")
+async def claim_review(
+    request: Request,
+    entity_key: str,
+    payload: dict = Depends(get_current_user),
+):
+    """Claim an unreviewed potential match for review."""
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Review queue unavailable (configure DATABASE_URL)")
+    actor = payload.get("sub")
+    async with pool.acquire() as conn:
+        out = await screening_db.claim_review(
+            conn,
+            entity_key=(entity_key or "").strip(),
+            claimed_by=str(actor or "").strip() or "unknown_user",
+        )
+    if out.get("status") != "ok":
+        err = out.get("error")
+        if err == "not_found":
+            raise HTTPException(status_code=404, detail="Entity not found")
+        if err == "not_reviewable":
+            raise HTTPException(status_code=409, detail="Only potential matches can be claimed for review")
+        raise HTTPException(status_code=409, detail="Only unreviewed matches can be claimed")
+    item = out.get("item") or {}
+    audit_log(
+        "review",
+        action="REVIEW_CLAIMED",
+        actor=actor,
+        resource=str(item.get("entity_key") or entity_key),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={
+            "entity_key": item.get("entity_key"),
+            "business_reference": item.get("business_reference"),
+            "reason_for_check": item.get("reason_for_check"),
+        },
+    )
+    return {"status": "ok", "item": item}
+
+
+@app.post("/review/{entity_key}/complete", dependencies=[Depends(get_current_user)])
+@limiter.limit("120/minute")
+async def complete_review(
+    request: Request,
+    entity_key: str,
+    body: ReviewCompleteRequest,
+    payload: dict = Depends(get_current_user),
+):
+    """
+    Complete an in-review match with mandatory structured outcome and notes.
+    Original screening decision fields remain unchanged.
+    """
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Review queue unavailable (configure DATABASE_URL)")
+    actor = payload.get("sub")
+    try:
+        async with pool.acquire() as conn:
+            out = await screening_db.complete_review(
+                conn,
+                entity_key=(entity_key or "").strip(),
+                completed_by=str(actor or "").strip() or "unknown_user",
+                review_outcome=body.review_outcome.value,
+                review_notes=body.review_notes,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if out.get("status") != "ok":
+        err = out.get("error")
+        if err == "not_found":
+            raise HTTPException(status_code=404, detail="Entity not found")
+        raise HTTPException(status_code=409, detail="Only IN_REVIEW matches can be completed")
+    item = out.get("item") or {}
+    audit_log(
+        "review",
+        action="REVIEW_COMPLETED",
+        actor=actor,
+        resource=str(item.get("entity_key") or entity_key),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={
+            "entity_key": item.get("entity_key"),
+            "business_reference": item.get("business_reference"),
+            "reason_for_check": item.get("reason_for_check"),
+            "review_outcome": item.get("review_outcome"),
+        },
+    )
+    return {"status": "ok", "item": item}
 
 
 # ---------------------------

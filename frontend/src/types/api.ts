@@ -19,6 +19,16 @@ export interface OpCheckRequest {
   search_backend?: 'original' | 'postgres_beta'
 }
 
+export type ReviewStatus = 'UNREVIEWED' | 'IN_REVIEW' | 'COMPLETED'
+
+export type ReviewOutcome =
+  | 'False Positive - Proceeded'
+  | 'False Positive - Payment Released'
+  | 'Confirmed Match - Payment Blocked'
+  | 'Confirmed Match - Escalated to Compliance'
+  | 'Pending External Review'
+  | 'Cancelled / No Action Required'
+
 /** Backend error response (400/500) */
 export interface ApiErrorResponse {
   error?: string
@@ -73,7 +83,26 @@ export interface ScreenedEntity {
   pep_flag: boolean;
   result_json: OpCheckResponse;
   last_requestor: string | null;
+  review_status: string | null;
+  review_claimed_by: string | null;
+  review_claimed_at: string | null;
+  review_outcome: string | null;
+  review_notes: string | null;
+  review_completed_by: string | null;
+  review_completed_at: string | null;
   updated_at: string;
+}
+
+export interface ReviewQueueItem {
+  entity_name: string
+  entity_key: string
+  decision: string
+  business_reference: string | null
+  reason_for_check: string | null
+  screening_user: string | null
+  screening_timestamp: string | null
+  review_status: ReviewStatus
+  review_claimed_by: string | null
 }
 
 export interface RefreshRequest {

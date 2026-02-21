@@ -11,6 +11,7 @@ import { BulkScreeningPage } from '@/pages/BulkScreeningPage'
 import { ScreeningJobsPage } from '@/pages/ScreeningJobsPage'
 import { AdminApiDocsPage } from '@/pages/AdminApiDocsPage'
 import { ApiKeysPage } from '@/pages/ApiKeysPage'
+import { MatchReviewPage } from '@/pages/MatchReviewPage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -59,6 +60,7 @@ export default function App() {
             <Route index element={<ScreeningPage />} />
             <Route path="results" element={<ScreeningResultPage />} />
             <Route path="search" element={<SearchDatabasePage />} />
+            <Route path="review" element={<MatchReviewPage />} />
             <Route
               path="admin"
               element={

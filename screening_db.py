@@ -22,6 +22,15 @@ _REASON_FOR_CHECK_ALLOWED = frozenset({
     "Periodic Re-Screen",
     "Ad-Hoc Compliance Review",
 })
+_REVIEW_STATUS_ALLOWED = frozenset({"IN_REVIEW", "COMPLETED"})
+_REVIEW_OUTCOME_ALLOWED = frozenset({
+    "False Positive - Proceeded",
+    "False Positive - Payment Released",
+    "Confirmed Match - Payment Blocked",
+    "Confirmed Match - Escalated to Compliance",
+    "Pending External Review",
+    "Cancelled / No Action Required",
+})
 
 
 def _uk_sanctions_from_result(result: Dict[str, Any]) -> bool:
@@ -81,6 +90,13 @@ async def ensure_schema(conn) -> None:
             last_requestor  TEXT,
             business_reference TEXT,
             reason_for_check TEXT,
+            review_status TEXT,
+            review_claimed_by TEXT,
+            review_claimed_at TIMESTAMPTZ,
+            review_outcome TEXT,
+            review_notes TEXT,
+            review_completed_by TEXT,
+            review_completed_at TIMESTAMPTZ,
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
@@ -177,6 +193,34 @@ async def ensure_schema(conn) -> None:
     await conn.execute("""
         ALTER TABLE screened_entities
         ADD COLUMN IF NOT EXISTS reason_for_check TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_status TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_claimed_by TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_claimed_at TIMESTAMPTZ
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_outcome TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_notes TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_completed_by TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS review_completed_at TIMESTAMPTZ
     """)
     await conn.execute("""
         ALTER TABLE screening_jobs
@@ -690,7 +734,9 @@ async def search_screened_entities(
     query = f"""
         SELECT entity_key, display_name, normalized_name, date_of_birth, entity_type,
                last_screened_at, screening_valid_until, status, risk_level, confidence, score,
-               uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check, updated_at
+               uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check,
+               review_status, review_claimed_by, review_claimed_at, review_outcome, review_notes, review_completed_by, review_completed_at,
+               updated_at
         FROM screened_entities
         WHERE {where_sql}
         ORDER BY last_screened_at DESC
@@ -700,7 +746,13 @@ async def search_screened_entities(
     out = []
     for r in rows:
         d = dict(r)
-        for key in ("last_screened_at", "screening_valid_until", "updated_at"):
+        for key in (
+            "last_screened_at",
+            "screening_valid_until",
+            "updated_at",
+            "review_claimed_at",
+            "review_completed_at",
+        ):
             if d.get(key) is not None:
                 d[key] = d[key].isoformat()
         if d.get("date_of_birth") is not None:
@@ -716,6 +768,182 @@ async def search_screened_entities(
             d["result_json"] = _to_json_safe(rj)
         out.append(_to_json_safe(d))
     return out
+
+
+async def list_review_queue(
+    conn,
+    *,
+    review_status: Optional[str] = None,
+    business_reference: Optional[str] = None,
+    reason_for_check: Optional[str] = None,
+    include_cleared: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """
+    Review queue for potential matches.
+    By default excludes Cleared decisions unless include_cleared is explicitly true.
+    """
+    conditions: List[str] = []
+    args: List[Any] = []
+    n = 0
+    if not include_cleared:
+        conditions.append("status NOT ILIKE 'Cleared%'")
+    review_status_clean = (review_status or "").strip().upper()
+    if review_status_clean:
+        if review_status_clean == "UNREVIEWED":
+            conditions.append("review_status IS NULL")
+        elif review_status_clean in _REVIEW_STATUS_ALLOWED:
+            n += 1
+            conditions.append(f"review_status = ${n}")
+            args.append(review_status_clean)
+        else:
+            raise ValueError("review_status must be UNREVIEWED, IN_REVIEW, or COMPLETED")
+    business_reference_clean = (business_reference or "").strip()
+    if business_reference_clean:
+        n += 1
+        conditions.append(f"business_reference = ${n}")
+        args.append(business_reference_clean)
+    reason_for_check_clean = (reason_for_check or "").strip()
+    if reason_for_check_clean:
+        if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
+            raise ValueError("reason_for_check must be a valid enum value")
+        n += 1
+        conditions.append(f"reason_for_check = ${n}")
+        args.append(reason_for_check_clean)
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    args.extend([limit, offset])
+    idx_limit = len(args) - 1
+    idx_offset = len(args)
+    rows = await conn.fetch(
+        f"""
+        SELECT
+            display_name AS entity_name,
+            entity_key,
+            status AS decision,
+            business_reference,
+            reason_for_check,
+            last_requestor AS screening_user,
+            last_screened_at AS screening_timestamp,
+            COALESCE(review_status, 'UNREVIEWED') AS review_status,
+            review_claimed_by
+        FROM screened_entities
+        {where_sql}
+        ORDER BY last_screened_at DESC
+        LIMIT ${idx_limit} OFFSET ${idx_offset}
+        """,
+        *args,
+    )
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        if d.get("screening_timestamp") is not None:
+            d["screening_timestamp"] = d["screening_timestamp"].isoformat()
+        out.append(_to_json_safe(d))
+    return out
+
+
+async def claim_review(
+    conn,
+    *,
+    entity_key: str,
+    claimed_by: str,
+) -> Dict[str, Any]:
+    """
+    Claim an unreviewed match for review.
+    Only rows with review_status IS NULL can be claimed.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE screened_entities
+        SET review_status = 'IN_REVIEW',
+            review_claimed_by = $2,
+            review_claimed_at = NOW(),
+            updated_at = NOW()
+        WHERE entity_key = $1
+          AND review_status IS NULL
+          AND status NOT ILIKE 'Cleared%'
+        RETURNING entity_key, display_name, status, business_reference, reason_for_check,
+                  review_status, review_claimed_by, review_claimed_at
+        """,
+        entity_key,
+        claimed_by,
+    )
+    if row is not None:
+        d = dict(row)
+        if d.get("review_claimed_at") is not None:
+            d["review_claimed_at"] = d["review_claimed_at"].isoformat()
+        return {"status": "ok", "item": _to_json_safe(d)}
+    existing = await conn.fetchrow(
+        """
+        SELECT entity_key, status, review_status, business_reference, reason_for_check
+        FROM screened_entities
+        WHERE entity_key = $1
+        """,
+        entity_key,
+    )
+    if existing is None:
+        return {"status": "error", "error": "not_found"}
+    if str(existing.get("status") or "").lower().startswith("cleared"):
+        return {"status": "error", "error": "not_reviewable"}
+    return {"status": "error", "error": "not_unreviewed", "review_status": existing.get("review_status")}
+
+
+async def complete_review(
+    conn,
+    *,
+    entity_key: str,
+    completed_by: str,
+    review_outcome: str,
+    review_notes: str,
+) -> Dict[str, Any]:
+    """
+    Complete an in-review match.
+    Only rows with review_status='IN_REVIEW' can be completed.
+    """
+    review_outcome_clean = (review_outcome or "").strip()
+    review_notes_clean = (review_notes or "").strip()
+    if review_outcome_clean not in _REVIEW_OUTCOME_ALLOWED:
+        raise ValueError("review_outcome must be a valid enum value")
+    if len(review_notes_clean) < 10:
+        raise ValueError("review_notes must be at least 10 characters")
+    row = await conn.fetchrow(
+        """
+        UPDATE screened_entities
+        SET review_status = 'COMPLETED',
+            review_outcome = $3,
+            review_notes = $4,
+            review_completed_by = $2,
+            review_completed_at = NOW(),
+            updated_at = NOW()
+        WHERE entity_key = $1
+          AND review_status = 'IN_REVIEW'
+        RETURNING entity_key, display_name, status, business_reference, reason_for_check,
+                  review_status, review_outcome, review_notes, review_completed_by, review_completed_at
+        """,
+        entity_key,
+        completed_by,
+        review_outcome_clean,
+        review_notes_clean,
+    )
+    if row is not None:
+        d = dict(row)
+        if d.get("review_completed_at") is not None:
+            d["review_completed_at"] = d["review_completed_at"].isoformat()
+        return {"status": "ok", "item": _to_json_safe(d)}
+    existing = await conn.fetchrow(
+        """
+        SELECT entity_key, review_status, business_reference, reason_for_check
+        FROM screened_entities
+        WHERE entity_key = $1
+        """,
+        entity_key,
+    )
+    if existing is None:
+        return {"status": "error", "error": "not_found"}
+    return {"status": "error", "error": "not_in_review", "review_status": existing.get("review_status")}
 
 
 def _to_json_safe(obj: Any) -> Any:

@@ -4,6 +4,7 @@
  */
 
 import { getStoredToken } from '@/context/AuthContext'
+import type { ReviewOutcome, ReviewQueueItem, ReviewStatus } from '@/types/api'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
@@ -260,3 +261,47 @@ export async function searchScreened(params: SearchScreenedParams): Promise<Resp
   const qs = sp.toString()
   return fetch(resolve(`/opcheck/screened${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
 }
+
+export interface ReviewQueueParams {
+  review_status?: ReviewStatus
+  business_reference?: string
+  reason_for_check?: OpCheckParams['reason_for_check']
+  include_cleared?: boolean
+  limit?: number
+  offset?: number
+}
+
+export async function getReviewQueue(params: ReviewQueueParams = {}): Promise<Response> {
+  const sp = new URLSearchParams()
+  if (params.review_status != null) sp.set('review_status', params.review_status)
+  if (params.business_reference != null && params.business_reference !== '') sp.set('business_reference', params.business_reference)
+  if (params.reason_for_check != null) sp.set('reason_for_check', params.reason_for_check)
+  if (params.include_cleared != null) sp.set('include_cleared', String(params.include_cleared))
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return fetch(resolve(`/review/queue${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
+}
+
+export async function claimReview(entityKey: string): Promise<Response> {
+  return fetch(resolve(`/review/${encodeURIComponent(entityKey)}/claim`), {
+    method: 'POST',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function completeReview(
+  entityKey: string,
+  params: { review_outcome: ReviewOutcome; review_notes: string },
+): Promise<Response> {
+  return fetch(resolve(`/review/${encodeURIComponent(entityKey)}/complete`), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({
+      review_outcome: params.review_outcome,
+      review_notes: params.review_notes,
+    }),
+  })
+}
+
+export type { ReviewQueueItem }
