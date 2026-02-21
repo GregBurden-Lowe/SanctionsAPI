@@ -7,6 +7,14 @@ export interface OpCheckRequest {
   name: string
   dob?: string | null
   entity_type?: string
+  business_reference: string
+  reason_for_check:
+    | 'Client Onboarding'
+    | 'Claim Payment'
+    | 'Business Partner Payment'
+    | 'Business Partner Due Diligence'
+    | 'Periodic Re-Screen'
+    | 'Ad-Hoc Compliance Review'
   requestor?: string | null
   search_backend?: 'original' | 'postgres_beta'
 }
@@ -53,6 +61,8 @@ export interface ScreenedEntity {
   normalized_name: string;
   date_of_birth: string | null;
   entity_type: string;
+  business_reference: string | null;
+  reason_for_check: string | null;
   last_screened_at: string;
   screening_valid_until: string;
   status: string;
@@ -112,6 +122,7 @@ export interface ScreeningJob {
   date_of_birth: string | null
   entity_type: string
   requestor: string
+  reason_for_check?: string | null
   reason?: string
   refresh_run_id?: string | null
   force_rescreen?: boolean

@@ -195,6 +195,8 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
           <tr><th>Name / Organisation</th><td>${escapeHtml(search.searchName || '—')}</td></tr>
           <tr><th>Entity Type</th><td>${escapeHtml(formatEntityTypeLabel(search.entityType || '—'))}</td></tr>
           <tr><th>Date of Birth Input</th><td>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</td></tr>
+          <tr><th>Business reference</th><td>${escapeHtml(search.businessReference?.trim() ? search.businessReference : 'Not provided')}</td></tr>
+          <tr><th>Reason for check</th><td>${escapeHtml(search.reasonForCheck?.trim() ? search.reasonForCheck : 'Not provided')}</td></tr>
           <tr><th>Requested By</th><td>${escapeHtml(search.requestor || '—')}</td></tr>
         </table>
       </section>
@@ -452,6 +454,8 @@ export interface SearchDetails {
   searchName: string
   entityType: string
   searchDob: string
+  businessReference: string
+  reasonForCheck: string
   requestor: string
   searchBackend?: string
 }
