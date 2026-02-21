@@ -180,13 +180,15 @@ export function ScreeningJobsPage() {
         {detailRow && (
           <ResultCard
             result={{ ...detailRow.result_json, entity_key: detailRow.entity_key }}
-            searchDetails={{
-              searchName: detailRow.display_name,
-              entityType: detailRow.entity_type,
-              searchDob: detailRow.date_of_birth ?? '',
-              requestor: detailRow.last_requestor ?? '',
-              searchBackend: 'postgres_beta',
-            }}
+              searchDetails={{
+                searchName: detailRow.display_name,
+                entityType: detailRow.entity_type,
+                searchDob: detailRow.date_of_birth ?? '',
+                businessReference: detailRow.business_reference ?? '',
+                reasonForCheck: detailRow.reason_for_check ?? '',
+                requestor: detailRow.last_requestor ?? '',
+                searchBackend: 'postgres_beta',
+              }}
           />
         )}
       </Modal>
