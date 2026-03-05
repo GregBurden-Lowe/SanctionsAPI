@@ -132,8 +132,17 @@ def get_company(company_number: str) -> Dict[str, Any]:
     }
 
 
-def get_officers(company_number: str) -> List[Dict[str, Any]]:
-    """Return simplified officers/directors for a company number."""
+def get_officers(company_number: str, active_only: bool = False) -> List[Dict[str, Any]]:
+    """Return simplified officers/directors for a company number.
+
+    Each officer includes a computed status:
+    - "resigned" when resigned_on is present
+    - "active" when resigned_on is absent
+
+    Args:
+        company_number: Companies House company number.
+        active_only: When True, returns only officers with status="active".
+    """
     number = (company_number or "").strip()
     if not number:
         raise CompaniesHouseNotFoundError("Invalid company number")
@@ -144,6 +153,10 @@ def get_officers(company_number: str) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         dob = item.get("date_of_birth") if isinstance(item.get("date_of_birth"), dict) else None
+        resigned_on = item.get("resigned_on") or None
+        status = "resigned" if resigned_on else "active"
+        if active_only and status != "active":
+            continue
         officer_id: Optional[str] = None
         links = item.get("links") if isinstance(item.get("links"), dict) else {}
         appointments_link = links.get("officer", {}).get("appointments") if isinstance(links.get("officer"), dict) else None
@@ -158,9 +171,11 @@ def get_officers(company_number: str) -> List[Dict[str, Any]]:
         out.append(
             {
                 "name": item.get("name"),
+                "role": item.get("officer_role"),
+                "status": status,
                 "appointed_on": item.get("appointed_on"),
-                "resigned_on": item.get("resigned_on"),
-                "officer_role": item.get("officer_role"),
+                "resigned_on": resigned_on,
+                "officer_role": item.get("officer_role"),  # compatibility for existing callers
                 "nationality": item.get("nationality"),
                 "date_of_birth": dob,
                 "officer_id": officer_id,

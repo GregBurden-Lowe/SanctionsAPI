@@ -3,6 +3,7 @@ import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, Modal, Section
 import { listScreeningJobs, searchScreened } from '@/api/client'
 import type { ScreenedEntity, ScreeningJob } from '@/types/api'
 import { ResultCard } from '@/pages/ScreeningPage'
+import { generateBatchScreeningPdf } from '@/utils/exportBatchScreeningPdf'
 
 function formatDate(value: string | null): string {
   if (!value) return '—'
@@ -28,6 +29,7 @@ export function ScreeningJobsPage() {
   const [detailRow, setDetailRow] = useState<ScreenedEntity | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [batchExporting, setBatchExporting] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -76,6 +78,43 @@ export function ScreeningJobsPage() {
       setDetailError(e instanceof Error ? e.message : 'Failed to load result.')
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  const exportBatchPdf = async (businessReference: string | null | undefined) => {
+    const ref = (businessReference || '').trim()
+    if (!ref) {
+      setDetailError('This job has no business reference to group by.')
+      return
+    }
+    setBatchExporting(true)
+    setDetailError(null)
+    try {
+      const collected: ScreenedEntity[] = []
+      let offset = 0
+      const pageSize = 100
+      while (true) {
+        const res = await searchScreened({ business_reference: ref, limit: pageSize, offset })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          setDetailError((data as { detail?: string }).detail ?? 'Failed to load batch results.')
+          return
+        }
+        const chunk = ((data as { items?: ScreenedEntity[] }).items ?? []) as ScreenedEntity[]
+        collected.push(...chunk)
+        if (chunk.length < pageSize) break
+        offset += pageSize
+        if (offset >= 5000) break
+      }
+      if (collected.length === 0) {
+        setDetailError('No stored screening results found for this business reference.')
+        return
+      }
+      generateBatchScreeningPdf(collected, { businessReference: ref })
+    } catch (e) {
+      setDetailError(e instanceof Error ? e.message : 'Failed to export batch PDF.')
+    } finally {
+      setBatchExporting(false)
     }
   }
 
@@ -143,9 +182,20 @@ export function ScreeningJobsPage() {
                       <td className="py-2 text-text-muted">{row.error_message || '—'}</td>
                       <td className="py-2">
                         {row.status === 'completed' && (
-                          <Button type="button" variant="ghost" size="sm" onClick={() => void openResult(row)}>
-                            View result
-                          </Button>
+                          <div className="flex items-center gap-2">
+                            <Button type="button" variant="ghost" size="sm" onClick={() => void openResult(row)}>
+                              View result
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => void exportBatchPdf(row.business_reference)}
+                              disabled={batchExporting}
+                            >
+                              {batchExporting ? 'Preparing…' : 'Batch PDF'}
+                            </Button>
+                          </div>
                         )}
                       </td>
                     </tr>

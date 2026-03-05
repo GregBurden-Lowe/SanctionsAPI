@@ -1,11 +1,23 @@
 import { useState } from 'react'
 import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, Input, SectionHeader } from '@/components'
 import {
+  enqueueBulkScreening,
   getCompaniesHouseScreenBundle,
   searchCompaniesHouse,
+  type BulkScreeningItem,
   type CompaniesHouseScreeningBundle,
   type CompaniesHouseSearchItem,
 } from '@/api/client'
+import { useAuth } from '@/context/AuthContext'
+
+const REASON_OPTIONS: BulkScreeningItem['reason_for_check'][] = [
+  'Client Onboarding',
+  'Claim Payment',
+  'Business Partner Payment',
+  'Business Partner Due Diligence',
+  'Periodic Re-Screen',
+  'Ad-Hoc Compliance Review',
+]
 
 function riskTone(level: string | null | undefined): string {
   const v = (level || '').toUpperCase()
@@ -15,19 +27,27 @@ function riskTone(level: string | null | undefined): string {
 }
 
 export function CompaniesHousePage() {
+  const { user } = useAuth()
   const [query, setQuery] = useState('')
   const [loadingSearch, setLoadingSearch] = useState(false)
   const [loadingBundle, setLoadingBundle] = useState(false)
+  const [loadingQueue, setLoadingQueue] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [queueMessage, setQueueMessage] = useState<string | null>(null)
   const [items, setItems] = useState<CompaniesHouseSearchItem[]>([])
   const [bundle, setBundle] = useState<CompaniesHouseScreeningBundle | null>(null)
+  const [loadedCompanyNumber, setLoadedCompanyNumber] = useState<string | null>(null)
+  const [businessReference, setBusinessReference] = useState('')
+  const [reasonForCheck, setReasonForCheck] = useState<BulkScreeningItem['reason_for_check']>('Ad-Hoc Compliance Review')
 
   const runSearch = async () => {
     const q = query.trim()
     if (!q) return
     setLoadingSearch(true)
     setError(null)
+    setQueueMessage(null)
     setBundle(null)
+    setLoadedCompanyNumber(null)
     try {
       const res = await searchCompaniesHouse(q)
       const data = (await res.json().catch(() => ({}))) as { items?: CompaniesHouseSearchItem[]; detail?: string }
@@ -59,11 +79,84 @@ export function CompaniesHousePage() {
         return
       }
       setBundle(data)
+      setLoadedCompanyNumber(num)
+      setBusinessReference(`CH-${num}`)
     } catch (e) {
       setBundle(null)
       setError(e instanceof Error ? e.message : 'Failed to load company screening bundle.')
     } finally {
       setLoadingBundle(false)
+    }
+  }
+
+  const enqueueFromBundle = async (mode: 'company' | 'officers' | 'all') => {
+    if (!bundle) return
+    const requestor = (user?.username || '').trim()
+    const reference = businessReference.trim()
+    if (!requestor) {
+      setError('No signed-in user available for requestor.')
+      return
+    }
+    if (!reference) {
+      setError('Business reference is required.')
+      return
+    }
+    const requests: BulkScreeningItem[] = []
+    if (mode === 'company' || mode === 'all') {
+      const companyName = (bundle.company.company_name || '').trim()
+      if (companyName) {
+        requests.push({
+          name: companyName,
+          entity_type: 'Organization',
+          requestor,
+          business_reference: reference,
+          reason_for_check: reasonForCheck,
+        })
+      }
+    }
+    if (mode === 'officers' || mode === 'all') {
+      for (const officer of bundle.officers) {
+        if ((officer.status || '').toLowerCase() !== 'active') continue
+        const name = (officer.name || '').trim()
+        if (!name) continue
+        const year = officer.date_of_birth?.year
+        requests.push({
+          name,
+          dob: typeof year === 'number' ? String(year) : null,
+          entity_type: 'Person',
+          requestor,
+          business_reference: reference,
+          reason_for_check: reasonForCheck,
+        })
+      }
+    }
+    if (requests.length === 0) {
+      setError('No valid company/officer names available to queue.')
+      return
+    }
+    setLoadingQueue(true)
+    setError(null)
+    setQueueMessage(null)
+    try {
+      const res = await enqueueBulkScreening(requests)
+      const data = (await res.json().catch(() => ({}))) as { detail?: string; results?: Array<{ status?: string }> }
+      if (!res.ok) {
+        setError(data.detail || 'Failed to queue screening jobs.')
+        return
+      }
+      const statuses = (data.results || []).reduce<Record<string, number>>((acc, row) => {
+        const key = row.status || 'unknown'
+        acc[key] = (acc[key] || 0) + 1
+        return acc
+      }, {})
+      const summary = Object.entries(statuses)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(' · ')
+      setQueueMessage(`Queued screening request(s). ${summary}`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to queue screening jobs.')
+    } finally {
+      setLoadingQueue(false)
     }
   }
 
@@ -91,14 +184,30 @@ export function CompaniesHousePage() {
               </div>
             </div>
             {error && <ErrorBox message={error} />}
+            {queueMessage && <p className="text-sm text-semantic-success">{queueMessage}</p>}
           </CardBody>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>Results ({items.length})</CardTitle>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle>Results ({items.length})</CardTitle>
+              {loadedCompanyNumber && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setLoadedCompanyNumber(null)
+                    setBundle(null)
+                  }}
+                >
+                  Back to results
+                </Button>
+              )}
+            </div>
           </CardHeader>
-          <CardBody>
+          {!loadedCompanyNumber && <CardBody>
             {items.length === 0 ? (
               <p className="text-sm text-text-secondary">No results yet.</p>
             ) : (
@@ -139,12 +248,53 @@ export function CompaniesHousePage() {
                 </table>
               </div>
             )}
-          </CardBody>
+          </CardBody>}
         </Card>
 
         {bundle && (
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
             <div className="xl:col-span-6 space-y-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Queue sanctions screening</CardTitle>
+                </CardHeader>
+                <CardBody className="space-y-3">
+                  <Input
+                    label="Business reference"
+                    value={businessReference}
+                    onChange={(e) => setBusinessReference(e.target.value)}
+                    placeholder="Required reference"
+                  />
+                  <div>
+                    <label htmlFor="ch-reason" className="block text-xs font-medium text-text-primary mb-1">
+                      Reason for check
+                    </label>
+                    <select
+                      id="ch-reason"
+                      className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+                      value={reasonForCheck}
+                      onChange={(e) => setReasonForCheck(e.target.value as BulkScreeningItem['reason_for_check'])}
+                    >
+                      {REASON_OPTIONS.map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="secondary" onClick={() => void enqueueFromBundle('company')} disabled={loadingQueue}>
+                      {loadingQueue ? 'Queueing…' : 'Queue company'}
+                    </Button>
+                    <Button type="button" variant="secondary" onClick={() => void enqueueFromBundle('officers')} disabled={loadingQueue}>
+                      {loadingQueue ? 'Queueing…' : 'Queue officers'}
+                    </Button>
+                    <Button type="button" onClick={() => void enqueueFromBundle('all')} disabled={loadingQueue}>
+                      {loadingQueue ? 'Queueing…' : 'Queue company + officers'}
+                    </Button>
+                  </div>
+                </CardBody>
+              </Card>
               <Card>
                 <CardHeader>
                   <CardTitle>Company profile</CardTitle>
@@ -216,4 +366,3 @@ export function CompaniesHousePage() {
     </div>
   )
 }
-

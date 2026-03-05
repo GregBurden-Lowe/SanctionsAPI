@@ -1302,6 +1302,7 @@ async def list_screening_jobs(
             j.country,
             j.entity_type,
             j.requestor,
+            j.business_reference,
             j.reason_for_check,
             j.reason,
             j.refresh_run_id,

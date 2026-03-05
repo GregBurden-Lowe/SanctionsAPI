@@ -161,6 +161,7 @@ export interface ScreeningJob {
   date_of_birth: string | null
   entity_type: string
   requestor: string
+  business_reference?: string | null
   reason_for_check?: string | null
   reason?: string
   refresh_run_id?: string | null
@@ -278,6 +279,8 @@ export interface CompaniesHouseDirectorRisk {
 
 export interface CompaniesHouseOfficer {
   name: string | null
+  role?: string | null
+  status?: 'active' | 'resigned' | null
   appointed_on: string | null
   resigned_on: string | null
   officer_role: string | null
