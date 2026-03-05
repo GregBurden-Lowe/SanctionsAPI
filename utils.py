@@ -37,6 +37,7 @@ OSN_COLS = [
     "name",         # display name
     "aliases",
     "birth_date",
+    "countries",
     "program_ids",
     "dataset",      # dataset label/source
     "sanctions",    # long text; we’ll trim for a short label
@@ -409,31 +410,65 @@ async def sync_watchlist_entities_postgres(
     """
     Rebuild watchlist_entities from latest OpenSanctions CSV files.
     Expected table columns:
-      source_type, entity_id, entity_schema, name, name_norm, birth_date, dataset, regime, raw_json
+      source_type, entity_id, entity_schema, name, name_norm, birth_date, country, dataset, regime, raw_json
     """
     exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
     if not exists:
         raise ValueError("watchlist_entities table is not available")
+    has_country_col = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'watchlist_entities'
+              AND column_name = 'country'
+        )
+        """
+    )
+    if not has_country_col:
+        try:
+            await conn.execute("ALTER TABLE watchlist_entities ADD COLUMN IF NOT EXISTS country TEXT")
+            has_country_col = True
+        except Exception:
+            has_country_col = False
 
     async def _ingest_csv(path: str, source_type: str) -> int:
         if not path or not os.path.exists(path):
             return 0
         inserted = 0
         batch: List[Tuple[Any, ...]] = []
-        sql = """
-            INSERT INTO watchlist_entities (
-                source_type,
-                entity_id,
-                entity_schema,
-                name,
-                name_norm,
-                birth_date,
-                dataset,
-                regime,
-                raw_json
-            )
-            VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9::jsonb)
-        """
+        if has_country_col:
+            sql = """
+                INSERT INTO watchlist_entities (
+                    source_type,
+                    entity_id,
+                    entity_schema,
+                    name,
+                    name_norm,
+                    birth_date,
+                    country,
+                    dataset,
+                    regime,
+                    raw_json
+                )
+                VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9, $10::jsonb)
+            """
+        else:
+            sql = """
+                INSERT INTO watchlist_entities (
+                    source_type,
+                    entity_id,
+                    entity_schema,
+                    name,
+                    name_norm,
+                    birth_date,
+                    dataset,
+                    regime,
+                    raw_json
+                )
+                VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9::jsonb)
+            """
         with open(path, mode="r", encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
@@ -451,6 +486,7 @@ async def sync_watchlist_entities_postgres(
                     continue
 
                 birth_date = _parse_birth_date_for_db(_safe_str(row.get("birth_date")))
+                country = _normalize_country(_safe_str(row.get("countries")))
                 regime = (
                     _safe_str(row.get("program_ids")).split(";", 1)[0].strip()
                     or _safe_str(row.get("sanctions")).split(";", 1)[0].strip()
@@ -466,24 +502,41 @@ async def sync_watchlist_entities_postgres(
                         "aliases": _safe_str(row.get("aliases")),
                         "program_ids": _safe_str(row.get("program_ids")),
                         "sanctions": _safe_str(row.get("sanctions")),
+                        "countries": _safe_str(row.get("countries")),
                         "dataset": dataset,
                     },
                     ensure_ascii=True,
                 )
 
-                batch.append(
-                    (
-                        source_type,
-                        entity_id,
-                        entity_schema,
-                        name,
-                        name_norm,
-                        birth_date,
-                        dataset or None,
-                        regime,
-                        raw_json,
+                if has_country_col:
+                    batch.append(
+                        (
+                            source_type,
+                            entity_id,
+                            entity_schema,
+                            name,
+                            name_norm,
+                            birth_date,
+                            country,
+                            dataset or None,
+                            regime,
+                            raw_json,
+                        )
                     )
-                )
+                else:
+                    batch.append(
+                        (
+                            source_type,
+                            entity_id,
+                            entity_schema,
+                            name,
+                            name_norm,
+                            birth_date,
+                            dataset or None,
+                            regime,
+                            raw_json,
+                        )
+                    )
 
                 if len(batch) >= batch_size:
                     await conn.executemany(sql, batch)
@@ -582,6 +635,45 @@ def _normalize_dob(dob: Optional[str]) -> Optional[str]:
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return None
+
+
+def _normalize_country(country: Optional[str]) -> Optional[str]:
+    if not country:
+        return None
+    raw = _normalize_text(str(country))
+    if not raw:
+        return None
+    return raw.split()[0]
+
+
+def _country_tokens(raw_country: Optional[str]) -> Set[str]:
+    if not raw_country:
+        return set()
+    value = _normalize_text(str(raw_country))
+    if not value:
+        return set()
+    parts = re.split(r"[;,|/]+", value)
+    tokens: Set[str] = set()
+    for part in parts:
+        p = part.strip()
+        if not p:
+            continue
+        tokens.add(p)
+        first = p.split()[0]
+        if first:
+            tokens.add(first)
+    return tokens
+
+
+def _country_matches(candidate_country: Optional[str], query_country: Optional[str]) -> bool:
+    if not query_country:
+        return True
+    if not candidate_country:
+        return False
+    qn = _normalize_country(query_country)
+    if not qn:
+        return True
+    return qn in _country_tokens(candidate_country)
 
 
 def derive_entity_key(display_name: str, entity_type: str, dob: Optional[str]) -> str:
@@ -726,6 +818,7 @@ def _top_name_suggestions(
 def perform_opensanctions_check(
     name,
     dob,
+    country: Optional[str] = None,
     entity_type="Person",
     parquet_path=OSN_PARQUET,
     requestor: Optional[str] = None,
@@ -753,6 +846,7 @@ def perform_opensanctions_check(
     def _norm_dob(d):
         return _normalize_dob(d)
     norm_dob = _norm_dob(dob)
+    norm_country = _normalize_country(country)
 
     # Split by source type and build pool for suggestions
     st = df.get("source_type")
@@ -787,7 +881,7 @@ def perform_opensanctions_check(
         return str(x)
 
     def best_match_from(df_subset, top_limit=50, threshold=75):
-        """Return (row, score) using strict DOB rule if norm_dob is provided."""
+        """Return (row, score) using strict DOB/country rule when provided."""
         if df_subset is None or df_subset.empty:
             return None, None
 
@@ -814,6 +908,16 @@ def perform_opensanctions_check(
             if not dob_ok_matches:
                 return None, None
             matches = dob_ok_matches
+        if et == "organization" and norm_country:
+            country_ok_matches = []
+            for _, score, idx in matches:
+                r = df_subset.iloc[idx]
+                cand_country = as_safe_str(r.get("countries"))
+                if _country_matches(cand_country, norm_country):
+                    country_ok_matches.append((_, score, idx))
+            if not country_ok_matches:
+                return None, None
+            matches = country_ok_matches
 
         matches_sorted = sorted(matches, key=lambda x: x[1], reverse=True)
         _, best_score, best_idx = matches_sorted[0]
@@ -886,6 +990,7 @@ async def perform_postgres_watchlist_check(
     conn,
     name: str,
     dob: Optional[str],
+    country: Optional[str] = None,
     entity_type: str = "Person",
     requestor: Optional[str] = None,
     candidate_limit: int = 400,
@@ -899,20 +1004,34 @@ async def perform_postgres_watchlist_check(
     exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
     if not exists:
         raise ValueError("watchlist_entities table is not available")
+    has_country_col = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'watchlist_entities'
+              AND column_name = 'country'
+        )
+        """
+    )
 
     norm_name = _normalize_text(name or "")
     norm_dob = _normalize_dob(dob)
+    norm_country = _normalize_country(country)
     et = (entity_type or "Person").strip().lower()
     source_filter = "person" if et != "organization" else "organization"
 
     async def _fetch_candidates(source_type: str) -> List[dict]:
-        rows = await conn.fetch(
-            """
+        country_select = "country" if has_country_col else "NULLIF(raw_json->>'countries', '') AS country"
+        country_filter = "country = $4::text OR country IS NULL" if has_country_col else "NULLIF(raw_json->>'countries', '') ILIKE ('%' || $4::text || '%') OR NULLIF(raw_json->>'countries', '') IS NULL"
+        sql = f"""
             SELECT
                 name,
                 birth_date::text AS birth_date,
                 dataset,
                 regime,
+                {country_select},
                 entity_schema,
                 raw_json
             FROM watchlist_entities
@@ -927,12 +1046,19 @@ async def perform_postgres_watchlist_check(
                 OR (char_length($3::text) = 4 AND birth_date::text LIKE ($3::text || '-%'))
                 OR birth_date IS NULL
               )
+              AND (
+                $4::text IS NULL
+                OR {country_filter}
+              )
             ORDER BY similarity(name_norm, $2) DESC
-            LIMIT $4
-            """,
+            LIMIT $5
+            """
+        rows = await conn.fetch(
+            sql,
             source_type,
             norm_name,
             norm_dob,
+            norm_country if et == "organization" else None,
             max(50, min(2000, int(candidate_limit))),
         )
         out: List[dict] = []
@@ -996,6 +1122,15 @@ async def perform_postgres_watchlist_check(
             if not dob_ok:
                 return None, None
             matches = dob_ok
+        if et == "organization" and norm_country:
+            country_ok = []
+            for _, score, idx in matches:
+                cand_country = rows[idx].get("country")
+                if _country_matches(cand_country, norm_country):
+                    country_ok.append((_, score, idx))
+            if not country_ok:
+                return None, None
+            matches = country_ok
         _, best_score, best_idx = sorted(matches, key=lambda x: x[1], reverse=True)[0]
         return rows[best_idx], float(best_score)
 

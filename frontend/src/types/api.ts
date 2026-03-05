@@ -6,6 +6,7 @@
 export interface OpCheckRequest {
   name: string
   dob?: string | null
+  country?: string | null
   entity_type?: string
   business_reference: string
   reason_for_check:
@@ -17,6 +18,7 @@ export interface OpCheckRequest {
     | 'Ad-Hoc Compliance Review'
   requestor?: string | null
   search_backend?: 'original' | 'postgres_beta'
+  rerun_entity_key?: string | null
 }
 
 export type ReviewStatus = 'UNREVIEWED' | 'IN_REVIEW' | 'COMPLETED'
@@ -70,6 +72,7 @@ export interface ScreenedEntity {
   display_name: string;
   normalized_name: string;
   date_of_birth: string | null;
+  country_input: string | null;
   entity_type: string;
   business_reference: string | null;
   reason_for_check: string | null;

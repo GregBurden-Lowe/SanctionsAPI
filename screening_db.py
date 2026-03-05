@@ -77,6 +77,7 @@ async def ensure_schema(conn) -> None:
             display_name     TEXT NOT NULL,
             normalized_name  TEXT NOT NULL,
             date_of_birth    DATE,
+            country_input    TEXT,
             entity_type      TEXT NOT NULL DEFAULT 'Person',
             last_screened_at     TIMESTAMPTZ NOT NULL,
             screening_valid_until TIMESTAMPTZ NOT NULL,
@@ -110,6 +111,7 @@ async def ensure_schema(conn) -> None:
             entity_key      TEXT NOT NULL,
             name            TEXT NOT NULL,
             date_of_birth   TEXT,
+            country         TEXT,
             entity_type     TEXT NOT NULL DEFAULT 'Person',
             requestor       TEXT NOT NULL,
             business_reference TEXT,
@@ -196,6 +198,10 @@ async def ensure_schema(conn) -> None:
     """)
     await conn.execute("""
         ALTER TABLE screened_entities
+        ADD COLUMN IF NOT EXISTS country_input TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screened_entities
         ADD COLUMN IF NOT EXISTS review_status TEXT
     """)
     await conn.execute("""
@@ -233,6 +239,10 @@ async def ensure_schema(conn) -> None:
     await conn.execute("""
         ALTER TABLE screening_jobs
         ADD COLUMN IF NOT EXISTS reason_for_check TEXT
+    """)
+    await conn.execute("""
+        ALTER TABLE screening_jobs
+        ADD COLUMN IF NOT EXISTS country TEXT
     """)
     await conn.execute("""
         ALTER TABLE screening_jobs
@@ -285,12 +295,29 @@ async def get_valid_screening(conn, entity_key: str) -> Optional[Dict[str, Any]]
     return dict(rj) if hasattr(rj, "items") else rj
 
 
+async def get_screened_entity_identity(conn, entity_key: str) -> Optional[Dict[str, Any]]:
+    """Return minimal identity fields for a screened entity, or None if not found."""
+    row = await conn.fetchrow(
+        """
+        SELECT entity_key, normalized_name, entity_type
+        FROM screened_entities
+        WHERE entity_key = $1
+        LIMIT 1
+        """,
+        entity_key,
+    )
+    if row is None:
+        return None
+    return dict(row)
+
+
 async def upsert_screening(
     conn,
     entity_key: str,
     display_name: str,
     normalized_name: str,
     date_of_birth: Optional[str],
+    country_input: Optional[str],
     entity_type: str,
     requestor: str,
     business_reference: Optional[str],
@@ -302,6 +329,7 @@ async def upsert_screening(
     """Insert or replace screened_entities row. Sets validity to last_screened_at + 12 months."""
     business_reference_clean = (business_reference or "").strip()
     reason_for_check_clean = (reason_for_check or "").strip()
+    country_input_clean = (country_input or "").strip() or None
     if not business_reference_clean:
         raise ValueError("business_reference is required")
     if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
@@ -325,17 +353,18 @@ async def upsert_screening(
     await conn.execute(
         """
         INSERT INTO screened_entities (
-            entity_key, display_name, normalized_name, date_of_birth, entity_type,
+            entity_key, display_name, normalized_name, date_of_birth, country_input, entity_type,
             last_screened_at, screening_valid_until,
             status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
             result_json, last_requestor, business_reference, reason_for_check, updated_at,
             screened_against_uk_hash, screened_against_refresh_run_id,
             manual_override_uk_hash, manual_override_stale
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::uuid, NULL, FALSE)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::uuid, NULL, FALSE)
         ON CONFLICT (entity_key) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             normalized_name = EXCLUDED.normalized_name,
             date_of_birth = EXCLUDED.date_of_birth,
+            country_input = EXCLUDED.country_input,
             entity_type = EXCLUDED.entity_type,
             last_screened_at = EXCLUDED.last_screened_at,
             screening_valid_until = EXCLUDED.screening_valid_until,
@@ -359,6 +388,7 @@ async def upsert_screening(
         display_name,
         normalized_name,
         dob_date,
+        country_input_clean,
         entity_type or "Person",
         now,
         valid_until,
@@ -385,10 +415,12 @@ async def update_cached_screening_metadata(
     requestor: str,
     business_reference: Optional[str],
     reason_for_check: Optional[str],
+    country_input: Optional[str],
 ) -> None:
     """Update request metadata when a cached screening is reused."""
     business_reference_clean = (business_reference or "").strip()
     reason_for_check_clean = (reason_for_check or "").strip()
+    country_input_clean = (country_input or "").strip() or None
     if not business_reference_clean:
         raise ValueError("business_reference is required")
     if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
@@ -399,6 +431,7 @@ async def update_cached_screening_metadata(
         SET last_requestor = $2,
             business_reference = $3,
             reason_for_check = $4,
+            country_input = $5,
             updated_at = NOW()
         WHERE entity_key = $1
         """,
@@ -406,6 +439,7 @@ async def update_cached_screening_metadata(
         requestor,
         business_reference_clean,
         reason_for_check_clean,
+        country_input_clean,
     )
 
 
@@ -435,6 +469,7 @@ async def enqueue_job(
     entity_key: str,
     name: str,
     date_of_birth: Optional[str],
+    country: Optional[str],
     entity_type: str,
     requestor: str,
     business_reference: Optional[str] = None,
@@ -453,14 +488,15 @@ async def enqueue_job(
     row = await conn.fetchrow(
         """
         INSERT INTO screening_jobs (
-            entity_key, name, date_of_birth, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen, status
+            entity_key, name, date_of_birth, country, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen, status
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10, 'pending')
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::uuid, $11, 'pending')
         RETURNING job_id
         """,
         entity_key,
         name,
         date_of_birth,
+        (country or "").strip() or None,
         entity_type or "Person",
         requestor,
         business_reference_clean,
@@ -837,7 +873,7 @@ async def search_screened_entities(
     query = f"""
         SELECT entity_key, display_name, normalized_name, date_of_birth, entity_type,
                last_screened_at, screening_valid_until, status, risk_level, confidence, score,
-               uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check,
+               uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check, country_input,
                review_status, review_claimed_by, review_claimed_at, review_outcome, review_notes, review_completed_by, review_completed_at,
                updated_at
         FROM screened_entities
@@ -1260,6 +1296,7 @@ async def list_screening_jobs(
             j.entity_key,
             j.name,
             j.date_of_birth,
+            j.country,
             j.entity_type,
             j.requestor,
             j.reason_for_check,

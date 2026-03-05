@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS screened_entities (
     display_name     TEXT NOT NULL,
     normalized_name  TEXT NOT NULL,
     date_of_birth    DATE,
+    country_input    TEXT,
     entity_type      TEXT NOT NULL DEFAULT 'Person',
 
     last_screened_at     TIMESTAMPTZ NOT NULL,
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS screening_jobs (
 
     name            TEXT NOT NULL,
     date_of_birth   TEXT,
+    country         TEXT,
     entity_type     TEXT NOT NULL DEFAULT 'Person',
     requestor       TEXT NOT NULL,
 

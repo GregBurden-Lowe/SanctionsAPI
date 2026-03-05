@@ -56,6 +56,7 @@ export function ScreeningPage() {
   const navigate = useNavigate()
   const [name, setName] = useState('')
   const [dob, setDob] = useState('')
+  const [country, setCountry] = useState('')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>('Person')
   const [businessReference, setBusinessReference] = useState('')
   const [reasonForCheck, setReasonForCheck] = useState<ReasonForCheck>('Client Onboarding')
@@ -75,6 +76,7 @@ export function ScreeningPage() {
     setError(null)
     const nameTrim = name.trim()
     const dobTrim = dob.trim()
+    const countryTrim = country.trim()
     const businessReferenceTrim = businessReference.trim()
     const requestorTrim = requestor.trim()
     if (!nameTrim) {
@@ -94,6 +96,7 @@ export function ScreeningPage() {
       const res = await opcheck({
         name: nameTrim,
         dob: dobTrim || null,
+        country: countryTrim || null,
         entity_type: entityType,
         business_reference: businessReferenceTrim,
         reason_for_check: reasonForCheck,
@@ -112,6 +115,7 @@ export function ScreeningPage() {
           searchName: nameTrim,
           entityType,
           searchDob: dobTrim,
+          searchCountry: countryTrim,
           businessReference: businessReferenceTrim,
           reasonForCheck,
           requestor: requestorTrim,
@@ -168,6 +172,16 @@ export function ScreeningPage() {
               placeholder="DD-MM-YYYY or YYYY"
             />
                 </div>
+                {entityType === 'Organization' && (
+                  <div className="md:col-span-2">
+                    <Input
+                      label="Country (optional)"
+                      value={country}
+                      onChange={(e) => setCountry(e.target.value)}
+                      placeholder="e.g. UK"
+                    />
+                  </div>
+                )}
                 <div className="md:col-span-2">
             <Input
               label="Business reference"
@@ -261,6 +275,12 @@ function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) 
             <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
             <dd className="text-text-primary mt-0.5">{searchDetails.searchDob?.trim() ? searchDetails.searchDob : 'Not provided'}</dd>
           </div>
+          {searchDetails.entityType === 'Organization' && (
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Country</dt>
+              <dd className="text-text-primary mt-0.5">{searchDetails.searchCountry?.trim() ? searchDetails.searchCountry : 'Not provided'}</dd>
+            </div>
+          )}
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Reason for check</dt>
             <dd className="text-text-primary mt-0.5">{searchDetails.reasonForCheck || '—'}</dd>
@@ -295,6 +315,80 @@ export function ScreeningResultPage() {
     }
   }
   if (!payload?.result || !payload?.searchDetails) return <Navigate to="/" replace />
+  const [result, setResult] = useState<OpCheckResponse>(payload.result)
+  const [searchDetails, setSearchDetails] = useState<SearchDetails>(payload.searchDetails)
+  const [rerunDob, setRerunDob] = useState(payload.searchDetails.searchDob ?? '')
+  const [rerunCountry, setRerunCountry] = useState(payload.searchDetails.searchCountry ?? '')
+  const [rerunLoading, setRerunLoading] = useState(false)
+  const [rerunError, setRerunError] = useState<string | null>(null)
+  const personRerunEnabled = searchDetails.entityType === 'Person'
+  const organizationRerunEnabled = searchDetails.entityType === 'Organization'
+  const rerunEnabled = personRerunEnabled || organizationRerunEnabled
+
+  const handleRerunWithDob = async () => {
+    const dobTrim = rerunDob.trim()
+    const countryTrim = rerunCountry.trim()
+    if (!rerunEnabled) return
+    if (personRerunEnabled && !dobTrim) {
+      setRerunError('Please enter date of birth before re-running.')
+      return
+    }
+    if (organizationRerunEnabled && !countryTrim) {
+      setRerunError('Please enter country before re-running.')
+      return
+    }
+    if (!result.entity_key) {
+      setRerunError('Entity key is missing; cannot re-run against the same stored record.')
+      return
+    }
+    setRerunError(null)
+    setRerunLoading(true)
+    try {
+      const res = await opcheck({
+        name: searchDetails.searchName,
+        dob: personRerunEnabled ? dobTrim : searchDetails.searchDob || null,
+        country: organizationRerunEnabled ? countryTrim : searchDetails.searchCountry || null,
+        entity_type: searchDetails.entityType,
+        business_reference: searchDetails.businessReference,
+        reason_for_check: searchDetails.reasonForCheck as
+          | 'Client Onboarding'
+          | 'Claim Payment'
+          | 'Business Partner Payment'
+          | 'Business Partner Due Diligence'
+          | 'Periodic Re-Screen'
+          | 'Ad-Hoc Compliance Review',
+        requestor: searchDetails.requestor,
+        search_backend: searchDetails.searchBackend === 'original' ? 'original' : 'postgres_beta',
+        rerun_entity_key: result.entity_key,
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const detail = (data as { detail?: string }).detail
+        const message = (data as { message?: string }).message
+        const error = (data as { error?: string }).error
+        setRerunError(detail ?? message ?? error ?? 'Failed to re-run with date of birth.')
+        return
+      }
+      if ((data as { status?: string }).status === 'queued') {
+        setRerunError('Re-run was queued due to system load. Please refresh shortly.')
+        return
+      }
+      const nextResult = data as OpCheckResponse
+      const nextSearch: SearchDetails = {
+        ...searchDetails,
+        searchDob: personRerunEnabled ? dobTrim : searchDetails.searchDob,
+        searchCountry: organizationRerunEnabled ? countryTrim : searchDetails.searchCountry,
+      }
+      const nextPayload: ScreeningResultState = { result: nextResult, searchDetails: nextSearch }
+      setResult(nextResult)
+      setSearchDetails(nextSearch)
+      sessionStorage.setItem('screening_last_result', JSON.stringify(nextPayload))
+    } catch (err) {
+      setRerunError(err instanceof Error ? err.message : 'Failed to re-run with date of birth.')
+    } finally {
+      setRerunLoading(false)
+    }
+  }
 
   return (
     <div className="px-10 pb-10">
@@ -305,8 +399,45 @@ export function ScreeningResultPage() {
             Run another check
           </Button>
         </div>
-        <SearchDetailsCard searchDetails={payload.searchDetails} />
-        <ResultCard result={payload.result} searchDetails={payload.searchDetails} />
+        {rerunEnabled && (
+          <Card>
+            <CardHeader>
+              <CardTitle>{personRerunEnabled ? 'Refine with date of birth' : 'Refine with country'}</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <p className="text-sm text-text-secondary">
+                Re-run this check with additional details and keep the same entity key record.
+              </p>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                {personRerunEnabled ? (
+                  <Input
+                    label="Date of birth"
+                    value={rerunDob}
+                    onChange={(e) => setRerunDob(e.target.value)}
+                    placeholder="DD-MM-YYYY or YYYY-MM-DD or YYYY"
+                  />
+                ) : (
+                  <Input
+                    label="Country"
+                    value={rerunCountry}
+                    onChange={(e) => setRerunCountry(e.target.value)}
+                    placeholder="e.g. UK"
+                  />
+                )}
+                <Button type="button" onClick={() => void handleRerunWithDob()} disabled={rerunLoading}>
+                  {rerunLoading ? 'Re-running…' : personRerunEnabled ? 'Re-run with DoB' : 'Re-run with country'}
+                </Button>
+              </div>
+              {rerunError && (
+                <p className="text-sm text-semantic-error" role="alert">
+                  {rerunError}
+                </p>
+              )}
+            </CardBody>
+          </Card>
+        )}
+        <SearchDetailsCard searchDetails={searchDetails} />
+        <ResultCard result={result} searchDetails={searchDetails} />
       </div>
     </div>
   )

@@ -325,6 +325,7 @@ app.add_middleware(
 class OpCheckRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
+    country: Optional[str] = Field(None, description="Country (optional, organization checks)")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     business_reference: constr(strip_whitespace=True, min_length=1) = Field(..., description="Business reference (required)")
     reason_for_check: Literal[
@@ -337,6 +338,10 @@ class OpCheckRequest(BaseModel):
     ] = Field(..., description="Reason for check (required enum)")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
     search_backend: Optional[str] = Field("postgres_beta", description="'postgres_beta' (default) or 'original' (parquet)")
+    rerun_entity_key: Optional[str] = Field(
+        None,
+        description="Optional: rerun using this existing entity_key so the stored record is updated in-place",
+    )
 
 class RefreshRequest(BaseModel):
     include_peps: bool = Field(
@@ -415,6 +420,7 @@ class ReviewCompleteRequest(BaseModel):
 class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
+    country: Optional[str] = Field(None, description="Country (optional, organization checks)")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     business_reference: constr(strip_whitespace=True, min_length=1) = Field(..., description="Business reference (required)")
     reason_for_check: Literal[
@@ -1224,6 +1230,7 @@ def _run_check_sync(data: OpCheckRequest):
     return perform_opensanctions_check(
         name=data.name.strip(),
         dob=(data.dob.strip() if isinstance(data.dob, str) else data.dob),
+        country=(data.country.strip() if isinstance(data.country, str) else data.country),
         entity_type=(data.entity_type or "Person"),
         requestor=data.requestor.strip(),
     )
@@ -1266,18 +1273,62 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
 
     name = data.name.strip()
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob) or None
+    country = (data.country.strip() if isinstance(data.country, str) else data.country) or None
     entity_type = (data.entity_type or "Person")
+    entity_type_norm = entity_type.strip().lower()
     requestor = data.requestor.strip()
     business_reference = data.business_reference.strip()
     reason_for_check = data.reason_for_check
     search_backend = (data.search_backend or "postgres_beta").strip().lower()
+    rerun_entity_key = (data.rerun_entity_key or "").strip() or None
     if search_backend not in ("original", "postgres_beta"):
         return JSONResponse(
             status_code=400,
             content={"error": "invalid_search_backend", "message": "search_backend must be 'original' or 'postgres_beta'."},
         )
+    if rerun_entity_key:
+        if entity_type_norm not in ("person", "organization"):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_rerun_entity_type", "message": "rerun_entity_key is only supported for Person or Organization checks."},
+            )
+        if entity_type_norm == "person" and not dob:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing_dob_for_rerun", "message": "Date of birth is required when rerun_entity_key is provided."},
+            )
+        if entity_type_norm == "organization" and not country:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing_country_for_rerun", "message": "Country is required when rerun_entity_key is provided for Organization checks."},
+            )
 
     pool = await screening_db.get_pool()
+    if rerun_entity_key:
+        if pool is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "rerun_requires_database", "message": "Re-run with preserved entity key requires DATABASE_URL."},
+            )
+        async with pool.acquire() as conn:
+            existing = await screening_db.get_screened_entity_identity(conn, rerun_entity_key)
+        if existing is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "rerun_entity_not_found", "message": "rerun_entity_key was not found in screened records."},
+            )
+        existing_type_norm = str(existing.get("entity_type") or "").strip().lower()
+        if existing_type_norm != entity_type_norm:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_rerun_target", "message": "rerun_entity_key must reference an existing screening with the same entity type."},
+            )
+        if (existing.get("normalized_name") or "") != _normalize_text(name):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "rerun_name_mismatch", "message": "Name does not match the existing rerun_entity_key record."},
+            )
+
     if search_backend == "postgres_beta":
         if pool is None:
             return JSONResponse(
@@ -1286,8 +1337,73 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
             )
         key_variants = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
         entity_key_candidates = [f"{k}-pgb" for k in key_variants]
+        if rerun_entity_key:
+            entity_key_candidates = [rerun_entity_key]
         entity_key = entity_key_candidates[0]
         async with pool.acquire() as conn:
+            if not rerun_entity_key:
+                cached = None
+                cached_key = entity_key
+                for key_candidate in entity_key_candidates:
+                    cached = await screening_db.get_valid_screening(conn, key_candidate)
+                    if cached is not None:
+                        cached_key = key_candidate
+                        break
+                if cached is not None:
+                    try:
+                        await screening_db.update_cached_screening_metadata(
+                            conn,
+                            entity_key=cached_key,
+                            requestor=requestor,
+                            business_reference=business_reference,
+                            reason_for_check=reason_for_check,
+                            country_input=country,
+                        )
+                    except Exception as e:
+                        logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
+                    logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
+                    return _attach_entity_id(cached, cached_key)
+
+            results = await perform_postgres_watchlist_check(
+                conn,
+                name=name,
+                dob=dob,
+                country=country,
+                entity_type=entity_type,
+                requestor=requestor,
+            )
+            # Persist beta checks so Search database can find them by returned entity_key.
+            try:
+                latest_meta = await screening_db.get_latest_uk_hash(conn)
+                await screening_db.upsert_screening(
+                    conn,
+                    entity_key=entity_key,
+                    display_name=name,
+                    normalized_name=_normalize_text(name),
+                    date_of_birth=dob,
+                    country_input=country,
+                    entity_type=entity_type,
+                    requestor=requestor,
+                    business_reference=business_reference,
+                    reason_for_check=reason_for_check,
+                    result=results,
+                    screened_against_uk_hash=latest_meta.get("uk_hash"),
+                    screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
+                )
+            except Exception as e:
+                logger.warning("postgres_beta upsert failed entity_key=%s: %s", entity_key[:16], e)
+        return _attach_entity_id(results, entity_key)
+
+    entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
+    if rerun_entity_key:
+        entity_key_candidates = [rerun_entity_key]
+    entity_key = entity_key_candidates[0]
+    if pool is None:
+        # No DB: run check synchronously
+        return _attach_entity_id(_run_check_sync(data), entity_key)
+
+    async with pool.acquire() as conn:
+        if not rerun_entity_key:
             cached = None
             cached_key = entity_key
             for key_candidate in entity_key_candidates:
@@ -1303,76 +1419,21 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                         requestor=requestor,
                         business_reference=business_reference,
                         reason_for_check=reason_for_check,
+                        country_input=country,
                     )
                 except Exception as e:
                     logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
-                logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
+                # Reuse always first, regardless of load
+                logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
                 return _attach_entity_id(cached, cached_key)
-
-            results = await perform_postgres_watchlist_check(
-                conn,
-                name=name,
-                dob=dob,
-                entity_type=entity_type,
-                requestor=requestor,
-            )
-            # Persist beta checks so Search database can find them by returned entity_key.
-            try:
-                latest_meta = await screening_db.get_latest_uk_hash(conn)
-                await screening_db.upsert_screening(
-                    conn,
-                    entity_key=entity_key,
-                    display_name=name,
-                    normalized_name=_normalize_text(name),
-                    date_of_birth=dob,
-                    entity_type=entity_type,
-                    requestor=requestor,
-                    business_reference=business_reference,
-                    reason_for_check=reason_for_check,
-                    result=results,
-                    screened_against_uk_hash=latest_meta.get("uk_hash"),
-                    screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
-                )
-            except Exception as e:
-                logger.warning("postgres_beta upsert failed entity_key=%s: %s", entity_key[:16], e)
-        return _attach_entity_id(results, entity_key)
-
-    entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
-    entity_key = entity_key_candidates[0]
-    if pool is None:
-        # No DB: run check synchronously
-        return _attach_entity_id(_run_check_sync(data), entity_key)
-
-    async with pool.acquire() as conn:
-        cached = None
-        cached_key = entity_key
-        for key_candidate in entity_key_candidates:
-            cached = await screening_db.get_valid_screening(conn, key_candidate)
-            if cached is not None:
-                cached_key = key_candidate
-                break
-        if cached is not None:
-            try:
-                await screening_db.update_cached_screening_metadata(
-                    conn,
-                    entity_key=cached_key,
-                    requestor=requestor,
-                    business_reference=business_reference,
-                    reason_for_check=reason_for_check,
-                )
-            except Exception as e:
-                logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
-            # Reuse always first, regardless of load
-            logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
-            return _attach_entity_id(cached, cached_key)
 
         # Queue pressure check: under threshold => sync; at or over => enqueue (graceful load protection)
         count = await screening_db.get_pending_running_count(conn)
         threshold = _opcheck_queue_threshold()
-        if count >= threshold:
+        if not rerun_entity_key and count >= threshold:
             job_id = await screening_db.enqueue_job(
                 conn, entity_key=entity_key, name=name, date_of_birth=dob,
-                entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check,
+                country=country, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check,
             )
             logger.info(
                 "screening queued due to load job_id=%s entity_key=%s queue_depth=%s threshold=%s",
@@ -1393,13 +1454,13 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
     # Under threshold: run screening synchronously, then upsert
     logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
     results = perform_opensanctions_check(
-        name=name, dob=dob, entity_type=entity_type, requestor=requestor,
+        name=name, dob=dob, country=country, entity_type=entity_type, requestor=requestor,
     )
     async with pool.acquire() as conn:
         latest_meta = await screening_db.get_latest_uk_hash(conn)
         await screening_db.upsert_screening(
             conn, entity_key=entity_key, display_name=name, normalized_name=_normalize_text(name),
-            date_of_birth=dob, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check, result=results,
+            date_of_birth=dob, country_input=country, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check, result=results,
             screened_against_uk_hash=latest_meta.get("uk_hash"),
             screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
         )
@@ -1767,6 +1828,7 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
     if not business_reference:
         return {"status": "error", "error": "missing_business_reference"}
     dob = (item.dob.strip() if isinstance(item.dob, str) else item.dob) or None
+    country = (item.country.strip() if isinstance(item.country, str) else item.country) or None
     entity_type = (item.entity_type or "Person")
 
     entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
@@ -1785,7 +1847,7 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
 
     job_id = await screening_db.enqueue_job(
         conn, entity_key=entity_key, name=name, date_of_birth=dob,
-        entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=item.reason_for_check,
+        country=country, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=item.reason_for_check,
     )
     return {"status": "queued", "job_id": job_id}
 
@@ -1982,6 +2044,7 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
                                     entity_key=entity_key,
                                     name=str(candidate.get("display_name") or ""),
                                     date_of_birth=dob_str,
+                                    country=None,
                                     entity_type=str(candidate.get("entity_type") or "Person"),
                                     requestor=system_requestor,
                                     business_reference=f"UK-DELTA-{refresh_run_id}",

@@ -40,6 +40,7 @@ export async function health(): Promise<string> {
 export interface OpCheckParams {
   name: string
   dob?: string | null
+  country?: string | null
   entity_type?: string
   business_reference: string
   reason_for_check:
@@ -51,6 +52,7 @@ export interface OpCheckParams {
     | 'Ad-Hoc Compliance Review'
   requestor?: string | null
   search_backend?: 'original' | 'postgres_beta'
+  rerun_entity_key?: string | null
 }
 
 export async function opcheck(params: OpCheckParams): Promise<Response> {
@@ -60,11 +62,13 @@ export async function opcheck(params: OpCheckParams): Promise<Response> {
     body: JSON.stringify({
       name: params.name,
       dob: params.dob ?? null,
+      country: params.country ?? null,
       entity_type: params.entity_type ?? 'Person',
       business_reference: params.business_reference,
       reason_for_check: params.reason_for_check,
       requestor: params.requestor ?? null,
       search_backend: params.search_backend ?? 'postgres_beta',
+      rerun_entity_key: params.rerun_entity_key ?? null,
     }),
   })
 }

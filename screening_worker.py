@@ -49,7 +49,7 @@ def main():
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         """
-                        SELECT job_id, entity_key, name, date_of_birth, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen
+                        SELECT job_id, entity_key, name, date_of_birth, country, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen
                         FROM screening_jobs
                         WHERE status = 'pending'
                         ORDER BY created_at
@@ -68,6 +68,7 @@ def main():
                 entity_key = row["entity_key"]
                 name = row["name"]
                 dob = row["date_of_birth"]
+                country = (row.get("country") or "").strip() or None
                 entity_type = row["entity_type"] or "Person"
                 requestor = row["requestor"] or ""
                 business_reference = (row.get("business_reference") or "").strip()
@@ -140,10 +141,11 @@ def main():
                             SET last_requestor = %s,
                                 business_reference = %s,
                                 reason_for_check = %s,
+                                country_input = %s,
                                 updated_at = NOW()
                             WHERE entity_key = %s
                             """,
-                            (requestor, business_reference, reason_for_check, entity_key),
+                            (requestor, business_reference, reason_for_check, country, entity_key),
                         )
                         cur.execute(
                             """
@@ -166,6 +168,7 @@ def main():
                 result = perform_opensanctions_check(
                     name=name,
                     dob=dob,
+                    country=country,
                     entity_type=entity_type,
                     requestor=requestor,
                 )
@@ -237,17 +240,18 @@ def main():
                     cur.execute(
                         """
                         INSERT INTO screened_entities (
-                            entity_key, display_name, normalized_name, date_of_birth, entity_type,
+                            entity_key, display_name, normalized_name, date_of_birth, country_input, entity_type,
                             last_screened_at, screening_valid_until,
                             status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
                             result_json, last_requestor, business_reference, reason_for_check, updated_at,
                             screened_against_uk_hash, screened_against_refresh_run_id,
                             manual_override_uk_hash, manual_override_stale
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
                         ON CONFLICT (entity_key) DO UPDATE SET
                             display_name = EXCLUDED.display_name,
                             normalized_name = EXCLUDED.normalized_name,
                             date_of_birth = EXCLUDED.date_of_birth,
+                            country_input = EXCLUDED.country_input,
                             entity_type = EXCLUDED.entity_type,
                             last_screened_at = EXCLUDED.last_screened_at,
                             screening_valid_until = EXCLUDED.screening_valid_until,
@@ -272,6 +276,7 @@ def main():
                             display_name,
                             normalized_name,
                             dob_date,
+                            country,
                             entity_type,
                             now,
                             valid_until,

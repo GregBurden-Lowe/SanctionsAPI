@@ -184,6 +184,7 @@ export function ScreeningJobsPage() {
                 searchName: detailRow.display_name,
                 entityType: detailRow.entity_type,
                 searchDob: detailRow.date_of_birth ?? '',
+                searchCountry: detailRow.country_input ?? '',
                 businessReference: detailRow.business_reference ?? '',
                 reasonForCheck: detailRow.reason_for_check ?? '',
                 requestor: detailRow.last_requestor ?? '',
