@@ -578,6 +578,21 @@ export function ResultCard({
             : 'neutral',
     },
     {
+      title: 'PEP processing',
+      subtitle:
+        result['PEP Check']?.message
+          ? result['PEP Check']?.message
+          : 'PEP screening executed.',
+      badge:
+        result['PEP Check']?.checked === false
+          ? 'Skipped'
+          : 'Checked',
+      tone:
+        result['PEP Check']?.checked === false
+          ? 'neutral'
+          : 'ok',
+    },
+    {
       title: 'Sanctions status',
       subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : 'No sanctions match detected',
       badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',

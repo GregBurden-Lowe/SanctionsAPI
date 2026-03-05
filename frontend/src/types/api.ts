@@ -67,6 +67,12 @@ export interface OpCheckResponse {
     Person?: { status?: string; is_match?: boolean; score?: number }
     Organization?: { status?: string; is_match?: boolean; score?: number }
   };
+  'PEP Check'?: {
+    checked?: boolean
+    status?: string
+    reason?: string | null
+    message?: string
+  };
   entity_key?: string;
 }
 

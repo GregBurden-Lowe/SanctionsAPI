@@ -865,6 +865,7 @@ def perform_opensanctions_check(
     parquet_path=OSN_PARQUET,
     requestor: Optional[str] = None,
     log_search: bool = True,
+    include_peps: bool = True,
 ):
     import math
 
@@ -897,10 +898,11 @@ def perform_opensanctions_check(
     if st is not None:
         st_lower = st.astype(str).str.lower()
         sanc_df = df[st_lower == "sanctions"]
-        pep_df  = df[st_lower == "peps"]
+        pep_df = df[st_lower == "peps"] if include_peps else df.iloc[0:0]
         combined_for_suggestions = pd.concat([sanc_df, pep_df], ignore_index=True)
     else:
-        sanc_df, pep_df = df, df.iloc[0:0]
+        sanc_df = df
+        pep_df = df.iloc[0:0] if include_peps else df.iloc[0:0]
         combined_for_suggestions = df
 
     # Suggestions are based only on name similarity and do NOT affect result
@@ -1042,6 +1044,7 @@ async def perform_postgres_watchlist_check(
     requestor: Optional[str] = None,
     candidate_limit: int = 400,
     log_search: bool = True,
+    include_peps: bool = True,
 ) -> Dict[str, Any]:
     """
     Beta matcher using watchlist_entities in PostgreSQL.
@@ -1129,7 +1132,7 @@ async def perform_postgres_watchlist_check(
         return out
 
     sanc_rows = await _fetch_candidates("sanctions")
-    pep_rows = await _fetch_candidates("peps")
+    pep_rows = await _fetch_candidates("peps") if include_peps else []
     combined = sanc_rows + pep_rows
 
     if not combined:

@@ -1238,6 +1238,7 @@ def _run_check_sync(data: OpCheckRequest):
     name = data.name.strip()
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob)
     country = (data.country.strip() if isinstance(data.country, str) else data.country)
+    pep_enabled = not _looks_like_company_name(name)
     person_result = perform_opensanctions_check(
         name=name,
         dob=dob,
@@ -1245,6 +1246,7 @@ def _run_check_sync(data: OpCheckRequest):
         entity_type="Person",
         requestor=data.requestor.strip(),
         log_search=False,
+        include_peps=pep_enabled,
     )
     organization_result = perform_opensanctions_check(
         name=name,
@@ -1253,8 +1255,14 @@ def _run_check_sync(data: OpCheckRequest):
         entity_type="Organization",
         requestor=data.requestor.strip(),
         log_search=False,
+        include_peps=False,
     )
-    merged = _merge_dual_type_results(person_result, organization_result)
+    merged = _merge_dual_type_results(
+        person_result,
+        organization_result,
+        pep_checked=pep_enabled,
+        pep_skip_reason="company_name_detected" if not pep_enabled else None,
+    )
     summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
     if summary:
         from utils import _append_search_to_csv
@@ -1302,7 +1310,25 @@ def _status_for_type_check(result: dict) -> str:
     return "Cleared"
 
 
-def _merge_dual_type_results(person_result: dict, organization_result: dict) -> dict:
+def _looks_like_company_name(name: str) -> bool:
+    normalized = _normalize_text(name or "")
+    if not normalized:
+        return False
+    tokens = set(normalized.split())
+    org_markers = {
+        "ltd", "limited", "llp", "plc", "inc", "corp", "co", "company", "holdings",
+        "group", "gmbh", "sa", "bv", "pte", "pty", "sarl", "partners",
+    }
+    return any(marker in tokens for marker in org_markers)
+
+
+def _merge_dual_type_results(
+    person_result: dict,
+    organization_result: dict,
+    *,
+    pep_checked: bool,
+    pep_skip_reason: Optional[str] = None,
+) -> dict:
     primary = person_result
     if _result_priority(organization_result) > _result_priority(person_result):
         primary = organization_result
@@ -1325,6 +1351,16 @@ def _merge_dual_type_results(person_result: dict, organization_result: dict) -> 
             "score": float(organization_result.get("Score") or 0),
         },
     }
+    merged["PEP Check"] = {
+        "checked": bool(pep_checked),
+        "status": "checked" if pep_checked else "skipped",
+        "reason": pep_skip_reason,
+        "message": (
+            "PEP screening skipped because the query appears to be a company name."
+            if not pep_checked
+            else "PEP screening executed."
+        ),
+    }
     return merged
 
 
@@ -1336,6 +1372,7 @@ async def _run_postgres_dual_check(
     country: Optional[str],
     requestor: Optional[str],
 ) -> dict:
+    pep_enabled = not _looks_like_company_name(name)
     person_result = await perform_postgres_watchlist_check(
         conn,
         name=name,
@@ -1344,6 +1381,7 @@ async def _run_postgres_dual_check(
         entity_type="Person",
         requestor=requestor,
         log_search=False,
+        include_peps=pep_enabled,
     )
     organization_result = await perform_postgres_watchlist_check(
         conn,
@@ -1353,8 +1391,14 @@ async def _run_postgres_dual_check(
         entity_type="Organization",
         requestor=requestor,
         log_search=False,
+        include_peps=False,
     )
-    merged = _merge_dual_type_results(person_result, organization_result)
+    merged = _merge_dual_type_results(
+        person_result,
+        organization_result,
+        pep_checked=pep_enabled,
+        pep_skip_reason="company_name_detected" if not pep_enabled else None,
+    )
     summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
     if summary:
         from utils import _append_search_to_csv
@@ -1552,13 +1596,19 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
 
     # Under threshold: run screening synchronously, then upsert
     logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
+    pep_enabled = not _looks_like_company_name(name)
     person_result = perform_opensanctions_check(
-        name=name, dob=dob, country=None, entity_type="Person", requestor=requestor, log_search=False,
+        name=name, dob=dob, country=None, entity_type="Person", requestor=requestor, log_search=False, include_peps=pep_enabled,
     )
     organization_result = perform_opensanctions_check(
-        name=name, dob=None, country=country, entity_type="Organization", requestor=requestor, log_search=False,
+        name=name, dob=None, country=country, entity_type="Organization", requestor=requestor, log_search=False, include_peps=False,
     )
-    results = _merge_dual_type_results(person_result, organization_result)
+    results = _merge_dual_type_results(
+        person_result,
+        organization_result,
+        pep_checked=pep_enabled,
+        pep_skip_reason="company_name_detected" if not pep_enabled else None,
+    )
     summary = results.get("Check Summary") if isinstance(results.get("Check Summary"), dict) else None
     if summary:
         from utils import _append_search_to_csv
