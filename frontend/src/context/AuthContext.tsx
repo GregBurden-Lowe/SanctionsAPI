@@ -3,12 +3,14 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
 
 const STORAGE_KEY_TOKEN = 'sanctions_token'
 const STORAGE_KEY_USER = 'sanctions_user'
+const TOKEN_EXPIRY_SKEW_SECONDS = 5
 
 export interface AuthUser {
   username: string
@@ -35,6 +37,26 @@ interface AuthContextValue extends AuthState {
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
+function parseJwtExpiryEpochSeconds(token: string): number | null {
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2) return null
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4)
+    const payload = JSON.parse(atob(padded)) as { exp?: unknown }
+    const exp = Number(payload.exp)
+    return Number.isFinite(exp) ? exp : null
+  } catch {
+    return null
+  }
+}
+
+function isTokenExpired(token: string, skewSeconds = TOKEN_EXPIRY_SKEW_SECONDS): boolean {
+  const exp = parseJwtExpiryEpochSeconds(token)
+  if (!exp) return true
+  return exp <= Math.floor(Date.now() / 1000) + skewSeconds
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
     user: null,
@@ -43,6 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checked: false,
     loginRequired: true,
   })
+  const expiryTimerRef = useRef<number | null>(null)
 
   const setAuth = useCallback((token: string, user: AuthUser) => {
     localStorage.setItem(STORAGE_KEY_TOKEN, token)
@@ -51,6 +74,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logout = useCallback(() => {
+    if (expiryTimerRef.current !== null) {
+      window.clearTimeout(expiryTimerRef.current)
+      expiryTimerRef.current = null
+    }
     localStorage.removeItem(STORAGE_KEY_TOKEN)
     localStorage.removeItem(STORAGE_KEY_USER)
     setState((s) => ({ ...s, user: null, token: null }))
@@ -72,15 +99,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const token = localStorage.getItem(STORAGE_KEY_TOKEN)
         const userRaw = localStorage.getItem(STORAGE_KEY_USER)
         if (token && userRaw) {
+          if (isTokenExpired(token)) {
+            clearStoredAuth()
+            setState((s) => ({ ...s, user: null, token: null, checked: true, loginRequired }))
+            return
+          }
           try {
             const user = JSON.parse(userRaw) as AuthUser
             if (user?.username) {
-              setState((s) => ({ ...s, token, user, checked: true, loginRequired }))
-              return
+              const meRes = await fetch(`${API_BASE}/auth/me`, {
+                headers: { Authorization: `Bearer ${token}` },
+              })
+              if (meRes.ok) {
+                setState((s) => ({ ...s, token, user, checked: true, loginRequired }))
+                return
+              }
             }
           } catch {
             // ignore
           }
+          clearStoredAuth()
         }
         setState((s) => ({ ...s, user: null, token: null, checked: true, loginRequired }))
       } catch {
@@ -91,6 +129,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (expiryTimerRef.current !== null) {
+      window.clearTimeout(expiryTimerRef.current)
+      expiryTimerRef.current = null
+    }
+    if (!state.loginRequired || !state.token) return
+    const exp = parseJwtExpiryEpochSeconds(state.token)
+    if (!exp) {
+      logout()
+      return
+    }
+    const msUntilExpiry = exp * 1000 - Date.now() - TOKEN_EXPIRY_SKEW_SECONDS * 1000
+    if (msUntilExpiry <= 0) {
+      logout()
+      return
+    }
+    expiryTimerRef.current = window.setTimeout(() => {
+      logout()
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }, msUntilExpiry)
+    return () => {
+      if (expiryTimerRef.current !== null) {
+        window.clearTimeout(expiryTimerRef.current)
+        expiryTimerRef.current = null
+      }
+    }
+  }, [state.loginRequired, state.token, logout])
 
   const login = useCallback(
     async (email: string, password: string) => {
@@ -157,4 +225,11 @@ export function useAuth(): AuthContextValue {
 /** Used by API client to attach token to requests. */
 export function getStoredToken(): string | null {
   return typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_TOKEN) : null
+}
+
+/** Clear stored auth (used when backend reports token is invalid/expired). */
+export function clearStoredAuth(): void {
+  if (typeof localStorage === 'undefined') return
+  localStorage.removeItem(STORAGE_KEY_TOKEN)
+  localStorage.removeItem(STORAGE_KEY_USER)
 }
