@@ -1286,7 +1286,7 @@ async def list_screening_jobs(
     where = ""
     args: List[Any] = []
     if status and status in valid_status:
-        where = "WHERE status = $1"
+        where = "WHERE j.status = $1"
         args.append(status)
     args.extend([limit, offset])
 

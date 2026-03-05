@@ -30,6 +30,7 @@ export function ScreeningJobsPage() {
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [batchExporting, setBatchExporting] = useState(false)
+  const [idModalKey, setIdModalKey] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -120,7 +121,7 @@ export function ScreeningJobsPage() {
 
   return (
     <div className="px-10 pb-10">
-      <div className="max-w-6xl space-y-6">
+      <div className="w-full max-w-[1600px] space-y-6">
         <SectionHeader title="Screening jobs" />
         <Card>
           <CardHeader>
@@ -158,7 +159,6 @@ export function ScreeningJobsPage() {
                     <th className="py-2 pr-4 font-medium text-text-primary">Started</th>
                     <th className="py-2 pr-4 font-medium text-text-primary">Finished</th>
                     <th className="py-2 pr-4 font-medium text-text-primary">Outcome</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Entity key</th>
                     <th className="py-2 font-medium text-text-primary">Error</th>
                     <th className="py-2 font-medium text-text-primary">Actions</th>
                   </tr>
@@ -176,33 +176,35 @@ export function ScreeningJobsPage() {
                       <td className="py-2 pr-4 text-text-secondary">
                         {row.screening_status ?? (row.status === 'completed' ? 'Completed' : '—')}
                       </td>
-                      <td className="py-2 pr-4">
-                        <code className="text-xs bg-surface px-1 rounded break-all font-mono">{row.entity_key}</code>
-                      </td>
                       <td className="py-2 text-text-muted">{row.error_message || '—'}</td>
                       <td className="py-2">
-                        {row.status === 'completed' && (
-                          <div className="flex items-center gap-2">
-                            <Button type="button" variant="ghost" size="sm" onClick={() => void openResult(row)}>
-                              View result
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => void exportBatchPdf(row.business_reference)}
-                              disabled={batchExporting}
-                            >
-                              {batchExporting ? 'Preparing…' : 'Batch PDF'}
-                            </Button>
-                          </div>
-                        )}
+                        <div className="flex items-center gap-2">
+                          <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
+                            Show ID
+                          </Button>
+                          {row.status === 'completed' && (
+                            <>
+                              <Button type="button" variant="ghost" size="sm" onClick={() => void openResult(row)}>
+                                View result
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => void exportBatchPdf(row.business_reference)}
+                                disabled={batchExporting}
+                              >
+                                {batchExporting ? 'Preparing…' : 'Batch PDF'}
+                              </Button>
+                            </>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
                   {!loading && items.length === 0 && (
                     <tr>
-                      <td className="py-3 text-text-secondary" colSpan={11}>No jobs found for this filter.</td>
+                      <td className="py-3 text-text-secondary" colSpan={10}>No jobs found for this filter.</td>
                     </tr>
                   )}
                 </tbody>
@@ -241,6 +243,30 @@ export function ScreeningJobsPage() {
                 searchBackend: 'postgres_beta',
               }}
           />
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={idModalKey !== null}
+        onClose={() => setIdModalKey(null)}
+        title="Entity ID"
+        footer={
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => setIdModalKey(null)}>
+              Close
+            </Button>
+            {idModalKey && (
+              <Button
+                onClick={() => void navigator.clipboard.writeText(idModalKey)}
+              >
+                Copy ID
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {idModalKey && (
+          <code className="block w-full text-xs bg-surface px-2 py-2 rounded break-all font-mono">{idModalKey}</code>
         )}
       </Modal>
     </div>
