@@ -1,15 +1,27 @@
 /**
  * Central API client. Uses relative URLs by default; override with VITE_API_BASE_URL.
- * Attaches GUI JWT when available (localStorage) for authenticated endpoints.
+ * Attaches GUI JWT when available (localStorage) for authenticated endpoints and
+ * automatically logs the user out when the backend reports the token is invalid/expired.
  */
 
-import { getStoredToken } from '@/context/AuthContext'
+import { clearStoredAuth, getStoredToken } from '@/context/AuthContext'
 import type { ReviewOutcome, ReviewQueueItem, ReviewStatus } from '@/types/api'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
 function resolve(path: string): string {
   return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init)
+  if (res.status === 401 || res.status === 403) {
+    clearStoredAuth()
+    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      window.location.href = '/login'
+    }
+  }
+  return res
 }
 
 function defaultHeaders(): Record<string, string> {
@@ -20,7 +32,7 @@ function defaultHeaders(): Record<string, string> {
 }
 
 export async function health(): Promise<string> {
-  const res = await fetch(resolve('/health'))
+  const res = await authFetch(resolve('/health'))
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`)
   return res.text()
 }
@@ -42,7 +54,7 @@ export interface OpCheckParams {
 }
 
 export async function opcheck(params: OpCheckParams): Promise<Response> {
-  return fetch(resolve('/opcheck'), {
+  return authFetch(resolve('/opcheck'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({
@@ -58,7 +70,7 @@ export async function opcheck(params: OpCheckParams): Promise<Response> {
 }
 
 export async function refreshOpensanctions(include_peps: boolean, sync_postgres = true): Promise<Response> {
-  return fetch(resolve('/refresh_opensanctions'), {
+  return authFetch(resolve('/refresh_opensanctions'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({ include_peps, sync_postgres }),
@@ -66,7 +78,7 @@ export async function refreshOpensanctions(include_peps: boolean, sync_postgres 
 }
 
 export async function clearScreeningData(): Promise<Response> {
-  return fetch(resolve('/admin/testing/clear-screening-data'), {
+  return authFetch(resolve('/admin/testing/clear-screening-data'), {
     method: 'POST',
     headers: defaultHeaders(),
   })
@@ -88,7 +100,7 @@ export interface BulkScreeningItem {
 }
 
 export async function enqueueBulkScreening(requests: BulkScreeningItem[]): Promise<Response> {
-  return fetch(resolve('/admin/screening/jobs/bulk'), {
+  return authFetch(resolve('/admin/screening/jobs/bulk'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({ requests }),
@@ -107,14 +119,14 @@ export async function listScreeningJobs(params: ListScreeningJobsParams = {}): P
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
   const qs = sp.toString()
-  return fetch(resolve(`/admin/screening/jobs${qs ? `?${qs}` : ''}`), {
+  return authFetch(resolve(`/admin/screening/jobs${qs ? `?${qs}` : ''}`), {
     method: 'GET',
     headers: defaultHeaders(),
   })
 }
 
 export async function markFalsePositive(entity_key: string, reason: string): Promise<Response> {
-  return fetch(resolve('/admin/screening/false-positive'), {
+  return authFetch(resolve('/admin/screening/false-positive'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({ entity_key, reason }),
@@ -124,21 +136,21 @@ export async function markFalsePositive(entity_key: string, reason: string): Pro
 export async function getRescreenSummary(limit = 14): Promise<Response> {
   const sp = new URLSearchParams()
   sp.set('limit', String(limit))
-  return fetch(resolve(`/admin/screening/rescreen-summary?${sp.toString()}`), {
+  return authFetch(resolve(`/admin/screening/rescreen-summary?${sp.toString()}`), {
     method: 'GET',
     headers: defaultHeaders(),
   })
 }
 
 export async function getAdminOpenApiSchema(): Promise<Response> {
-  return fetch(resolve('/admin/openapi.json'), {
+  return authFetch(resolve('/admin/openapi.json'), {
     method: 'GET',
     headers: defaultHeaders(),
   })
 }
 
 export async function getDashboardSummary(): Promise<Response> {
-  return fetch(resolve('/dashboard/summary'), {
+  return authFetch(resolve('/dashboard/summary'), {
     method: 'GET',
     headers: defaultHeaders(),
   })
@@ -158,11 +170,11 @@ export interface ApiKeyCreated extends ApiKeyItem {
 }
 
 export async function listApiKeys(): Promise<Response> {
-  return fetch(resolve('/auth/api-keys'), { method: 'GET', headers: defaultHeaders() })
+  return authFetch(resolve('/auth/api-keys'), { method: 'GET', headers: defaultHeaders() })
 }
 
 export async function createApiKey(name: string): Promise<Response> {
-  return fetch(resolve('/auth/api-keys'), {
+  return authFetch(resolve('/auth/api-keys'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({ name, role: 'screening' }),
@@ -170,7 +182,7 @@ export async function createApiKey(name: string): Promise<Response> {
 }
 
 export async function setApiKeyActive(apiKeyId: string, active: boolean): Promise<Response> {
-  return fetch(resolve(`/auth/api-keys/${apiKeyId}`), {
+  return authFetch(resolve(`/auth/api-keys/${apiKeyId}`), {
     method: 'PATCH',
     headers: defaultHeaders(),
     body: JSON.stringify({ active }),
@@ -178,7 +190,7 @@ export async function setApiKeyActive(apiKeyId: string, active: boolean): Promis
 }
 
 export async function deleteApiKey(apiKeyId: string): Promise<Response> {
-  return fetch(resolve(`/auth/api-keys/${apiKeyId}`), {
+  return authFetch(resolve(`/auth/api-keys/${apiKeyId}`), {
     method: 'DELETE',
     headers: defaultHeaders(),
   })
@@ -193,7 +205,7 @@ export interface ApiUser {
 }
 
 export async function listUsers(): Promise<Response> {
-  return fetch(resolve('/auth/users'), { method: 'GET', headers: defaultHeaders() })
+  return authFetch(resolve('/auth/users'), { method: 'GET', headers: defaultHeaders() })
 }
 
 export async function createUser(params: {
@@ -201,7 +213,7 @@ export async function createUser(params: {
   password: string
   require_password_change: boolean
 }): Promise<Response> {
-  return fetch(resolve('/auth/users'), {
+  return authFetch(resolve('/auth/users'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify(params),
@@ -216,7 +228,7 @@ export async function updateUser(
   if (params.is_admin !== undefined) body.is_admin = params.is_admin
   if (params.new_password !== undefined && params.new_password) body.new_password = params.new_password
   if (Object.keys(body).length === 0) return new Response(null, { status: 400 })
-  return fetch(resolve(`/auth/users/${userId}`), {
+  return authFetch(resolve(`/auth/users/${userId}`), {
     method: 'PATCH',
     headers: defaultHeaders(),
     body: JSON.stringify(body),
@@ -235,7 +247,7 @@ export interface ImportUsersResult {
 }
 
 export async function importUsers(users: ImportUserItem[]): Promise<Response> {
-  return fetch(resolve('/auth/users/import'), {
+  return authFetch(resolve('/auth/users/import'), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({ users }),
@@ -243,7 +255,7 @@ export async function importUsers(users: ImportUserItem[]): Promise<Response> {
 }
 
 export async function signup(email: string): Promise<Response> {
-  return fetch(resolve('/auth/signup'), {
+  return authFetch(resolve('/auth/signup'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email }),
@@ -266,7 +278,7 @@ export async function searchScreened(params: SearchScreenedParams): Promise<Resp
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
   const qs = sp.toString()
-  return fetch(resolve(`/opcheck/screened${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
+  return authFetch(resolve(`/opcheck/screened${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
 }
 
 export interface ReviewQueueParams {
@@ -287,11 +299,11 @@ export async function getReviewQueue(params: ReviewQueueParams = {}): Promise<Re
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
   const qs = sp.toString()
-  return fetch(resolve(`/review/queue${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
+  return authFetch(resolve(`/review/queue${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
 }
 
 export async function claimReview(entityKey: string): Promise<Response> {
-  return fetch(resolve(`/review/${encodeURIComponent(entityKey)}/claim`), {
+  return authFetch(resolve(`/review/${encodeURIComponent(entityKey)}/claim`), {
     method: 'POST',
     headers: defaultHeaders(),
   })
@@ -301,7 +313,7 @@ export async function completeReview(
   entityKey: string,
   params: { review_outcome: ReviewOutcome; review_notes: string },
 ): Promise<Response> {
-  return fetch(resolve(`/review/${encodeURIComponent(entityKey)}/complete`), {
+  return authFetch(resolve(`/review/${encodeURIComponent(entityKey)}/complete`), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({

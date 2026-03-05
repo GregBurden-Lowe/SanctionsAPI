@@ -534,11 +534,11 @@ button:disabled {
         <div class="grid">
           <div class="col-2 form-group">
             <label for="name">Full name / Organisation *</label>
-            <input id="name" placeholder="Enter individual or entity name" />
+            <input id="name" placeholder="e.g. John Smith or Acme Corporation" required />
           </div>
           <div class="form-group">
             <label for="dob">Date of birth (optional)</label>
-            <input id="dob" type="date" />
+            <input id="dob" type="date" title="Optional. Format: YYYY-MM-DD (e.g. 1985-03-15) or leave blank" />
           </div>
           <div class="form-group">
             <label for="etype">Entity type</label>
@@ -549,11 +549,7 @@ button:disabled {
           </div>
           <div class="col-2 form-group">
             <label for="businessRef">Business reference *</label>
-            <input id="businessRef" placeholder="e.g. CLAIM-12345" />
-          </div>
-          <div class="col-2 form-group">
-            <label for="reasonForCheck">Reason for check *</label>
-            <select id="reasonForCheck"></select>
+            <input id="businessRef" placeholder="e.g. CLAIM-12345, CUST-001, or case reference" required />
           </div>
           <div class="col-4 btns no-print">
             <button class="primary" id="runBtn">Run Compliance Check</button>
@@ -571,18 +567,9 @@ button:disabled {
 
   <script>
     const API_BASE = "https://sanctions-check.co.uk";
-    const FLOW_URL = "";
+    /** Set your screening API key here when deploying this web resource. Create keys in Admin → API keys. */
+    const API_KEY = "";
     const DATA_SOURCES_TEXT = "United Nations; European Union; US OFAC; UK HM Treasury (OFSI)";
-    const DEFAULT_REASON_FOR_CHECK = "Ad-Hoc Compliance Review";
-    const REASON_FOR_CHECK_OPTIONS = [
-      "Client Onboarding",
-      "Claim Payment",
-      "Business Partner Payment",
-      "Business Partner Due Diligence",
-      "Periodic Re-Screen",
-      "Ad-Hoc Compliance Review",
-    ];
-
     const ICONS = {
       UN: `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><circle cx="32" cy="32" r="30" fill="#009edb"/><circle cx="32" cy="32" r="14" fill="#fff"/><circle cx="32" cy="32" r="9" fill="#009edb"/></svg>`,
       EU: `<svg viewBox="0 0 64 42" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="42" fill="#003399"/><g fill="#ffcc00">` +
@@ -604,7 +591,6 @@ button:disabled {
       dob: document.getElementById("dob"),
       etype: document.getElementById("etype"),
       businessRef: document.getElementById("businessRef"),
-      reasonForCheck: document.getElementById("reasonForCheck"),
       runBtn: document.getElementById("runBtn"),
       pdfBtn: document.getElementById("pdfBtn"),
       clearBtn: document.getElementById("clearBtn"),
@@ -625,7 +611,6 @@ button:disabled {
       el.dob.value = "";
       el.etype.value = "Person";
       el.businessRef.value = generateDefaultBusinessReference();
-      el.reasonForCheck.value = DEFAULT_REASON_FOR_CHECK;
       el.report.innerHTML = "";
       el.status.textContent = "";
       el.pdfBtn.disabled = true;
@@ -633,13 +618,6 @@ button:disabled {
     }
 
     function initRequiredFields() {
-      if (el.reasonForCheck) {
-        const optionsHtml = REASON_FOR_CHECK_OPTIONS
-          .map((option) => `<option value="${option}">${option}</option>`)
-          .join("");
-        el.reasonForCheck.innerHTML = optionsHtml;
-        el.reasonForCheck.value = DEFAULT_REASON_FOR_CHECK;
-      }
       if (el.businessRef && !el.businessRef.value.trim()) {
         el.businessRef.value = generateDefaultBusinessReference();
       }
@@ -825,22 +803,23 @@ button:disabled {
       const dob = el.dob.value ? el.dob.value : null;
       const entity_type = el.etype.value;
       const business_reference = el.businessRef.value.trim();
-      const reason_for_check = el.reasonForCheck.value;
+      const reason_for_check = "Claim Payment";
       const user = getCurrentUserInfo();
 
       if (!name) { toast("Please enter a name to search.", true); return; }
       if (!business_reference) { toast("Please provide a business reference.", true); return; }
-      if (!REASON_FOR_CHECK_OPTIONS.includes(reason_for_check)) { toast("Please select a valid reason for check.", true); return; }
       if (!user || !user.fullname) { toast("Unable to detect current user.", true); return; }
 
       setBusy(true); toast("Performing compliance check...");
 
       try {
         const issuedAt = new Date().toISOString();
+        const headers = { "Content-Type": "application/json" };
+        if (API_KEY) headers["Authorization"] = "Bearer " + API_KEY;
 
         const resp = await fetch(`${API_BASE}/opcheck/dataverse`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({
             name,
             dob,
@@ -855,28 +834,6 @@ button:disabled {
         const entityId = data?.entity_id || data?.entity_key || "";
 
         currentReport = { name, dob, entity_type, data, user, timestamp: new Date(issuedAt), business_reference, reason_for_check, entityId };
-
-        if (FLOW_URL) {
-          try {
-            const auditPayload = {
-              request: {
-                name,
-                dob,
-                entity_type,
-                requestor: user.fullname,
-                timestamp: issuedAt,
-                business_reference,
-                reason_for_check,
-              },
-              result: data,
-              client_extras: { data_sources: DATA_SOURCES_TEXT, entity_id: entityId }
-            };
-            fetch(FLOW_URL, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(auditPayload) })
-              .catch(e=>console.warn("[PA] audit failed", e));
-          } catch (e) {
-            console.warn("[PA] audit exception", e);
-          }
-        }
 
         renderReport();
         el.pdfBtn.disabled = false;
