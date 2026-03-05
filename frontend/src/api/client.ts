@@ -6,6 +6,7 @@
 
 import { clearStoredAuth, getStoredToken } from '@/context/AuthContext'
 import type { OpCheckResponse, ReviewOutcome, ReviewQueueItem, ReviewStatus } from '@/types/api'
+import type { CompaniesHouseScreeningBundle, CompaniesHouseSearchItem } from '@/types/api'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
@@ -159,6 +160,24 @@ export async function getDashboardSummary(): Promise<Response> {
     headers: defaultHeaders(),
   })
 }
+
+export async function searchCompaniesHouse(query: string): Promise<Response> {
+  const sp = new URLSearchParams()
+  sp.set('q', query)
+  return authFetch(resolve(`/api/companies/search?${sp.toString()}`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function getCompaniesHouseScreenBundle(companyNumber: string): Promise<Response> {
+  return authFetch(resolve(`/api/companies/${encodeURIComponent(companyNumber)}/screen`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export type { CompaniesHouseSearchItem, CompaniesHouseScreeningBundle }
 
 export interface ApiKeyItem {
   id: string

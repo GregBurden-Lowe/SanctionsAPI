@@ -241,3 +241,77 @@ export interface DashboardSummaryResponse {
     } | null
   }
 }
+
+export interface CompaniesHouseSearchItem {
+  company_name: string | null
+  company_number: string | null
+  company_status: string | null
+  date_of_creation: string | null
+  address_snippet: string | null
+}
+
+export interface CompaniesHouseAddressRisk {
+  postcode: string | null
+  company_count: number
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
+}
+
+export interface CompaniesHouseAgeRisk {
+  age_months: number | null
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
+}
+
+export interface CompaniesHouseDirectorTurnover {
+  rapid_turnover: boolean
+  resigned_last_12_months: number
+}
+
+export interface CompaniesHouseDirectorRisk {
+  total_appointments: number
+  total_companies: number
+  active_companies: number
+  dissolved_companies: number
+  liquidated_companies: number
+  flags: string[]
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN'
+}
+
+export interface CompaniesHouseOfficer {
+  name: string | null
+  appointed_on: string | null
+  resigned_on: string | null
+  officer_role: string | null
+  nationality: string | null
+  date_of_birth: { month?: number; year?: number } | null
+  officer_id?: string | null
+  risk?: CompaniesHouseDirectorRisk
+}
+
+export interface CompaniesHouseScreeningBundle {
+  company: {
+    company_name: string | null
+    company_number: string | null
+    company_status: string | null
+    date_of_creation: string | null
+    sic_codes?: string[] | null
+    accounts?: { overdue?: boolean } | null
+    has_charges?: boolean | null
+    registered_office_address?: Record<string, unknown> | null
+  }
+  officers: CompaniesHouseOfficer[]
+  insolvency: {
+    cases: Array<{
+      type: string | null
+      case_start_date: string | null
+      practitioners: string[]
+    }>
+  } | null
+  shell_risk: {
+    score: number
+    risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
+    flags: string[]
+  }
+  address_risk: CompaniesHouseAddressRisk
+  age_risk: CompaniesHouseAgeRisk
+  director_turnover: CompaniesHouseDirectorTurnover
+}

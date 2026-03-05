@@ -50,6 +50,14 @@ function ReviewIcon() {
   )
 }
 
+function BuildingIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 21h18M5 21V7l7-4 7 4v14M9 9h1m-1 4h1m-1 4h1m4-8h1m-1 4h1m-1 4h1" />
+    </svg>
+  )
+}
+
 function UsersIcon() {
   return (
     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -101,6 +109,9 @@ export function AppShell() {
           </NavItem>
           <NavItem to="/review" icon={<ReviewIcon />}>
             Match review
+          </NavItem>
+          <NavItem to="/companies-house" icon={<BuildingIcon />}>
+            Companies House
           </NavItem>
           {(!loginRequired || user?.is_admin) && (
             <NavItem to="/admin" icon={<SettingsIcon />}>

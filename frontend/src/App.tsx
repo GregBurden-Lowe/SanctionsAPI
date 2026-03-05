@@ -13,6 +13,7 @@ import { AdminApiDocsPage } from '@/pages/AdminApiDocsPage'
 import { ApiKeysPage } from '@/pages/ApiKeysPage'
 import { MatchReviewPage } from '@/pages/MatchReviewPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { CompaniesHousePage } from '@/pages/CompaniesHousePage'
 import { ProtectedRoute } from '@/components'
 
 function ChangePasswordGate() {
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="results" element={<ScreeningResultPage />} />
             <Route path="search" element={<SearchDatabasePage />} />
             <Route path="review" element={<MatchReviewPage />} />
+            <Route path="companies-house" element={<CompaniesHousePage />} />
             <Route
               path="admin"
               element={
