@@ -94,14 +94,6 @@ _COUNTRY_ALIAS_RAW: Dict[str, Tuple[str, ...]] = {
     "republic of the congo": ("congo brazzaville",),
 }
 _COUNTRY_ALIAS_CANONICAL: Dict[str, str] = {}
-for _canonical_name, _aliases in _COUNTRY_ALIAS_RAW.items():
-    _cn = _normalize_text(_canonical_name)
-    if _cn:
-        _COUNTRY_ALIAS_CANONICAL[_cn] = _cn
-    for _alias in _aliases:
-        _an = _normalize_text(_alias)
-        if _an:
-            _COUNTRY_ALIAS_CANONICAL[_an] = _cn
 
 # =============================================================================
 # Small helpers
@@ -114,6 +106,23 @@ def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("utf-8")
     s = re.sub(r"[^\w\s]", "", s)
     return re.sub(r"\s+", " ", s).lower().strip()
+
+
+def _build_country_alias_canonical() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for canonical_name, aliases in _COUNTRY_ALIAS_RAW.items():
+        cn = _normalize_text(canonical_name)
+        if not cn:
+            continue
+        out[cn] = cn
+        for alias in aliases:
+            an = _normalize_text(alias)
+            if an:
+                out[an] = cn
+    return out
+
+
+_COUNTRY_ALIAS_CANONICAL = _build_country_alias_canonical()
 
 
 def _canonicalize_name_for_key(display_name: str, entity_type: str) -> str:
