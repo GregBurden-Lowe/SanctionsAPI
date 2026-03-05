@@ -416,6 +416,11 @@ class ReviewCompleteRequest(BaseModel):
     review_notes: constr(strip_whitespace=True, min_length=10) = Field(..., description="Mandatory review notes (min 10 chars)")
 
 
+class ReviewRerunRequest(BaseModel):
+    dob: Optional[str] = Field(None, description="Date of birth for person rerun")
+    country: Optional[constr(strip_whitespace=True, min_length=1)] = Field(None, description="Country for organization rerun")
+
+
 # Internal queue-ingestion API: request body (no screening results returned).
 class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
@@ -1202,6 +1207,7 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
 @app.options("/review/queue")
 @app.options("/review/{entity_key}/claim")
 @app.options("/review/{entity_key}/complete")
+@app.options("/review/{entity_key}/rerun")
 @app.options("/refresh_opensanctions")
 @app.options("/auth/config")
 @app.options("/auth/login")
@@ -1804,6 +1810,145 @@ async def complete_review(
         },
     )
     return {"status": "ok", "item": item}
+
+
+@app.post("/review/{entity_key}/rerun", dependencies=[Depends(get_current_user)])
+@limiter.limit("60/minute")
+async def rerun_review(
+    request: Request,
+    entity_key: str,
+    body: ReviewRerunRequest,
+    payload: dict = Depends(get_current_user),
+):
+    """
+    Re-run screening for a claimed review item using additional disambiguation data.
+    Person requires dob. Organization requires country.
+    If rerun result is Cleared, mark review as COMPLETED automatically.
+    """
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Review queue unavailable (configure DATABASE_URL)")
+
+    actor = str(payload.get("sub") or "").strip() or "unknown_user"
+    key = (entity_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="entity_key is required")
+
+    async with pool.acquire() as conn:
+        rows = await screening_db.search_screened_entities(conn, entity_key=key, limit=1, offset=0)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    row = rows[0]
+    if (row.get("review_status") or "").upper() != "IN_REVIEW":
+        raise HTTPException(status_code=409, detail="Only IN_REVIEW matches can be re-run")
+    if (row.get("review_claimed_by") or "").strip().lower() != actor.lower():
+        raise HTTPException(status_code=403, detail="Only the claiming user can re-run this review")
+
+    entity_type = str(row.get("entity_type") or "Person")
+    type_norm = entity_type.strip().lower()
+    rerun_dob = (body.dob.strip() if isinstance(body.dob, str) else body.dob) or None
+    rerun_country = (body.country.strip() if isinstance(body.country, str) else body.country) or None
+    if type_norm == "person" and not rerun_dob:
+        raise HTTPException(status_code=400, detail="Date of birth is required for Person re-run")
+    if type_norm == "organization" and not rerun_country:
+        raise HTTPException(status_code=400, detail="Country is required for Organization re-run")
+
+    audit_log(
+        "review",
+        action="REVIEW_RERUN_ATTEMPTED",
+        actor=actor,
+        resource=key,
+        outcome="attempted",
+        ip=_client_ip(request),
+        extra={
+            "business_reference": row.get("business_reference"),
+            "reason_for_check": row.get("reason_for_check"),
+            "entity_type": entity_type,
+        },
+    )
+
+    op_req = OpCheckRequest(
+        name=str(row.get("display_name") or ""),
+        dob=rerun_dob if type_norm == "person" else (row.get("date_of_birth") or None),
+        country=rerun_country if type_norm == "organization" else None,
+        entity_type=entity_type,
+        business_reference=str(row.get("business_reference") or "").strip() or key,
+        reason_for_check=row.get("reason_for_check") or "Ad-Hoc Compliance Review",
+        requestor=str(row.get("last_requestor") or actor),
+        search_backend="postgres_beta",
+        rerun_entity_key=key,
+    )
+    out = await _check_opensanctions_impl(op_req)
+    rerun_payload: dict = out if isinstance(out, dict) else {}
+    if isinstance(out, JSONResponse):
+        if out.status_code >= 400:
+            try:
+                detail = json.loads(out.body.decode("utf-8")) if out.body else {}
+            except Exception:
+                detail = {"detail": "Re-run failed"}
+            raise HTTPException(status_code=out.status_code, detail=detail.get("message") or detail.get("detail") or "Re-run failed")
+        try:
+            rerun_payload = json.loads(out.body.decode("utf-8")) if out.body else {}
+        except Exception:
+            rerun_payload = {}
+
+    summary = rerun_payload.get("Check Summary") if isinstance(rerun_payload.get("Check Summary"), dict) else {}
+    decision = str(summary.get("Status") or rerun_payload.get("status") or "Unknown")
+    cleared = decision.lower().startswith("cleared")
+    auto_completed = False
+    completed_item = None
+    if cleared:
+        async with pool.acquire() as conn:
+            completed = await screening_db.complete_review(
+                conn,
+                entity_key=key,
+                completed_by=actor,
+                review_outcome=ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
+                review_notes=f"Auto-resolved after re-run with additional {('DOB' if type_norm == 'person' else 'country')} information.",
+            )
+        if completed.get("status") == "ok":
+            auto_completed = True
+            completed_item = completed.get("item")
+            audit_log(
+                "review",
+                action="REVIEW_COMPLETED",
+                actor=actor,
+                resource=key,
+                outcome="success",
+                ip=_client_ip(request),
+                extra={
+                    "entity_key": key,
+                    "business_reference": row.get("business_reference"),
+                    "reason_for_check": row.get("reason_for_check"),
+                    "review_outcome": ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
+                    "auto_completed": True,
+                },
+            )
+
+    audit_log(
+        "review",
+        action="REVIEW_RERUN_COMPLETED",
+        actor=actor,
+        resource=key,
+        outcome="success",
+        ip=_client_ip(request),
+        extra={
+            "entity_key": key,
+            "decision": decision,
+            "auto_completed": auto_completed,
+            "business_reference": row.get("business_reference"),
+            "reason_for_check": row.get("reason_for_check"),
+        },
+    )
+    return {
+        "status": "ok",
+        "entity_key": key,
+        "decision": decision,
+        "auto_completed": auto_completed,
+        "result": rerun_payload,
+        "review_item": completed_item,
+    }
 
 
 # ---------------------------

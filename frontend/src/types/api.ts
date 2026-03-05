@@ -99,6 +99,9 @@ export interface ScreenedEntity {
 export interface ReviewQueueItem {
   entity_name: string
   entity_key: string
+  entity_type: string
+  date_of_birth: string | null
+  country_input: string | null
   decision: string
   business_reference: string | null
   reason_for_check: string | null

@@ -961,6 +961,9 @@ async def list_review_queue(
         SELECT
             display_name AS entity_name,
             entity_key,
+            entity_type,
+            date_of_birth,
+            country_input,
             status AS decision,
             business_reference,
             reason_for_check,

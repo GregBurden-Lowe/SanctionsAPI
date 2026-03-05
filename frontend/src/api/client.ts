@@ -5,7 +5,7 @@
  */
 
 import { clearStoredAuth, getStoredToken } from '@/context/AuthContext'
-import type { ReviewOutcome, ReviewQueueItem, ReviewStatus } from '@/types/api'
+import type { OpCheckResponse, ReviewOutcome, ReviewQueueItem, ReviewStatus } from '@/types/api'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
@@ -323,6 +323,28 @@ export async function completeReview(
     body: JSON.stringify({
       review_outcome: params.review_outcome,
       review_notes: params.review_notes,
+    }),
+  })
+}
+
+export interface ReviewRerunResponse {
+  status: 'ok'
+  entity_key: string
+  decision: string
+  auto_completed: boolean
+  result: OpCheckResponse
+}
+
+export async function rerunReview(
+  entityKey: string,
+  params: { dob?: string | null; country?: string | null },
+): Promise<Response> {
+  return authFetch(resolve(`/review/${encodeURIComponent(entityKey)}/rerun`), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({
+      dob: params.dob ?? null,
+      country: params.country ?? null,
     }),
   })
 }

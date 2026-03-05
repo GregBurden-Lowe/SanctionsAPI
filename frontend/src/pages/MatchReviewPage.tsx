@@ -4,7 +4,9 @@ import {
   claimReview,
   completeReview,
   getReviewQueue,
+  rerunReview,
   type OpCheckParams,
+  type ReviewRerunResponse,
   type ReviewQueueItem,
 } from '@/api/client'
 import type { ReviewOutcome } from '@/types/api'
@@ -54,6 +56,11 @@ export function MatchReviewPage() {
   const [reviewNotes, setReviewNotes] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [rerunTarget, setRerunTarget] = useState<ReviewQueueItem | null>(null)
+  const [rerunDob, setRerunDob] = useState('')
+  const [rerunCountry, setRerunCountry] = useState('')
+  const [rerunLoading, setRerunLoading] = useState(false)
+  const [rerunMessage, setRerunMessage] = useState<string | null>(null)
   const currentUsername = (user?.username || '').trim().toLowerCase()
   const scopedItems = includeCompleted
     ? items
@@ -146,26 +153,84 @@ export function MatchReviewPage() {
     }
   }
 
+  const openRerun = (row: ReviewQueueItem) => {
+    setRerunTarget(row)
+    setRerunDob(row.date_of_birth ?? '')
+    setRerunCountry(row.country_input ?? '')
+    setRerunMessage(null)
+    setActionError(null)
+  }
+
+  const handleRerun = async () => {
+    if (!rerunTarget) return
+    const isPerson = (rerunTarget.entity_type || '').toLowerCase() === 'person'
+    const dob = rerunDob.trim()
+    const country = rerunCountry.trim()
+    if (isPerson && !dob) {
+      setActionError('Date of birth is required for Person re-run.')
+      return
+    }
+    if (!isPerson && !country) {
+      setActionError('Country is required for Organization re-run.')
+      return
+    }
+    setRerunLoading(true)
+    setActionError(null)
+    setRerunMessage(null)
+    try {
+      const res = await rerunReview(rerunTarget.entity_key, {
+        dob: isPerson ? dob : null,
+        country: isPerson ? null : country,
+      })
+      const data = (await res.json().catch(() => ({}))) as Partial<ReviewRerunResponse> & { detail?: string }
+      if (!res.ok) {
+        setActionError(data.detail ?? 'Re-run failed.')
+        return
+      }
+      setRerunMessage(
+        data.auto_completed
+          ? `Re-run decision: ${data.decision ?? 'Unknown'}. Match was auto-completed as reviewed.`
+          : `Re-run decision: ${data.decision ?? 'Unknown'}.`,
+      )
+      await load()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Re-run failed.')
+    } finally {
+      setRerunLoading(false)
+    }
+  }
+
   const actionsCell = (row: ReviewQueueItem) => {
     if (row.review_status === 'COMPLETED') {
       return <span className="text-xs text-text-muted">Completed</span>
     }
     if (row.review_status === 'IN_REVIEW') {
       return (
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={actionLoading}
-          onClick={() => {
-            setSelected(row)
-            setActionError(null)
-            setReviewNotes('')
-            setReviewOutcome(REVIEW_OUTCOME_OPTIONS[0])
-          }}
-        >
-          Complete review
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={actionLoading || rerunLoading}
+            onClick={() => openRerun(row)}
+          >
+            Re-run
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={actionLoading || rerunLoading}
+            onClick={() => {
+              setSelected(row)
+              setActionError(null)
+              setReviewNotes('')
+              setReviewOutcome(REVIEW_OUTCOME_OPTIONS[0])
+            }}
+          >
+            Complete review
+          </Button>
+        </div>
       )
     }
     return (
@@ -401,6 +466,49 @@ export function MatchReviewPage() {
                 placeholder="Record analyst rationale for this review outcome."
               />
             </div>
+            {actionError && <ErrorBox message={actionError} />}
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={rerunTarget !== null}
+        onClose={() => setRerunTarget(null)}
+        title="Re-run check"
+        footer={
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="secondary" onClick={() => setRerunTarget(null)} disabled={rerunLoading}>
+              Close
+            </Button>
+            <Button type="button" onClick={() => void handleRerun()} disabled={rerunLoading}>
+              {rerunLoading ? 'Re-running…' : 'Run re-check'}
+            </Button>
+          </div>
+        }
+      >
+        {rerunTarget && (
+          <div className="space-y-4">
+            <p className="text-sm text-text-secondary">
+              <span className="font-medium">Entity:</span> {rerunTarget.entity_name}
+              {' · '}
+              <span className="font-medium">Type:</span> {rerunTarget.entity_type}
+            </p>
+            {(rerunTarget.entity_type || '').toLowerCase() === 'person' ? (
+              <Input
+                label="Date of birth"
+                value={rerunDob}
+                onChange={(e) => setRerunDob(e.target.value)}
+                placeholder="DD-MM-YYYY or YYYY-MM-DD"
+              />
+            ) : (
+              <Input
+                label="Country"
+                value={rerunCountry}
+                onChange={(e) => setRerunCountry(e.target.value)}
+                placeholder="e.g. UK, United Kingdom, USA, United States"
+              />
+            )}
+            {rerunMessage && <p className="text-sm text-text-secondary">{rerunMessage}</p>}
             {actionError && <ErrorBox message={actionError} />}
           </div>
         )}

@@ -70,6 +70,39 @@ _ORG_SUFFIX_STOPWORDS = frozenset({
     "sarl", "pte", "pty", "holdings", "holding", "group",
 })
 
+# Country alias normalization to avoid false clears when users enter short forms
+# (e.g., UK vs United Kingdom, USA vs United States).
+_COUNTRY_ALIAS_RAW: Dict[str, Tuple[str, ...]] = {
+    "united kingdom": ("uk", "u.k", "u.k.", "great britain", "britain", "england", "scotland", "wales", "northern ireland", "gb", "gbr"),
+    "united states": ("usa", "u.s.a", "u.s.a.", "u.s", "u.s.", "us", "america", "united states of america"),
+    "united arab emirates": ("uae", "u.a.e"),
+    "saudi arabia": ("ksa", "kingdom of saudi arabia"),
+    "russia": ("russian federation",),
+    "south korea": ("republic of korea", "rok", "korea south"),
+    "north korea": ("democratic peoples republic of korea", "dprk", "korea north"),
+    "iran": ("iran islamic republic of", "islamic republic of iran"),
+    "syria": ("syrian arab republic",),
+    "laos": ("lao peoples democratic republic",),
+    "moldova": ("republic of moldova",),
+    "bolivia": ("bolivia plurinational state of",),
+    "venezuela": ("venezuela bolivarian republic of",),
+    "tanzania": ("united republic of tanzania",),
+    "vietnam": ("viet nam",),
+    "czech republic": ("czechia",),
+    "ivory coast": ("cote divoire", "cote d ivoire", "côte d'ivoire"),
+    "democratic republic of the congo": ("drc", "congo kinshasa"),
+    "republic of the congo": ("congo brazzaville",),
+}
+_COUNTRY_ALIAS_CANONICAL: Dict[str, str] = {}
+for _canonical_name, _aliases in _COUNTRY_ALIAS_RAW.items():
+    _cn = _normalize_text(_canonical_name)
+    if _cn:
+        _COUNTRY_ALIAS_CANONICAL[_cn] = _cn
+    for _alias in _aliases:
+        _an = _normalize_text(_alias)
+        if _an:
+            _COUNTRY_ALIAS_CANONICAL[_an] = _cn
+
 # =============================================================================
 # Small helpers
 # =============================================================================
@@ -643,7 +676,7 @@ def _normalize_country(country: Optional[str]) -> Optional[str]:
     raw = _normalize_text(str(country))
     if not raw:
         return None
-    return raw.split()[0]
+    return _COUNTRY_ALIAS_CANONICAL.get(raw, raw)
 
 
 def _country_tokens(raw_country: Optional[str]) -> Set[str]:
@@ -658,10 +691,10 @@ def _country_tokens(raw_country: Optional[str]) -> Set[str]:
         p = part.strip()
         if not p:
             continue
+        canonical = _normalize_country(p)
+        if canonical:
+            tokens.add(canonical)
         tokens.add(p)
-        first = p.split()[0]
-        if first:
-            tokens.add(first)
     return tokens
 
 
@@ -1024,7 +1057,15 @@ async def perform_postgres_watchlist_check(
 
     async def _fetch_candidates(source_type: str) -> List[dict]:
         country_select = "country" if has_country_col else "NULLIF(raw_json->>'countries', '') AS country"
-        country_filter = "country = $4::text OR country IS NULL" if has_country_col else "NULLIF(raw_json->>'countries', '') ILIKE ('%' || $4::text || '%') OR NULLIF(raw_json->>'countries', '') IS NULL"
+        if has_country_col:
+            country_filter = """
+                country = $4::text
+                OR country ILIKE ('%' || $4::text || '%')
+                OR $4::text ILIKE ('%' || country || '%')
+                OR country IS NULL
+            """
+        else:
+            country_filter = "NULLIF(raw_json->>'countries', '') ILIKE ('%' || $4::text || '%') OR NULLIF(raw_json->>'countries', '') IS NULL"
         sql = f"""
             SELECT
                 name,
