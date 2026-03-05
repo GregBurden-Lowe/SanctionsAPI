@@ -123,6 +123,10 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const matchedName = result['Sanctions Name'] || '—'
   const matchedDob = result['Birth Date'] || '—'
   const matchedRegime = result.Regime || '—'
+  const personTypeStatus = result['Entity Type Checks']?.Person?.status || 'Not available'
+  const orgTypeStatus = result['Entity Type Checks']?.Organization?.status || 'Not available'
+  const personTypeBadge = result['Entity Type Checks']?.Person?.is_match === true ? 'Cross (match)' : result['Entity Type Checks']?.Person?.is_match === false ? 'Tick (clear)' : 'Unknown'
+  const orgTypeBadge = result['Entity Type Checks']?.Organization?.is_match === true ? 'Cross (match)' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Tick (clear)' : 'Unknown'
   const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'
   const hasMatchedSubject = Boolean(result['Match Found'] && (result['Sanctions Name'] || result.Regime || result['Birth Date']))
 
@@ -206,6 +210,8 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         <h2>Decision &amp; Actions</h2>
         <table class="kv-table">
           <tr><th>Checked At</th><td>${escapeHtml(checkedAt)}</td></tr>
+          <tr><th>Person Check</th><td>${escapeHtml(personTypeBadge)} · ${escapeHtml(personTypeStatus)}</td></tr>
+          <tr><th>Organisation Check</th><td>${escapeHtml(orgTypeBadge)} · ${escapeHtml(orgTypeStatus)}</td></tr>
           <tr><th>Sanctions Match</th><td>${result['Is Sanctioned'] ? 'Yes' : 'No'}</td></tr>
           <tr><th>PEP Indicator</th><td>${result['Is PEP'] ? 'Yes' : 'No'}</td></tr>
           <tr><th>Source Summary</th><td>${escapeHtml(sourceSummary || '—')}</td></tr>

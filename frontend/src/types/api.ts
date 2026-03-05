@@ -63,6 +63,10 @@ export interface OpCheckResponse {
   'Top Matches': TopMatch[];
   'Match Found': boolean;
   'Check Summary': CheckSummary;
+  'Entity Type Checks'?: {
+    Person?: { status?: string; is_match?: boolean; score?: number }
+    Organization?: { status?: string; is_match?: boolean; score?: number }
+  };
   entity_key?: string;
 }
 

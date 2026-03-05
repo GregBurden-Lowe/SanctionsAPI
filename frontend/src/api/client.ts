@@ -337,7 +337,7 @@ export interface ReviewRerunResponse {
 
 export async function rerunReview(
   entityKey: string,
-  params: { dob?: string | null; country?: string | null },
+  params: { dob?: string | null; country?: string | null; entity_type?: 'Person' | 'Organization' | null },
 ): Promise<Response> {
   return authFetch(resolve(`/review/${encodeURIComponent(entityKey)}/rerun`), {
     method: 'POST',
@@ -345,6 +345,7 @@ export async function rerunReview(
     body: JSON.stringify({
       dob: params.dob ?? null,
       country: params.country ?? null,
+      entity_type: params.entity_type ?? null,
     }),
   })
 }

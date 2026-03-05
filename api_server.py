@@ -102,6 +102,7 @@ from utils import (
 )
 import screening_db
 import auth_db
+from routes.companies_house import router as companies_house_router
 
 # Use uvicorn error logger for app logs (access logger expects HTTP access fields).
 logger = logging.getLogger("uvicorn.error")
@@ -419,6 +420,7 @@ class ReviewCompleteRequest(BaseModel):
 class ReviewRerunRequest(BaseModel):
     dob: Optional[str] = Field(None, description="Date of birth for person rerun")
     country: Optional[constr(strip_whitespace=True, min_length=1)] = Field(None, description="Country for organization rerun")
+    entity_type: Optional[Literal["Person", "Organization"]] = Field(None, description="Optional override for rerun entity type")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -1233,13 +1235,31 @@ async def cors_preflight():
 
 def _run_check_sync(data: OpCheckRequest):
     """Run screening synchronously (used when DB is disabled)."""
-    return perform_opensanctions_check(
-        name=data.name.strip(),
-        dob=(data.dob.strip() if isinstance(data.dob, str) else data.dob),
-        country=(data.country.strip() if isinstance(data.country, str) else data.country),
-        entity_type=(data.entity_type or "Person"),
+    name = data.name.strip()
+    dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob)
+    country = (data.country.strip() if isinstance(data.country, str) else data.country)
+    person_result = perform_opensanctions_check(
+        name=name,
+        dob=dob,
+        country=None,
+        entity_type="Person",
         requestor=data.requestor.strip(),
+        log_search=False,
     )
+    organization_result = perform_opensanctions_check(
+        name=name,
+        dob=None,
+        country=country,
+        entity_type="Organization",
+        requestor=data.requestor.strip(),
+        log_search=False,
+    )
+    merged = _merge_dual_type_results(person_result, organization_result)
+    summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
+    if summary:
+        from utils import _append_search_to_csv
+        _append_search_to_csv(name, summary)
+    return merged
 
 
 def _opcheck_queue_threshold() -> int:
@@ -1260,6 +1280,86 @@ def _attach_entity_id(result: dict, entity_key: str) -> dict:
     out["entity_key"] = entity_key
     out["entity_id"] = entity_key
     return out
+
+
+def _result_priority(result: dict) -> int:
+    if bool(result.get("Is Sanctioned")):
+        return 3
+    if bool(result.get("Is PEP")):
+        return 2
+    return 1
+
+
+def _status_for_type_check(result: dict) -> str:
+    summary = result.get("Check Summary") if isinstance(result.get("Check Summary"), dict) else {}
+    status = str(summary.get("Status") or "").strip()
+    if status:
+        return status
+    if bool(result.get("Is Sanctioned")):
+        return "Fail Sanction"
+    if bool(result.get("Is PEP")):
+        return "Fail PEP"
+    return "Cleared"
+
+
+def _merge_dual_type_results(person_result: dict, organization_result: dict) -> dict:
+    primary = person_result
+    if _result_priority(organization_result) > _result_priority(person_result):
+        primary = organization_result
+    elif _result_priority(organization_result) == _result_priority(person_result):
+        if float(organization_result.get("Score") or 0) > float(person_result.get("Score") or 0):
+            primary = organization_result
+
+    person_status = _status_for_type_check(person_result)
+    org_status = _status_for_type_check(organization_result)
+    merged = dict(primary)
+    merged["Entity Type Checks"] = {
+        "Person": {
+            "status": person_status,
+            "is_match": not person_status.lower().startswith("cleared"),
+            "score": float(person_result.get("Score") or 0),
+        },
+        "Organization": {
+            "status": org_status,
+            "is_match": not org_status.lower().startswith("cleared"),
+            "score": float(organization_result.get("Score") or 0),
+        },
+    }
+    return merged
+
+
+async def _run_postgres_dual_check(
+    conn,
+    *,
+    name: str,
+    dob: Optional[str],
+    country: Optional[str],
+    requestor: Optional[str],
+) -> dict:
+    person_result = await perform_postgres_watchlist_check(
+        conn,
+        name=name,
+        dob=dob,
+        country=None,
+        entity_type="Person",
+        requestor=requestor,
+        log_search=False,
+    )
+    organization_result = await perform_postgres_watchlist_check(
+        conn,
+        name=name,
+        dob=None,
+        country=country,
+        entity_type="Organization",
+        requestor=requestor,
+        log_search=False,
+    )
+    merged = _merge_dual_type_results(person_result, organization_result)
+    summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
+    if summary:
+        from utils import _append_search_to_csv
+        _append_search_to_csv(name, summary)
+    return merged
 
 
 async def _check_opensanctions_impl(data: OpCheckRequest):
@@ -1323,12 +1423,6 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                 status_code=404,
                 content={"error": "rerun_entity_not_found", "message": "rerun_entity_key was not found in screened records."},
             )
-        existing_type_norm = str(existing.get("entity_type") or "").strip().lower()
-        if existing_type_norm != entity_type_norm:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "invalid_rerun_target", "message": "rerun_entity_key must reference an existing screening with the same entity type."},
-            )
         if (existing.get("normalized_name") or "") != _normalize_text(name):
             return JSONResponse(
                 status_code=400,
@@ -1370,12 +1464,11 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                     logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
                     return _attach_entity_id(cached, cached_key)
 
-            results = await perform_postgres_watchlist_check(
+            results = await _run_postgres_dual_check(
                 conn,
                 name=name,
                 dob=dob,
                 country=country,
-                entity_type=entity_type,
                 requestor=requestor,
             )
             # Persist beta checks so Search database can find them by returned entity_key.
@@ -1459,9 +1552,17 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
 
     # Under threshold: run screening synchronously, then upsert
     logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
-    results = perform_opensanctions_check(
-        name=name, dob=dob, country=country, entity_type=entity_type, requestor=requestor,
+    person_result = perform_opensanctions_check(
+        name=name, dob=dob, country=None, entity_type="Person", requestor=requestor, log_search=False,
     )
+    organization_result = perform_opensanctions_check(
+        name=name, dob=None, country=country, entity_type="Organization", requestor=requestor, log_search=False,
+    )
+    results = _merge_dual_type_results(person_result, organization_result)
+    summary = results.get("Check Summary") if isinstance(results.get("Check Summary"), dict) else None
+    if summary:
+        from utils import _append_search_to_csv
+        _append_search_to_csv(name, summary)
     async with pool.acquire() as conn:
         latest_meta = await screening_db.get_latest_uk_hash(conn)
         await screening_db.upsert_screening(
@@ -1845,7 +1946,7 @@ async def rerun_review(
     if (row.get("review_claimed_by") or "").strip().lower() != actor.lower():
         raise HTTPException(status_code=403, detail="Only the claiming user can re-run this review")
 
-    entity_type = str(row.get("entity_type") or "Person")
+    entity_type = (body.entity_type or str(row.get("entity_type") or "Person")).strip() or "Person"
     type_norm = entity_type.strip().lower()
     rerun_dob = (body.dob.strip() if isinstance(body.dob, str) else body.dob) or None
     rerun_country = (body.country.strip() if isinstance(body.country, str) else body.country) or None
@@ -2244,6 +2345,9 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
             status_code=500,
             content={"status": "error", "message": _GENERIC_ERROR_MESSAGE},
         )
+
+# Server-side Companies House integration routes (API key remains backend-only).
+app.include_router(companies_house_router, dependencies=[Depends(get_current_user)])
 
 # Serve built frontend from frontend/dist (must be last so API routes take precedence).
 # SPA fallback: unknown paths (e.g. /admin/users) serve index.html so refresh/navigation works.

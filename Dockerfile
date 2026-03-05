@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Backend code
 COPY api_server.py screening_worker.py utils.py screening_db.py auth_db.py security.py ./
+COPY services ./services
+COPY routes ./routes
 COPY design.json ./
 
 # Built frontend (from stage 1)

@@ -864,13 +864,15 @@ def perform_opensanctions_check(
     entity_type="Person",
     parquet_path=OSN_PARQUET,
     requestor: Optional[str] = None,
+    log_search: bool = True,
 ):
     import math
 
     df = get_opensanctions_df(parquet_path)
     if df.empty:
         result = _empty_no_match_result()
-        _append_search_to_csv(name, result["Check Summary"])
+        if log_search:
+            _append_search_to_csv(name, result["Check Summary"])
         return result
 
     # Filter by entity type/schema
@@ -994,7 +996,8 @@ def perform_opensanctions_check(
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         }
-        _append_search_to_csv(name, result["Check Summary"])
+        if log_search:
+            _append_search_to_csv(name, result["Check Summary"])
         return result
 
     # No sanctions hit: return PEP outcome if matched.
@@ -1018,13 +1021,15 @@ def perform_opensanctions_check(
                 "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         }
-        _append_search_to_csv(name, result["Check Summary"])
+        if log_search:
+            _append_search_to_csv(name, result["Check Summary"])
         return result
 
     # Nothing matched under strict rules -> Cleared, but STILL return suggestions
     result = _empty_no_match_result(source_label="OpenSanctions")
     result["Top Matches"] = top_suggestions
-    _append_search_to_csv(name, result["Check Summary"])
+    if log_search:
+        _append_search_to_csv(name, result["Check Summary"])
     return result
 
 
@@ -1036,6 +1041,7 @@ async def perform_postgres_watchlist_check(
     entity_type: str = "Person",
     requestor: Optional[str] = None,
     candidate_limit: int = 400,
+    log_search: bool = True,
 ) -> Dict[str, Any]:
     """
     Beta matcher using watchlist_entities in PostgreSQL.
@@ -1128,7 +1134,8 @@ async def perform_postgres_watchlist_check(
 
     if not combined:
         result = _empty_no_match_result()
-        _append_search_to_csv(name, result["Check Summary"])
+        if log_search:
+            _append_search_to_csv(name, result["Check Summary"])
         return result
 
     def _parse_dob(val) -> Optional[str]:
@@ -1225,7 +1232,8 @@ async def perform_postgres_watchlist_check(
             "Match Found": True,
             "Check Summary": {"Status": "Fail Sanction", "Source": source_label, "Date": now_str},
         }
-        _append_search_to_csv(name, result["Check Summary"])
+        if log_search:
+            _append_search_to_csv(name, result["Check Summary"])
         return result
 
     if p_row is not None:
@@ -1244,10 +1252,12 @@ async def perform_postgres_watchlist_check(
             "Match Found": True,
             "Check Summary": {"Status": "Fail PEP", "Source": "Consolidated PEP list", "Date": now_str},
         }
-        _append_search_to_csv(name, result["Check Summary"])
+        if log_search:
+            _append_search_to_csv(name, result["Check Summary"])
         return result
 
     result = _empty_no_match_result(source_label="Postgres watchlist")
     result["Top Matches"] = top_suggestions
-    _append_search_to_csv(name, result["Check Summary"])
+    if log_search:
+        _append_search_to_csv(name, result["Check Summary"])
     return result

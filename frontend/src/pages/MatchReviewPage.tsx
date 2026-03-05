@@ -57,6 +57,7 @@ export function MatchReviewPage() {
   const [actionLoading, setActionLoading] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [rerunTarget, setRerunTarget] = useState<ReviewQueueItem | null>(null)
+  const [rerunEntityType, setRerunEntityType] = useState<'Person' | 'Organization'>('Person')
   const [rerunDob, setRerunDob] = useState('')
   const [rerunCountry, setRerunCountry] = useState('')
   const [rerunLoading, setRerunLoading] = useState(false)
@@ -155,6 +156,7 @@ export function MatchReviewPage() {
 
   const openRerun = (row: ReviewQueueItem) => {
     setRerunTarget(row)
+    setRerunEntityType((row.entity_type || '').toLowerCase() === 'organization' ? 'Organization' : 'Person')
     setRerunDob(row.date_of_birth ?? '')
     setRerunCountry(row.country_input ?? '')
     setRerunMessage(null)
@@ -163,7 +165,7 @@ export function MatchReviewPage() {
 
   const handleRerun = async () => {
     if (!rerunTarget) return
-    const isPerson = (rerunTarget.entity_type || '').toLowerCase() === 'person'
+    const isPerson = rerunEntityType === 'Person'
     const dob = rerunDob.trim()
     const country = rerunCountry.trim()
     if (isPerson && !dob) {
@@ -181,6 +183,7 @@ export function MatchReviewPage() {
       const res = await rerunReview(rerunTarget.entity_key, {
         dob: isPerson ? dob : null,
         country: isPerson ? null : country,
+        entity_type: rerunEntityType,
       })
       const data = (await res.json().catch(() => ({}))) as Partial<ReviewRerunResponse> & { detail?: string }
       if (!res.ok) {
@@ -491,9 +494,23 @@ export function MatchReviewPage() {
             <p className="text-sm text-text-secondary">
               <span className="font-medium">Entity:</span> {rerunTarget.entity_name}
               {' · '}
-              <span className="font-medium">Type:</span> {rerunTarget.entity_type}
+              <span className="font-medium">Current Type:</span> {rerunTarget.entity_type}
             </p>
-            {(rerunTarget.entity_type || '').toLowerCase() === 'person' ? (
+            <div>
+              <label htmlFor="rerun-entity-type" className="block text-xs font-medium text-text-primary mb-1">
+                Entity type for re-run
+              </label>
+              <select
+                id="rerun-entity-type"
+                className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+                value={rerunEntityType}
+                onChange={(e) => setRerunEntityType(e.target.value as 'Person' | 'Organization')}
+              >
+                <option value="Person">Person</option>
+                <option value="Organization">Organisation</option>
+              </select>
+            </div>
+            {rerunEntityType === 'Person' ? (
               <Input
                 label="Date of birth"
                 value={rerunDob}

@@ -540,6 +540,44 @@ export function ResultCard({
 
   const verificationRows = [
     {
+      title: 'Person check',
+      subtitle:
+        result['Entity Type Checks']?.Person?.status
+          ? `Person list result: ${result['Entity Type Checks']?.Person?.status}`
+          : 'Person list result unavailable',
+      badge:
+        result['Entity Type Checks']?.Person?.is_match === true
+          ? 'Cross (match)'
+          : result['Entity Type Checks']?.Person?.is_match === false
+            ? 'Tick (clear)'
+            : 'Unknown',
+      tone:
+        result['Entity Type Checks']?.Person?.is_match === true
+          ? 'warn'
+          : result['Entity Type Checks']?.Person?.is_match === false
+            ? 'ok'
+            : 'neutral',
+    },
+    {
+      title: 'Organisation check',
+      subtitle:
+        result['Entity Type Checks']?.Organization?.status
+          ? `Organisation list result: ${result['Entity Type Checks']?.Organization?.status}`
+          : 'Organisation list result unavailable',
+      badge:
+        result['Entity Type Checks']?.Organization?.is_match === true
+          ? 'Cross (match)'
+          : result['Entity Type Checks']?.Organization?.is_match === false
+            ? 'Tick (clear)'
+            : 'Unknown',
+      tone:
+        result['Entity Type Checks']?.Organization?.is_match === true
+          ? 'warn'
+          : result['Entity Type Checks']?.Organization?.is_match === false
+            ? 'ok'
+            : 'neutral',
+    },
+    {
       title: 'Sanctions status',
       subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : 'No sanctions match detected',
       badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',
