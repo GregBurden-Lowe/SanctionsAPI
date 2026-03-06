@@ -42,6 +42,15 @@ function formatDate(iso: string | null): string {
   }
 }
 
+function DecisionBadge({ decision }: { decision: string }) {
+  const isSanctions = decision.toLowerCase().includes('sanction')
+  return (
+    <span className={`status-pill ${isSanctions ? 'status-pill-sanction' : 'status-pill-pep'}`}>
+      {decision}
+    </span>
+  )
+}
+
 export function MatchReviewPage() {
   const { user } = useAuth()
   const [items, setItems] = useState<ReviewQueueItem[]>([])
@@ -51,6 +60,8 @@ export function MatchReviewPage() {
   const [reasonForCheck, setReasonForCheck] = useState<'' | OpCheckParams['reason_for_check']>('')
   const [includeCleared, setIncludeCleared] = useState(false)
   const [includeCompleted, setIncludeCompleted] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [decisionFilter, setDecisionFilter] = useState<'ALL' | 'PEP' | 'SANCTIONS'>('ALL')
   const [selected, setSelected] = useState<ReviewQueueItem | null>(null)
   const [reviewOutcome, setReviewOutcome] = useState<ReviewOutcome>(REVIEW_OUTCOME_OPTIONS[0])
   const [reviewNotes, setReviewNotes] = useState('')
@@ -78,6 +89,22 @@ export function MatchReviewPage() {
     if (claimedBy) return false
     return item.review_status === 'UNREVIEWED' || item.review_status === 'IN_REVIEW'
   })
+  const matchesViewFilters = (item: ReviewQueueItem): boolean => {
+    const needle = searchTerm.trim().toLowerCase()
+    const haystack = `${item.entity_name || ''} ${item.business_reference || ''} ${item.screening_user || ''}`.toLowerCase()
+    const searchOk = !needle || haystack.includes(needle)
+    const decision = (item.decision || '').toLowerCase()
+    const decisionOk =
+      decisionFilter === 'ALL'
+        ? true
+        : decisionFilter === 'PEP'
+          ? decision.includes('pep')
+          : decision.includes('sanction')
+    return searchOk && decisionOk
+  }
+  const myClaimedDisplay = myClaimedItems.filter(matchesViewFilters)
+  const unclaimedDisplay = unclaimedItems.filter(matchesViewFilters)
+  const completedCount = items.filter((item) => item.review_status === 'COMPLETED').length
 
   const load = async () => {
     setLoading(true)
@@ -248,12 +275,39 @@ export function MatchReviewPage() {
       <div className="w-full max-w-[1600px] space-y-6">
         <SectionHeader title="Match review queue" />
 
+        <div className="flex flex-wrap gap-3">
+          <Card className="min-w-[96px]">
+            <CardBody className="text-center">
+              <p className="font-mono text-xl font-bold text-brand">{myClaimedItems.length}</p>
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">My queue</p>
+            </CardBody>
+          </Card>
+          <Card className="min-w-[96px]">
+            <CardBody className="text-center">
+              <p className="font-mono text-xl font-bold text-[#d97706]">{unclaimedItems.length}</p>
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">Unclaimed</p>
+            </CardBody>
+          </Card>
+          <Card className="min-w-[96px]">
+            <CardBody className="text-center">
+              <p className="font-mono text-xl font-bold text-[#16a34a]">{completedCount}</p>
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">Completed</p>
+            </CardBody>
+          </Card>
+        </div>
+
         <Card>
           <CardHeader>
             <CardTitle>Queue filters</CardTitle>
           </CardHeader>
           <CardBody className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <Input
+                label="Search"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search name, reference, or user"
+              />
               <Input
                 label="Business reference"
                 value={businessReference}
@@ -300,6 +354,20 @@ export function MatchReviewPage() {
                 </label>
               </div>
             </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wide text-text-muted">Decision</span>
+              {(['ALL', 'PEP', 'SANCTIONS'] as const).map((item) => (
+                <Button
+                  key={item}
+                  type="button"
+                  size="sm"
+                  variant={decisionFilter === item ? 'primary' : 'ghost'}
+                  onClick={() => setDecisionFilter(item)}
+                >
+                  {item}
+                </Button>
+              ))}
+            </div>
             {error && <ErrorBox message={error} />}
             {actionError && <ErrorBox message={actionError} />}
           </CardBody>
@@ -307,40 +375,30 @@ export function MatchReviewPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>My claimed reviews ({myClaimedItems.length})</CardTitle>
+            <CardTitle>My claimed reviews ({myClaimedDisplay.length})</CardTitle>
           </CardHeader>
           <CardBody>
             {loading ? (
               <p className="text-sm text-text-secondary">Loading…</p>
-            ) : myClaimedItems.length === 0 ? (
+            ) : myClaimedDisplay.length === 0 ? (
               <p className="text-sm text-text-secondary">No claimed reviews for your user.</p>
             ) : (
-              <div>
-                <table className="w-full text-sm text-left">
-                  <thead>
-                    <tr className="border-b border-border/80">
-                      <th className="py-2 pr-4 font-medium text-text-primary">Entity name</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Decision</th>
-                      <th className="py-2 font-medium text-text-primary">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {myClaimedItems.map((row) => (
-                      <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
-                        <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.decision}</td>
-                        <td className="py-2 whitespace-nowrap">
-                          <div className="flex items-center gap-2">
-                            <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
-                              View details
-                            </Button>
-                            {actionsCell(row)}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="space-y-2">
+                {myClaimedDisplay.map((row) => (
+                  <div key={row.entity_key} className="rounded-lg border border-border bg-secondary px-3 py-2.5 flex items-center gap-3 justify-between hover:bg-[#fafbfc]">
+                    <div className="min-w-0">
+                      <p className="text-[13.5px] font-semibold text-text-primary">{row.entity_name}</p>
+                      <p className="text-xs text-text-muted">Ref: {row.business_reference ?? row.entity_key.slice(0, 12)}</p>
+                    </div>
+                    <DecisionBadge decision={row.decision} />
+                    <div className="flex items-center gap-2 whitespace-nowrap">
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
+                        View details
+                      </Button>
+                      {actionsCell(row)}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </CardBody>
@@ -348,52 +406,42 @@ export function MatchReviewPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Unclaimed queue ({unclaimedItems.length})</CardTitle>
+            <CardTitle>Unclaimed queue ({unclaimedDisplay.length})</CardTitle>
           </CardHeader>
           <CardBody>
             {loading ? (
               <p className="text-sm text-text-secondary">Loading…</p>
-            ) : unclaimedItems.length === 0 ? (
+            ) : unclaimedDisplay.length === 0 ? (
               <p className="text-sm text-text-secondary">No unclaimed queue items found.</p>
             ) : (
-              <div>
-                <table className="w-full text-sm text-left">
-                  <thead>
-                    <tr className="border-b border-border/80">
-                      <th className="py-2 pr-4 font-medium text-text-primary">Entity name</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Decision</th>
-                      <th className="py-2 font-medium text-text-primary">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {unclaimedItems.map((row) => (
-                      <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
-                        <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.decision}</td>
-                        <td className="py-2 whitespace-nowrap">
-                          <div className="flex items-center gap-2">
-                            <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
-                              View details
-                            </Button>
-                            {row.review_status === 'UNREVIEWED' ? (
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                size="sm"
-                                disabled={actionLoading}
-                                onClick={() => void handleClaim(row)}
-                              >
-                                Claim
-                              </Button>
-                            ) : (
-                              <span className="text-xs text-text-muted">Unavailable</span>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="space-y-2">
+                {unclaimedDisplay.map((row) => (
+                  <div key={row.entity_key} className="rounded-lg border border-border bg-secondary px-3 py-2.5 flex items-center gap-3 justify-between hover:bg-[#fafbfc]">
+                    <div className="min-w-0">
+                      <p className="text-[13.5px] font-semibold text-text-primary">{row.entity_name}</p>
+                      <p className="text-xs text-text-muted">Ref: {row.business_reference ?? row.entity_key.slice(0, 12)}</p>
+                    </div>
+                    <DecisionBadge decision={row.decision} />
+                    <div className="flex items-center gap-2 whitespace-nowrap">
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
+                        View details
+                      </Button>
+                      {row.review_status === 'UNREVIEWED' ? (
+                        <Button
+                          type="button"
+                          variant="primary"
+                          size="sm"
+                          disabled={actionLoading}
+                          onClick={() => void handleClaim(row)}
+                        >
+                          Claim
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-text-muted">Unavailable</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </CardBody>

@@ -26,3 +26,5 @@ frontend/tsconfig.tsbuildinfo
 .vscode/
 *.swp
 .DS_Store
+
+.claude/
