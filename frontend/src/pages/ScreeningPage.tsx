@@ -134,7 +134,7 @@ export function ScreeningPage() {
   }
 
   return (
-    <div className="px-6 pb-6">
+    <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-3xl space-y-6">
         <SectionHeader title="Run check" />
         <div>
@@ -394,7 +394,7 @@ export function ScreeningResultPage() {
   }
 
   return (
-    <div className="px-6 pb-6">
+    <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-[1600px] space-y-6">
         <SectionHeader title="Screening result" />
         <div className="flex justify-end">

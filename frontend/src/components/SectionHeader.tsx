@@ -1,8 +1,8 @@
 import { type HTMLAttributes } from 'react'
 
-const containerClass = 'flex items-center justify-between'
+const containerClass = 'flex items-center justify-between gap-4'
 const titleClass = 'text-page-title'
-const metaClass = 'text-xs font-medium text-text-muted'
+const metaClass = 'text-[13px] font-normal text-[#64748b]'
 
 export function SectionHeader({
   title,

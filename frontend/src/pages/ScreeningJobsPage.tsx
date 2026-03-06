@@ -15,10 +15,10 @@ function formatDate(value: string | null): string {
 }
 
 function statusTone(status: ScreeningJob['status']): string {
-  if (status === 'completed') return 'text-semantic-success'
-  if (status === 'failed') return 'text-semantic-error'
-  if (status === 'running') return 'text-semantic-warning'
-  return 'text-text-secondary'
+  if (status === 'completed') return 'text-[#22c55e]'
+  if (status === 'failed') return 'text-[#d94040]'
+  if (status === 'running' || status === 'pending') return 'text-[#f59e0b]'
+  return 'text-[#64748b]'
 }
 
 export function ScreeningJobsPage() {
@@ -120,7 +120,7 @@ export function ScreeningJobsPage() {
   }
 
   return (
-    <div className="px-6 pb-6">
+    <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="w-full max-w-[1600px] space-y-6">
         <SectionHeader title="Screening jobs" />
         <Card>
@@ -128,56 +128,62 @@ export function ScreeningJobsPage() {
             <CardTitle>Job monitor</CardTitle>
           </CardHeader>
           <CardBody className="space-y-4">
-            <div className="flex items-center gap-3">
-              <label htmlFor="job_status" className="text-sm text-text-secondary">Status</label>
-              <select
-                id="job_status"
-                value={status}
-                onChange={(e) => setStatus(e.target.value as typeof status)}
-                className="h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary"
-              >
-                <option value="all">All</option>
-                <option value="pending">Pending</option>
-                <option value="running">Running</option>
-                <option value="completed">Completed</option>
-                <option value="failed">Failed</option>
-              </select>
-              <Button type="button" onClick={() => void load()} disabled={loading}>
-                {loading ? 'Refreshing…' : 'Refresh'}
-              </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All' },
+                { key: 'completed', label: 'Completed' },
+                { key: 'pending', label: 'Pending' },
+                { key: 'failed', label: 'Failed' },
+              ].map((chip) => {
+                const active = status === chip.key
+                return (
+                  <button
+                    key={chip.key}
+                    type="button"
+                    onClick={() => setStatus(chip.key as typeof status)}
+                    className={`rounded-[20px] border px-3 py-1 text-xs font-semibold ${
+                      active
+                        ? 'bg-[#eff6ff] text-[#2563eb] border-[#3b82f6]'
+                        : 'bg-transparent text-[#64748b] border-[#e2e8f0] hover:bg-[#f8fafc]'
+                    }`}
+                  >
+                    {chip.label}
+                  </button>
+                )
+              })}
             </div>
             {error && <ErrorBox message={error} />}
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left">
+            <div className="overflow-x-auto rounded-[13px] border border-[#e2e8f0]">
+              <table className="w-full text-left bg-white">
                 <thead>
-                  <tr className="border-b border-border/80">
-                    <th className="py-2 pr-4 font-medium text-text-primary">Created</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Status</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Name</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Type</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Requestor</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Started</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Finished</th>
-                    <th className="py-2 pr-4 font-medium text-text-primary">Outcome</th>
-                    <th className="py-2 font-medium text-text-primary">Error</th>
-                    <th className="py-2 font-medium text-text-primary">Actions</th>
+                  <tr className="border-b border-[#e2e8f0]">
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Created</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Status</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Name</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Type</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Requestor</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Started</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Finished</th>
+                    <th className="px-4 py-[10px] pr-4 text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Outcome</th>
+                    <th className="px-4 py-[10px] text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Error</th>
+                    <th className="px-4 py-[10px] text-[11.5px] font-semibold uppercase tracking-[0.04em] text-[#94a3b8]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {items.map((row) => (
-                    <tr key={row.job_id} className="border-b border-border/70 hover:bg-muted/40">
-                      <td className="py-2 pr-4 text-text-muted">{formatDate(row.created_at)}</td>
-                      <td className={`py-2 pr-4 font-medium ${statusTone(row.status)}`}>{row.status}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.name}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.entity_type}</td>
-                      <td className="py-2 pr-4 text-text-muted">{row.requestor || '—'}</td>
-                      <td className="py-2 pr-4 text-text-muted">{formatDate(row.started_at)}</td>
-                      <td className="py-2 pr-4 text-text-muted">{formatDate(row.finished_at)}</td>
-                      <td className="py-2 pr-4 text-text-secondary">
+                    <tr key={row.job_id} className="border-b border-[#f8fafc] hover:bg-[#fafbfc]">
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#64748b]">{formatDate(row.created_at)}</td>
+                      <td className={`px-4 py-[11px] pr-4 font-mono text-[13px] font-semibold ${statusTone(row.status)}`}>{row.status}</td>
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#1e293b]">{row.name}</td>
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#1e293b]">{row.entity_type}</td>
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#64748b]">{row.requestor || '—'}</td>
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#64748b]">{formatDate(row.started_at)}</td>
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#64748b]">{formatDate(row.finished_at)}</td>
+                      <td className="px-4 py-[11px] pr-4 text-[13px] text-[#1e293b]">
                         {row.screening_status ?? (row.status === 'completed' ? 'Completed' : '—')}
                       </td>
-                      <td className="py-2 text-text-muted">{row.error_message || '—'}</td>
-                      <td className="py-2">
+                      <td className="px-4 py-[11px] text-[13px] text-[#64748b]">{row.error_message || '—'}</td>
+                      <td className="px-4 py-[11px]">
                         <div className="flex items-center gap-2">
                           <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
                             Show ID
@@ -204,7 +210,7 @@ export function ScreeningJobsPage() {
                   ))}
                   {!loading && items.length === 0 && (
                     <tr>
-                      <td className="py-3 text-text-secondary" colSpan={10}>No jobs found for this filter.</td>
+                      <td className="px-4 py-3 text-[13px] text-[#64748b]" colSpan={10}>No jobs found for this filter.</td>
                     </tr>
                   )}
                 </tbody>

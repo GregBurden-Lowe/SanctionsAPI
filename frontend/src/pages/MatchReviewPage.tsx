@@ -238,7 +238,7 @@ export function MatchReviewPage() {
   }
 
   return (
-    <div className="px-6 pb-6">
+    <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="w-full max-w-[1600px] space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
