@@ -1,25 +1,16 @@
 import { useEffect, useState } from 'react'
-import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, Input, Modal, SectionHeader } from '@/components'
+import { BiCheckCircle, BiRefresh, BiSearch, BiShow } from 'react-icons/bi'
+import { Button, Card, ErrorBox, Input, Modal } from '@/components'
 import {
   claimReview,
   completeReview,
   getReviewQueue,
   rerunReview,
-  type OpCheckParams,
   type ReviewRerunResponse,
   type ReviewQueueItem,
 } from '@/api/client'
 import type { ReviewOutcome } from '@/types/api'
 import { useAuth } from '@/context/AuthContext'
-
-const REASON_OPTIONS: OpCheckParams['reason_for_check'][] = [
-  'Client Onboarding',
-  'Claim Payment',
-  'Business Partner Payment',
-  'Business Partner Due Diligence',
-  'Periodic Re-Screen',
-  'Ad-Hoc Compliance Review',
-]
 
 const REVIEW_OUTCOME_OPTIONS: ReviewOutcome[] = [
   'False Positive - Proceeded',
@@ -29,6 +20,9 @@ const REVIEW_OUTCOME_OPTIONS: ReviewOutcome[] = [
   'Pending External Review',
   'Cancelled / No Action Required',
 ]
+
+const FILTER_CHIPS = ['All', 'PEP', 'Sanctions', 'Adverse Media', 'Watchlist'] as const
+type FilterChip = (typeof FILTER_CHIPS)[number]
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -45,10 +39,22 @@ function formatDate(iso: string | null): string {
 function DecisionBadge({ decision }: { decision: string }) {
   const isSanctions = decision.toLowerCase().includes('sanction')
   return (
-    <span className={`status-pill ${isSanctions ? 'status-pill-sanction' : 'status-pill-pep'}`}>
+    <span
+      className={`inline-flex items-center gap-[5px] rounded-[20px] border px-[10px] py-[3px] pl-[7px] font-mono text-[11.5px] font-semibold uppercase tracking-[0.04em] whitespace-nowrap ${
+        isSanctions
+          ? 'bg-[rgba(230,100,50,0.12)] border-[rgba(230,100,50,0.3)] text-[#e06030]'
+          : 'bg-[rgba(220,60,60,0.1)] border-[rgba(220,60,60,0.25)] text-[#d94040]'
+      }`}
+    >
+      <span className={`inline-block h-1.5 w-1.5 rounded-full ${isSanctions ? 'bg-[#e06030]' : 'bg-[#d94040]'}`} />
       {decision}
     </span>
   )
+}
+
+function sectionDotTone(section: 'claimed' | 'unclaimed'): string {
+  if (section === 'claimed') return '#3b82f6'
+  return '#f59e0b'
 }
 
 export function MatchReviewPage() {
@@ -56,12 +62,8 @@ export function MatchReviewPage() {
   const [items, setItems] = useState<ReviewQueueItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [businessReference, setBusinessReference] = useState('')
-  const [reasonForCheck, setReasonForCheck] = useState<'' | OpCheckParams['reason_for_check']>('')
-  const [includeCleared, setIncludeCleared] = useState(false)
-  const [includeCompleted, setIncludeCompleted] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
-  const [decisionFilter, setDecisionFilter] = useState<'ALL' | 'PEP' | 'SANCTIONS'>('ALL')
+  const [activeChip, setActiveChip] = useState<FilterChip>('All')
   const [selected, setSelected] = useState<ReviewQueueItem | null>(null)
   const [reviewOutcome, setReviewOutcome] = useState<ReviewOutcome>(REVIEW_OUTCOME_OPTIONS[0])
   const [reviewNotes, setReviewNotes] = useState('')
@@ -75,10 +77,10 @@ export function MatchReviewPage() {
   const [rerunMessage, setRerunMessage] = useState<string | null>(null)
   const [idModalKey, setIdModalKey] = useState<string | null>(null)
   const [detailItem, setDetailItem] = useState<ReviewQueueItem | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+
   const currentUsername = (user?.username || '').trim().toLowerCase()
-  const scopedItems = includeCompleted
-    ? items
-    : items.filter((item) => item.review_status !== 'COMPLETED')
+  const scopedItems = items.filter((item) => item.review_status !== 'COMPLETED')
   const myClaimedItems = scopedItems.filter(
     (item) =>
       item.review_status === 'IN_REVIEW' &&
@@ -89,33 +91,33 @@ export function MatchReviewPage() {
     if (claimedBy) return false
     return item.review_status === 'UNREVIEWED' || item.review_status === 'IN_REVIEW'
   })
+  const completedCount = items.filter((item) => item.review_status === 'COMPLETED').length
+
+  const showToast = (message: string) => {
+    setToast(message)
+    window.setTimeout(() => setToast(null), 2500)
+  }
+
   const matchesViewFilters = (item: ReviewQueueItem): boolean => {
     const needle = searchTerm.trim().toLowerCase()
     const haystack = `${item.entity_name || ''} ${item.business_reference || ''} ${item.screening_user || ''}`.toLowerCase()
     const searchOk = !needle || haystack.includes(needle)
     const decision = (item.decision || '').toLowerCase()
-    const decisionOk =
-      decisionFilter === 'ALL'
-        ? true
-        : decisionFilter === 'PEP'
-          ? decision.includes('pep')
-          : decision.includes('sanction')
-    return searchOk && decisionOk
+    let chipOk = true
+    if (activeChip === 'PEP') chipOk = decision.includes('pep')
+    if (activeChip === 'Sanctions') chipOk = decision.includes('sanction')
+    if (activeChip === 'Adverse Media') chipOk = decision.includes('adverse media')
+    if (activeChip === 'Watchlist') chipOk = decision.includes('watchlist')
+    return searchOk && chipOk
   }
   const myClaimedDisplay = myClaimedItems.filter(matchesViewFilters)
   const unclaimedDisplay = unclaimedItems.filter(matchesViewFilters)
-  const completedCount = items.filter((item) => item.review_status === 'COMPLETED').length
 
   const load = async () => {
     setLoading(true)
     setError(null)
     try {
-      const res = await getReviewQueue({
-        business_reference: businessReference.trim() || undefined,
-        reason_for_check: reasonForCheck || undefined,
-        include_cleared: includeCleared,
-        limit: 300,
-      })
+      const res = await getReviewQueue({ include_cleared: false, limit: 300 })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setError((data as { detail?: string }).detail ?? 'Failed to load review queue.')
@@ -146,6 +148,7 @@ export function MatchReviewPage() {
         return
       }
       await load()
+      showToast(`Claimed review for ${row.entity_name}`)
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to claim review.')
     } finally {
@@ -172,10 +175,12 @@ export function MatchReviewPage() {
         setActionError((data as { detail?: string }).detail ?? 'Failed to complete review.')
         return
       }
+      const completedName = selected.entity_name
       setSelected(null)
       setReviewNotes('')
       setReviewOutcome(REVIEW_OUTCOME_OPTIONS[0])
       await load()
+      showToast(`Review completed for ${completedName}`)
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to complete review.')
     } finally {
@@ -232,219 +237,207 @@ export function MatchReviewPage() {
     }
   }
 
-  const actionsCell = (row: ReviewQueueItem) => {
-    if (row.review_status === 'COMPLETED') {
-      return <span className="text-xs text-text-muted">Completed</span>
-    }
-    if (row.review_status === 'IN_REVIEW') {
-      return (
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled={actionLoading || rerunLoading}
-            onClick={() => openRerun(row)}
-          >
-            Re-run
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled={actionLoading || rerunLoading}
-            onClick={() => {
-              setSelected(row)
-              setActionError(null)
-              setReviewNotes('')
-              setReviewOutcome(REVIEW_OUTCOME_OPTIONS[0])
-            }}
-          >
-            Complete review
-          </Button>
-        </div>
-      )
-    }
-    return (
-      <span className="text-xs text-text-muted">Unavailable</span>
-    )
-  }
-
   return (
     <div className="px-6 pb-6">
-      <div className="w-full max-w-[1600px] space-y-6">
-        <SectionHeader title="Match review queue" />
-
-        <div className="flex flex-wrap gap-3">
-          <Card className="min-w-[96px]">
-            <CardBody className="text-center">
-              <p className="font-mono text-xl font-bold text-brand">{myClaimedItems.length}</p>
-              <p className="text-[11px] uppercase tracking-wide text-text-muted">My queue</p>
-            </CardBody>
-          </Card>
-          <Card className="min-w-[96px]">
-            <CardBody className="text-center">
-              <p className="font-mono text-xl font-bold text-[#d97706]">{unclaimedItems.length}</p>
-              <p className="text-[11px] uppercase tracking-wide text-text-muted">Unclaimed</p>
-            </CardBody>
-          </Card>
-          <Card className="min-w-[96px]">
-            <CardBody className="text-center">
-              <p className="font-mono text-xl font-bold text-[#16a34a]">{completedCount}</p>
-              <p className="text-[11px] uppercase tracking-wide text-text-muted">Completed</p>
-            </CardBody>
-          </Card>
+      <div className="w-full max-w-[1600px] space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-page-title">Match Review Queue</h1>
+            <p className="text-[13px] text-[#64748b] mt-0.5">Review and clear flagged entity matches</p>
+          </div>
+          <div className="flex gap-2">
+            {[
+              { label: 'My Queue', value: myClaimedItems.length, color: '#3b82f6' },
+              { label: 'Unclaimed', value: unclaimedItems.length, color: '#f59e0b' },
+              { label: 'Completed', value: completedCount, color: '#22c55e' },
+            ].map((stat) => (
+              <div
+                key={stat.label}
+                className="bg-white rounded-[11px] border border-[#e2e8f0] px-4 py-[10px] min-w-[72px] text-center"
+              >
+                <div className="font-mono text-[20px] leading-none font-extrabold" style={{ color: stat.color }}>
+                  {stat.value}
+                </div>
+                <div className="mt-[3px] text-[10.5px] uppercase tracking-[0.03em] text-[#94a3b8]">{stat.label}</div>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Queue filters</CardTitle>
-          </CardHeader>
-          <CardBody className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-              <Input
-                label="Search"
+        <Card className="p-0">
+          <div className="flex flex-wrap items-center gap-3 p-[13px_18px]">
+            <div className="relative flex-[1_1_180px] max-w-[280px]">
+              <BiSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#94a3b8]" />
+              <input
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search name, reference, or user"
+                placeholder="Search by name or reference…"
+                className="w-full h-[35px] rounded-lg border border-[#e2e8f0] bg-[#f8fafc] pl-8 pr-2.5 text-[12.5px] text-[#1e293b] outline-none transition focus:border-[#3b82f6]"
               />
-              <Input
-                label="Business reference"
-                value={businessReference}
-                onChange={(e) => setBusinessReference(e.target.value)}
-                placeholder="Exact business reference"
-              />
-              <div className="space-y-2">
-                <label htmlFor="reason-for-check" className="block text-xs font-medium text-text-primary mb-1">
-                  Reason for check
-                </label>
-                <select
-                  id="reason-for-check"
-                  className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
-                  value={reasonForCheck}
-                  onChange={(e) => setReasonForCheck((e.target.value as '' | OpCheckParams['reason_for_check']) || '')}
-                >
-                  <option value="">All</option>
-                  {REASON_OPTIONS.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-end gap-3">
-                <Button type="button" variant="secondary" onClick={() => void load()} disabled={loading}>
-                  {loading ? 'Refreshing…' : 'Refresh'}
-                </Button>
-                <label className="inline-flex items-center gap-2 text-xs text-text-secondary">
-                  <input
-                    type="checkbox"
-                    checked={includeCleared}
-                    onChange={(e) => setIncludeCleared(e.target.checked)}
-                  />
-                  Include cleared
-                </label>
-                <label className="inline-flex items-center gap-2 text-xs text-text-secondary">
-                  <input
-                    type="checkbox"
-                    checked={includeCompleted}
-                    onChange={(e) => setIncludeCompleted(e.target.checked)}
-                  />
-                  Include completed
-                </label>
-              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[11px] uppercase tracking-wide text-text-muted">Decision</span>
-              {(['ALL', 'PEP', 'SANCTIONS'] as const).map((item) => (
-                <Button
-                  key={item}
-                  type="button"
-                  size="sm"
-                  variant={decisionFilter === item ? 'primary' : 'ghost'}
-                  onClick={() => setDecisionFilter(item)}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {FILTER_CHIPS.map((chip) => {
+                const active = chip === activeChip
+                return (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => setActiveChip(chip)}
+                    className={`rounded-[20px] px-3 py-1 text-xs font-semibold transition ${
+                      active
+                        ? 'bg-[#eff6ff] text-[#2563eb] border border-[#3b82f6]'
+                        : 'bg-transparent text-[#64748b] border border-[#e2e8f0] hover:bg-[#f8fafc]'
+                    }`}
+                  >
+                    {chip}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </Card>
+
+        {error && <ErrorBox message={error} />}
+        {actionError && <ErrorBox message={actionError} />}
+
+        <Card className="p-0 overflow-hidden">
+          <div className="px-5 py-[13px] border-b border-[#f1f5f9] flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: sectionDotTone('claimed'), boxShadow: `0 0 0 3px rgba(59,130,246,0.2)` }}
+              />
+              <span className="font-bold text-[13.5px] text-[#0f2340]">My claimed reviews</span>
+              <span className="rounded-[20px] border border-[#bfdbfe] bg-[#eff6ff] px-2 py-0.5 text-[11px] font-bold text-[#2563eb]">
+                {myClaimedDisplay.length}
+              </span>
+            </div>
+            <span className="text-[11.5px] text-[#94a3b8]">Assigned to you</span>
+          </div>
+          {loading ? (
+            <div className="px-5 py-4 text-sm text-text-secondary">Loading…</div>
+          ) : myClaimedDisplay.length === 0 ? (
+            <div className="px-5 py-4 text-sm text-text-secondary">No claimed reviews for your user.</div>
+          ) : (
+            <div>
+              {myClaimedDisplay.map((row, i) => (
+                <div
+                  key={row.entity_key}
+                  className="flex items-center gap-3 px-5 py-3 hover:bg-[#fafbfc]"
+                  style={{
+                    borderBottom: i < myClaimedDisplay.length - 1 ? '1px solid #f8fafc' : 'none',
+                    animation: 'row-fade-up 0.2s ease both',
+                    animationDelay: `${i * 0.05}s`,
+                  }}
                 >
-                  {item}
-                </Button>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13.5px] font-semibold text-[#1e293b]">{row.entity_name}</div>
+                    <div className="text-[11.5px] text-[#94a3b8] font-mono">
+                      Ref: {row.business_reference ?? `BUS-${row.entity_key.slice(0, 10)}`}
+                    </div>
+                  </div>
+                  <DecisionBadge decision={row.decision} />
+                  <div className="flex items-center gap-1.5 ml-2 whitespace-nowrap">
+                    <button
+                      type="button"
+                      title="View details"
+                      onClick={() => setDetailItem(row)}
+                      className="inline-flex items-center justify-center rounded-lg border border-[#e2e8f0] p-[6px_8px] text-[#64748b] hover:bg-[#f1f5f9]"
+                    >
+                      <BiShow className="h-[13px] w-[13px]" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Re-run check"
+                      onClick={() => openRerun(row)}
+                      disabled={actionLoading || rerunLoading}
+                      className="inline-flex items-center justify-center rounded-lg border border-[#e2e8f0] p-[6px_8px] text-[#64748b] hover:bg-[#f1f5f9] disabled:opacity-50"
+                    >
+                      <BiRefresh className="h-[13px] w-[13px]" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actionLoading || rerunLoading}
+                      onClick={() => {
+                        setSelected(row)
+                        setActionError(null)
+                        setReviewNotes('')
+                        setReviewOutcome(REVIEW_OUTCOME_OPTIONS[0])
+                      }}
+                      className="rounded-lg bg-[#1e3a5f] px-[14px] py-[7px] text-[12.5px] font-semibold text-white hover:bg-[#2d5986] disabled:opacity-50"
+                    >
+                      Complete review →
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
-            {error && <ErrorBox message={error} />}
-            {actionError && <ErrorBox message={actionError} />}
-          </CardBody>
+          )}
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>My claimed reviews ({myClaimedDisplay.length})</CardTitle>
-          </CardHeader>
-          <CardBody>
-            {loading ? (
-              <p className="text-sm text-text-secondary">Loading…</p>
-            ) : myClaimedDisplay.length === 0 ? (
-              <p className="text-sm text-text-secondary">No claimed reviews for your user.</p>
-            ) : (
-              <div className="space-y-2">
-                {myClaimedDisplay.map((row) => (
-                  <div key={row.entity_key} className="rounded-lg border border-border bg-secondary px-3 py-2.5 flex items-center gap-3 justify-between hover:bg-[#fafbfc]">
-                    <div className="min-w-0">
-                      <p className="text-[13.5px] font-semibold text-text-primary">{row.entity_name}</p>
-                      <p className="text-xs text-text-muted">Ref: {row.business_reference ?? row.entity_key.slice(0, 12)}</p>
-                    </div>
-                    <DecisionBadge decision={row.decision} />
-                    <div className="flex items-center gap-2 whitespace-nowrap">
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
-                        View details
-                      </Button>
-                      {actionsCell(row)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Unclaimed queue ({unclaimedDisplay.length})</CardTitle>
-          </CardHeader>
-          <CardBody>
-            {loading ? (
-              <p className="text-sm text-text-secondary">Loading…</p>
-            ) : unclaimedDisplay.length === 0 ? (
-              <p className="text-sm text-text-secondary">No unclaimed queue items found.</p>
-            ) : (
-              <div className="space-y-2">
-                {unclaimedDisplay.map((row) => (
-                  <div key={row.entity_key} className="rounded-lg border border-border bg-secondary px-3 py-2.5 flex items-center gap-3 justify-between hover:bg-[#fafbfc]">
-                    <div className="min-w-0">
-                      <p className="text-[13.5px] font-semibold text-text-primary">{row.entity_name}</p>
-                      <p className="text-xs text-text-muted">Ref: {row.business_reference ?? row.entity_key.slice(0, 12)}</p>
-                    </div>
-                    <DecisionBadge decision={row.decision} />
-                    <div className="flex items-center gap-2 whitespace-nowrap">
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
-                        View details
-                      </Button>
-                      {row.review_status === 'UNREVIEWED' ? (
-                        <Button
-                          type="button"
-                          variant="primary"
-                          size="sm"
-                          disabled={actionLoading}
-                          onClick={() => void handleClaim(row)}
-                        >
-                          Claim
-                        </Button>
-                      ) : (
-                        <span className="text-xs text-text-muted">Unavailable</span>
-                      )}
+        <Card className="p-0 overflow-hidden">
+          <div className="px-5 py-[13px] border-b border-[#f1f5f9] flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: sectionDotTone('unclaimed'), boxShadow: `0 0 0 3px rgba(245,158,11,0.2)` }}
+              />
+              <span className="font-bold text-[13.5px] text-[#0f2340]">Unclaimed queue</span>
+              <span className="rounded-[20px] border border-[#fde68a] bg-[#fffbeb] px-2 py-0.5 text-[11px] font-bold text-[#d97706]">
+                {unclaimedDisplay.length}
+              </span>
+            </div>
+            <span className="text-[11.5px] text-[#94a3b8]">Available to claim</span>
+          </div>
+          {loading ? (
+            <div className="px-5 py-4 text-sm text-text-secondary">Loading…</div>
+          ) : unclaimedDisplay.length === 0 ? (
+            <div className="px-5 py-4 text-sm text-text-secondary">No unclaimed queue items found.</div>
+          ) : (
+            <div>
+              {unclaimedDisplay.map((row, i) => (
+                <div
+                  key={row.entity_key}
+                  className="flex items-center gap-3 px-5 py-3 hover:bg-[#fafbfc]"
+                  style={{
+                    borderBottom: i < unclaimedDisplay.length - 1 ? '1px solid #f8fafc' : 'none',
+                    animation: 'row-fade-up 0.2s ease both',
+                    animationDelay: `${i * 0.04}s`,
+                  }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13.5px] font-semibold text-[#1e293b]">{row.entity_name}</div>
+                    <div className="text-[11.5px] text-[#94a3b8] font-mono">
+                      Ref: {row.business_reference ?? `BUS-${row.entity_key.slice(0, 10)}`}
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
+                  <DecisionBadge decision={row.decision} />
+                  <div className="flex items-center gap-1.5 ml-2 whitespace-nowrap">
+                    <button
+                      type="button"
+                      title="View details"
+                      onClick={() => setDetailItem(row)}
+                      className="inline-flex items-center justify-center rounded-lg border border-[#e2e8f0] p-[6px_8px] text-[#64748b] hover:bg-[#f1f5f9]"
+                    >
+                      <BiShow className="h-[13px] w-[13px]" />
+                    </button>
+                    {row.review_status === 'UNREVIEWED' ? (
+                      <button
+                        type="button"
+                        disabled={actionLoading}
+                        onClick={() => void handleClaim(row)}
+                        className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] px-[14px] py-[6px] text-[12.5px] font-semibold text-[#475569] hover:bg-[#eff6ff] hover:text-[#2563eb] hover:border-[#bfdbfe] disabled:opacity-50"
+                      >
+                        Claim
+                      </button>
+                    ) : (
+                      <span className="text-xs text-text-muted">Unavailable</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       </div>
 
@@ -638,6 +631,16 @@ export function MatchReviewPage() {
           <code className="block w-full text-xs bg-surface px-2 py-2 rounded break-all font-mono">{idModalKey}</code>
         )}
       </Modal>
+
+      {toast && (
+        <div
+          className="fixed bottom-5 right-5 z-50 inline-flex items-center gap-2 rounded-[11px] bg-[#0f2340] px-[18px] py-[11px] text-white shadow-[0_8px_24px_rgba(0,0,0,0.2)]"
+          style={{ animation: 'toast-slide-in 0.2s ease both' }}
+        >
+          <BiCheckCircle className="h-4 w-4 text-[#4ade80]" />
+          <span className="text-sm">{toast}</span>
+        </div>
+      )}
     </div>
   )
 }

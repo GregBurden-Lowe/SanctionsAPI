@@ -1,8 +1,9 @@
 import { Outlet } from 'react-router-dom'
-import { NavItem, Button } from '@/components'
+import { NavItem } from '@/components'
 import { useAuth } from '@/context/AuthContext'
 import {
   BiBuildingHouse,
+  BiChevronDown,
   BiGridAlt,
   BiHomeAlt,
   BiKey,
@@ -22,7 +23,14 @@ const mainClass = 'ml-[206px] min-h-screen flex flex-col pt-14'
 const topBarClass = 'fixed top-0 left-0 right-0 h-14 pl-[222px] pr-6 bg-[#0f2340] text-white border-b border-[rgba(255,255,255,0.06)] flex items-center justify-between gap-4 z-20'
 
 export function AppShell() {
-  const { user, logout, loginRequired } = useAuth()
+  const { user, loginRequired } = useAuth()
+  const displayUser = (user?.username || 'greg.burden-lowe').split('@')[0]
+  const initials = displayUser
+    .split(/[.\s_-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s) => s[0]?.toUpperCase() || '')
+    .join('') || 'GB'
   return (
     <div className={appShellClass}>
       <aside className={sidebarClass}>
@@ -74,13 +82,12 @@ export function AppShell() {
           <div>
             <h1 className="text-lg font-semibold text-white">Sanctions & PEP Screening</h1>
           </div>
-          <div className="flex items-center gap-4">
-            <span className="rounded-lg border border-[rgba(255,255,255,0.12)] bg-white/10 px-3 py-1.5 text-xs text-white/90">
-              {user?.username}
+          <div className="flex items-center gap-2 rounded-lg border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.06)] px-2 py-1.5">
+            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-[#3b82f6] to-[#2563eb] text-[10px] font-bold text-white">
+              {initials}
             </span>
-            <Button variant="secondary" size="sm" onClick={logout}>
-              Sign out
-            </Button>
+            <span className="text-xs text-[#94a3b8]">{displayUser}</span>
+            <BiChevronDown className="h-3.5 w-3.5 text-[#64748b]" aria-hidden />
           </div>
         </header>
         <Outlet />
