@@ -139,99 +139,101 @@ export function ScreeningPage() {
         <SectionHeader title="Run check" />
         <div>
           <Card>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="md:col-span-2">
-            <Input
-              label="Name or organization"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. John Smith or Acme Ltd"
-              required
-            />
-                </div>
-                <div>
-            <div>
-              <label htmlFor="entity_type" className="block text-xs font-medium text-text-primary mb-1">
-                Entity type
-              </label>
-              <select
-                id="entity_type"
-                value={entityType}
-                onChange={(e) => setEntityType(e.target.value as 'Person' | 'Organization')}
-                className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
-              >
-                <option value="Person">Person</option>
-                <option value="Organization">Organisation</option>
-              </select>
-            </div>
-                </div>
-                <div>
-            <Input
-              label="Date of birth (optional)"
-              value={dob}
-              onChange={(e) => setDob(e.target.value)}
-              placeholder="DD-MM-YYYY or YYYY"
-            />
-                </div>
-                {entityType === 'Organization' && (
+            <CardBody className="max-w-[920px]">
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
                   <div className="md:col-span-2">
                     <Input
-                      label="Country (optional)"
-                      value={country}
-                      onChange={(e) => setCountry(e.target.value)}
-                      placeholder="e.g. UK"
+                      label="Name or organization"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="e.g. John Smith or Acme Ltd"
+                      required
                     />
                   </div>
-                )}
-                <div className="md:col-span-2">
-            <Input
-              label="Business reference"
-              value={businessReference}
-              onChange={(e) => setBusinessReference(e.target.value)}
-              placeholder="e.g. BR-2026-000123"
-              required
-            />
+                  <div>
+                    <div>
+                      <label htmlFor="entity_type" className="block text-xs font-medium text-text-primary mb-1">
+                        Entity type
+                      </label>
+                      <select
+                        id="entity_type"
+                        value={entityType}
+                        onChange={(e) => setEntityType(e.target.value as 'Person' | 'Organization')}
+                        className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+                      >
+                        <option value="Person">Person</option>
+                        <option value="Organization">Organisation</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <Input
+                      label="Date of birth (optional)"
+                      value={dob}
+                      onChange={(e) => setDob(e.target.value)}
+                      placeholder="DD-MM-YYYY or YYYY"
+                    />
+                  </div>
+                  {entityType === 'Organization' && (
+                    <div className="md:col-span-2">
+                      <Input
+                        label="Country (optional)"
+                        value={country}
+                        onChange={(e) => setCountry(e.target.value)}
+                        placeholder="e.g. UK"
+                      />
+                    </div>
+                  )}
+                  <div className="md:col-span-2">
+                    <Input
+                      label="Business reference"
+                      value={businessReference}
+                      onChange={(e) => setBusinessReference(e.target.value)}
+                      placeholder="e.g. BR-2026-000123"
+                      required
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <div>
+                      <label htmlFor="reason_for_check" className="block text-xs font-medium text-text-primary mb-1">
+                        Reason for check
+                      </label>
+                      <select
+                        id="reason_for_check"
+                        value={reasonForCheck}
+                        onChange={(e) => setReasonForCheck(e.target.value as ReasonForCheck)}
+                        className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+                        required
+                      >
+                        {REASON_FOR_CHECK_OPTIONS.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="md:col-span-2">
+                    <Input
+                      label="Requested By"
+                      value={requestor}
+                      onChange={(e) => setRequestor(e.target.value)}
+                      placeholder="Who is running this check"
+                      required
+                    />
+                  </div>
                 </div>
-                <div className="md:col-span-2">
-            <div>
-              <label htmlFor="reason_for_check" className="block text-xs font-medium text-text-primary mb-1">
-                Reason for check
-              </label>
-              <select
-                id="reason_for_check"
-                value={reasonForCheck}
-                onChange={(e) => setReasonForCheck(e.target.value as ReasonForCheck)}
-                className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
-                required
-              >
-                {REASON_FOR_CHECK_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </div>
-                </div>
-                <div className="md:col-span-2">
-            <Input
-              label="Requested By"
-              value={requestor}
-              onChange={(e) => setRequestor(e.target.value)}
-              placeholder="Who is running this check"
-              required
-            />
-                </div>
+                <Button type="submit" className="w-full mt-6" disabled={loading}>
+                  {loading ? 'Checking…' : 'Check'}
+                </Button>
+              </form>
+            </CardBody>
+            {error && (
+              <div className="px-5 pb-4">
+                <ErrorBox message={error} />
               </div>
-            <Button type="submit" className="w-full mt-6" disabled={loading}>
-              {loading ? 'Checking…' : 'Check'}
-            </Button>
-            </form>
-          {error && (
-            <div className="mt-4">
-              <ErrorBox message={error} />
-            </div>
-          )}
+            )}
           </Card>
         </div>
 
