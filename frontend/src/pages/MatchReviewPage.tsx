@@ -62,6 +62,7 @@ export function MatchReviewPage() {
   const [rerunCountry, setRerunCountry] = useState('')
   const [rerunLoading, setRerunLoading] = useState(false)
   const [rerunMessage, setRerunMessage] = useState<string | null>(null)
+  const [idModalKey, setIdModalKey] = useState<string | null>(null)
   const currentUsername = (user?.username || '').trim().toLowerCase()
   const scopedItems = includeCompleted
     ? items
@@ -243,7 +244,7 @@ export function MatchReviewPage() {
 
   return (
     <div className="px-10 pb-10">
-      <div className="max-w-7xl space-y-6">
+      <div className="w-full max-w-[1600px] space-y-6">
         <SectionHeader title="Match review queue" />
 
         <Card>
@@ -313,8 +314,8 @@ export function MatchReviewPage() {
             ) : myClaimedItems.length === 0 ? (
               <p className="text-sm text-text-secondary">No claimed reviews for your user.</p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
+              <div>
+                <table className="w-full text-sm text-left table-fixed">
                   <thead>
                     <tr className="border-b border-border/80">
                       <th className="py-2 pr-4 font-medium text-text-primary">Entity name</th>
@@ -334,7 +335,9 @@ export function MatchReviewPage() {
                       <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
                         <td className="py-2 pr-4 text-text-secondary">
-                          <code className="text-xs bg-surface px-1 rounded">{row.entity_key}</code>
+                          <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
+                            Show ID
+                          </Button>
                         </td>
                         <td className="py-2 pr-4 text-text-secondary">{row.decision}</td>
                         <td className="py-2 pr-4 text-text-secondary">{row.business_reference ?? '—'}</td>
@@ -363,8 +366,8 @@ export function MatchReviewPage() {
             ) : unclaimedItems.length === 0 ? (
               <p className="text-sm text-text-secondary">No unclaimed queue items found.</p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
+              <div>
+                <table className="w-full text-sm text-left table-fixed">
                   <thead>
                     <tr className="border-b border-border/80">
                       <th className="py-2 pr-4 font-medium text-text-primary">Entity name</th>
@@ -384,7 +387,9 @@ export function MatchReviewPage() {
                       <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
                         <td className="py-2 pr-4 text-text-secondary">
-                          <code className="text-xs bg-surface px-1 rounded">{row.entity_key}</code>
+                          <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
+                            Show ID
+                          </Button>
                         </td>
                         <td className="py-2 pr-4 text-text-secondary">{row.decision}</td>
                         <td className="py-2 pr-4 text-text-secondary">{row.business_reference ?? '—'}</td>
@@ -528,6 +533,28 @@ export function MatchReviewPage() {
             {rerunMessage && <p className="text-sm text-text-secondary">{rerunMessage}</p>}
             {actionError && <ErrorBox message={actionError} />}
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={idModalKey !== null}
+        onClose={() => setIdModalKey(null)}
+        title="Entity ID"
+        footer={
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => setIdModalKey(null)}>
+              Close
+            </Button>
+            {idModalKey && (
+              <Button onClick={() => void navigator.clipboard.writeText(idModalKey)}>
+                Copy ID
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {idModalKey && (
+          <code className="block w-full text-xs bg-surface px-2 py-2 rounded break-all font-mono">{idModalKey}</code>
         )}
       </Modal>
     </div>

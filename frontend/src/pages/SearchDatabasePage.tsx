@@ -45,6 +45,7 @@ export function SearchDatabasePage() {
   const [rerunLoading, setRerunLoading] = useState(false)
   const [rerunError, setRerunError] = useState<string | null>(null)
   const [rerunSuccess, setRerunSuccess] = useState<string | null>(null)
+  const [idModalKey, setIdModalKey] = useState<string | null>(null)
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -302,17 +303,8 @@ export function SearchDatabasePage() {
                     {items.map((row) => (
                       <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4">
-                          <code className="text-xs bg-surface px-1 rounded break-all font-mono">
-                            {row.entity_key}
-                          </code>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="ml-1 text-xs"
-                            onClick={() => navigator.clipboard.writeText(row.entity_key)}
-                          >
-                            Copy
+                          <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
+                            Show ID
                           </Button>
                         </td>
                         <td className="py-2 pr-4 text-text-secondary">{row.display_name}</td>
@@ -416,7 +408,15 @@ export function SearchDatabasePage() {
             )}
             <p className="text-sm text-text-secondary">
               <span className="font-medium">Entity key</span>{' '}
-              <code className="text-xs bg-surface px-1 rounded">{detailRow.entity_key}</code>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-auto p-0 text-xs align-baseline"
+                onClick={() => setIdModalKey(detailRow.entity_key)}
+              >
+                Show ID
+              </Button>
               {' · '}
               <span className="font-medium">Business reference</span> {detailRow.business_reference ?? '—'}
               {' · '}
@@ -437,6 +437,28 @@ export function SearchDatabasePage() {
               }}
             />
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={idModalKey !== null}
+        onClose={() => setIdModalKey(null)}
+        title="Entity ID"
+        footer={
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => setIdModalKey(null)}>
+              Close
+            </Button>
+            {idModalKey && (
+              <Button onClick={() => void navigator.clipboard.writeText(idModalKey)}>
+                Copy ID
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {idModalKey && (
+          <code className="block w-full text-xs bg-surface px-2 py-2 rounded break-all font-mono">{idModalKey}</code>
         )}
       </Modal>
     </div>
