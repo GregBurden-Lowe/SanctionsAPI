@@ -61,7 +61,7 @@ export function AdminPage() {
   }
 
   return (
-    <div className="px-10 pb-10">
+    <div className="px-6 pb-6">
       <div className="max-w-2xl space-y-6">
         <SectionHeader title="Admin tools" />
         <Card>

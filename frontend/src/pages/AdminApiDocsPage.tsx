@@ -41,7 +41,7 @@ export function AdminApiDocsPage() {
   const pathEntries = Object.entries(schema?.paths ?? {})
 
   return (
-    <div className="px-10 pb-10">
+    <div className="px-6 pb-6">
       <div className="max-w-5xl space-y-6">
         <SectionHeader title="API Docs" />
         <Card>

@@ -134,7 +134,7 @@ export function ScreeningPage() {
   }
 
   return (
-    <div className="px-10 pb-10">
+    <div className="px-6 pb-6">
       <div className="max-w-3xl space-y-6">
         <SectionHeader title="Run check" />
         <div>
@@ -394,8 +394,8 @@ export function ScreeningResultPage() {
   }
 
   return (
-    <div className="px-10 pb-10">
-      <div className="max-w-6xl space-y-6">
+    <div className="px-6 pb-6">
+      <div className="max-w-[1600px] space-y-6">
         <SectionHeader title="Screening result" />
         <div className="flex justify-end">
           <Button type="button" variant="ghost" onClick={() => navigate('/')}>
@@ -805,11 +805,13 @@ export function ResultCard({
                     <p className="text-xs text-text-secondary mt-0.5">{row.subtitle}</p>
                   </div>
                   <span
-                    className={`shrink-0 rounded-md px-2 py-1 text-xs font-semibold inline-flex items-center gap-1 ${
+                    className={`shrink-0 status-pill with-icon inline-flex items-center gap-1 ${
                       row.tone === 'ok'
-                        ? 'bg-semantic-success/15 text-semantic-success'
+                        ? 'bg-[rgba(34,197,94,0.1)] border-[rgba(34,197,94,0.24)] text-[#16a34a]'
                         : row.tone === 'warn'
-                          ? 'bg-semantic-warning/15 text-semantic-warning'
+                          ? row.badge.toLowerCase().includes('sanction')
+                            ? 'status-pill-sanction'
+                            : 'status-pill-pep'
                           : 'bg-surface text-text-secondary border border-border'
                     }`}
                   >

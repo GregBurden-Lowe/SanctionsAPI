@@ -44,8 +44,8 @@ export function DashboardPage() {
   const latestRefresh = summary?.data_freshness.latest_refresh
 
   return (
-    <div className="px-10 pb-10">
-      <div className="max-w-7xl space-y-6">
+    <div className="px-6 pb-6">
+      <div className="max-w-[1600px] space-y-6">
         <SectionHeader title="Dashboard" />
 
         <div className="flex items-center gap-3">

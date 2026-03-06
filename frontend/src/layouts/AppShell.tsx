@@ -17,9 +17,9 @@ import {
 /** layout.containers.AppShell + Sidebar + Main from design.json */
 const appShellClass = 'min-h-screen bg-app text-text-primary'
 const sidebarClass =
-  'fixed inset-y-0 left-0 w-72 bg-[#0f1f2b] text-white border-r border-white/10 px-6 py-6 flex flex-col overflow-y-auto shadow-lg'
-const mainClass = 'ml-72 min-h-screen flex flex-col'
-const topBarClass = 'h-20 px-10 flex items-center justify-between gap-6'
+  'fixed left-0 top-14 bottom-0 w-[206px] bg-[#0f2340] text-white border-r border-[rgba(255,255,255,0.06)] px-4 py-4 flex flex-col overflow-y-auto'
+const mainClass = 'ml-[206px] min-h-screen flex flex-col pt-14'
+const topBarClass = 'fixed top-0 left-0 right-0 h-14 pl-[222px] pr-6 bg-[#0f2340] text-white border-b border-[rgba(255,255,255,0.06)] flex items-center justify-between gap-4 z-20'
 
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
@@ -72,13 +72,13 @@ export function AppShell() {
       <main className={mainClass}>
         <header className={topBarClass}>
           <div>
-            <h1 className="text-2xl font-semibold text-text-primary">Sanctions & PEP Screening</h1>
+            <h1 className="text-lg font-semibold text-white">Sanctions & PEP Screening</h1>
           </div>
           <div className="flex items-center gap-4">
-            <span className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-text-secondary">
+            <span className="rounded-lg border border-[rgba(255,255,255,0.12)] bg-white/10 px-3 py-1.5 text-xs text-white/90">
               {user?.username}
             </span>
-            <Button variant="ghost" size="sm" onClick={logout}>
+            <Button variant="secondary" size="sm" onClick={logout}>
               Sign out
             </Button>
           </div>

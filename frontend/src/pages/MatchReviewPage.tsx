@@ -244,7 +244,7 @@ export function MatchReviewPage() {
   }
 
   return (
-    <div className="px-10 pb-10">
+    <div className="px-6 pb-6">
       <div className="w-full max-w-[1600px] space-y-6">
         <SectionHeader title="Match review queue" />
 

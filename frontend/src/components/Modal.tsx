@@ -1,14 +1,14 @@
 import { useEffect } from 'react'
 
 /** design.json Modal: overlay, panel, header, title, body, footer */
-const overlayClass = 'fixed inset-0 bg-black/40'
+const overlayClass = 'fixed inset-0 bg-black/35'
 const panelBaseClass =
-  'fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-modal border border-border bg-surface p-6 shadow-xl max-h-[calc(100vh-2rem)] overflow-y-auto'
+  'fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-modal border border-border bg-surface p-5 shadow-none max-h-[calc(100vh-2rem)] overflow-y-auto'
 const panelDefaultClass = 'w-[min(560px,calc(100%-2rem))]'
 const panelWideClass = 'w-[min(1120px,calc(100%-2rem))]'
 const headerClass = 'mb-4 flex items-center justify-between'
-const titleClass = 'text-lg font-semibold text-text-primary'
-const bodyClass = 'text-sm text-text-secondary'
+const titleClass = 'text-page-title text-[18px]'
+const bodyClass = 'text-[13.5px] text-text-secondary'
 const footerClass = 'mt-6 flex justify-end gap-3'
 
 export interface ModalProps {

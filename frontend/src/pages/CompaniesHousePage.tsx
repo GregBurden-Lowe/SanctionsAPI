@@ -161,8 +161,8 @@ export function CompaniesHousePage() {
   }
 
   return (
-    <div className="px-10 pb-10">
-      <div className="max-w-7xl space-y-6">
+    <div className="px-6 pb-6">
+      <div className="max-w-[1600px] space-y-6">
         <SectionHeader title="Companies House" />
 
         <Card>

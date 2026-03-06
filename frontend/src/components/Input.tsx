@@ -1,7 +1,7 @@
 import { forwardRef, type InputHTMLAttributes } from 'react'
 
 const base =
-  'w-full h-10 rounded-lg border bg-surface px-3 text-sm text-text-primary placeholder:text-text-muted outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15'
+  'w-full h-10 rounded-lg border bg-surface px-3 text-[13px] text-text-primary placeholder:text-text-muted outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15'
 const states = {
   default: 'border-border',
   error: 'border-semantic-error focus:border-semantic-error focus:ring-2 focus:ring-semantic-error/15',
@@ -19,7 +19,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     const inputId = id ?? `input-${label.replace(/\s/g, '-')}`
     const labelClass = hideLabel
       ? 'sr-only'
-      : 'block text-xs font-medium text-text-primary mb-1'
+      : 'block text-[13.5px] font-semibold text-text-primary mb-1'
     return (
       <div className="space-y-2">
         <label htmlFor={inputId} className={labelClass}>
