@@ -1238,7 +1238,11 @@ def _run_check_sync(data: OpCheckRequest):
     name = data.name.strip()
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob)
     country = (data.country.strip() if isinstance(data.country, str) else data.country)
-    pep_enabled = not _looks_like_company_name(name)
+    entity_type_norm = (data.entity_type or "Person").strip().lower()
+    pep_enabled = entity_type_norm == "person" and not _looks_like_company_name(name)
+    pep_skip_reason = None
+    if not pep_enabled:
+        pep_skip_reason = "entity_type_organization" if entity_type_norm == "organization" else "company_name_detected"
     person_result = perform_opensanctions_check(
         name=name,
         dob=dob,
@@ -1261,7 +1265,7 @@ def _run_check_sync(data: OpCheckRequest):
         person_result,
         organization_result,
         pep_checked=pep_enabled,
-        pep_skip_reason="company_name_detected" if not pep_enabled else None,
+        pep_skip_reason=pep_skip_reason,
     )
     summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
     if summary:
@@ -1356,7 +1360,11 @@ def _merge_dual_type_results(
         "status": "checked" if pep_checked else "skipped",
         "reason": pep_skip_reason,
         "message": (
-            "PEP screening skipped because the query appears to be a company name."
+            (
+                "PEP screening skipped for Organization checks."
+                if pep_skip_reason == "entity_type_organization"
+                else "PEP screening skipped because the query appears to be a company name."
+            )
             if not pep_checked
             else "PEP screening executed."
         ),
@@ -1370,9 +1378,14 @@ async def _run_postgres_dual_check(
     name: str,
     dob: Optional[str],
     country: Optional[str],
+    entity_type: str,
     requestor: Optional[str],
 ) -> dict:
-    pep_enabled = not _looks_like_company_name(name)
+    entity_type_norm = (entity_type or "Person").strip().lower()
+    pep_enabled = entity_type_norm == "person" and not _looks_like_company_name(name)
+    pep_skip_reason = None
+    if not pep_enabled:
+        pep_skip_reason = "entity_type_organization" if entity_type_norm == "organization" else "company_name_detected"
     person_result = await perform_postgres_watchlist_check(
         conn,
         name=name,
@@ -1397,7 +1410,7 @@ async def _run_postgres_dual_check(
         person_result,
         organization_result,
         pep_checked=pep_enabled,
-        pep_skip_reason="company_name_detected" if not pep_enabled else None,
+        pep_skip_reason=pep_skip_reason,
     )
     summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
     if summary:
@@ -1513,6 +1526,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                 name=name,
                 dob=dob,
                 country=country,
+                entity_type=entity_type,
                 requestor=requestor,
             )
             # Persist beta checks so Search database can find them by returned entity_key.
@@ -1596,7 +1610,10 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
 
     # Under threshold: run screening synchronously, then upsert
     logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
-    pep_enabled = not _looks_like_company_name(name)
+    pep_enabled = entity_type_norm == "person" and not _looks_like_company_name(name)
+    pep_skip_reason = None
+    if not pep_enabled:
+        pep_skip_reason = "entity_type_organization" if entity_type_norm == "organization" else "company_name_detected"
     person_result = perform_opensanctions_check(
         name=name, dob=dob, country=None, entity_type="Person", requestor=requestor, log_search=False, include_peps=pep_enabled,
     )
@@ -1607,7 +1624,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
         person_result,
         organization_result,
         pep_checked=pep_enabled,
-        pep_skip_reason="company_name_detected" if not pep_enabled else None,
+        pep_skip_reason=pep_skip_reason,
     )
     summary = results.get("Check Summary") if isinstance(results.get("Check Summary"), dict) else None
     if summary:
