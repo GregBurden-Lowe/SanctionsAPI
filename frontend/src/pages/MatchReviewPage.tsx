@@ -63,6 +63,7 @@ export function MatchReviewPage() {
   const [rerunLoading, setRerunLoading] = useState(false)
   const [rerunMessage, setRerunMessage] = useState<string | null>(null)
   const [idModalKey, setIdModalKey] = useState<string | null>(null)
+  const [detailItem, setDetailItem] = useState<ReviewQueueItem | null>(null)
   const currentUsername = (user?.username || '').trim().toLowerCase()
   const scopedItems = includeCompleted
     ? items
@@ -315,18 +316,11 @@ export function MatchReviewPage() {
               <p className="text-sm text-text-secondary">No claimed reviews for your user.</p>
             ) : (
               <div>
-                <table className="w-full text-sm text-left table-fixed">
+                <table className="w-full text-sm text-left">
                   <thead>
                     <tr className="border-b border-border/80">
                       <th className="py-2 pr-4 font-medium text-text-primary">Entity name</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Entity key</th>
                       <th className="py-2 pr-4 font-medium text-text-primary">Decision</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Business reference</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Reason for check</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Screening user</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Screened at</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Review status</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Claimed by</th>
                       <th className="py-2 font-medium text-text-primary">Actions</th>
                     </tr>
                   </thead>
@@ -334,19 +328,15 @@ export function MatchReviewPage() {
                     {myClaimedItems.map((row) => (
                       <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
-                        <td className="py-2 pr-4 text-text-secondary">
-                          <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
-                            Show ID
-                          </Button>
-                        </td>
                         <td className="py-2 pr-4 text-text-secondary">{row.decision}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.business_reference ?? '—'}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.reason_for_check ?? '—'}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.screening_user ?? '—'}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{formatDate(row.screening_timestamp)}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.review_status}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.review_claimed_by ?? '—'}</td>
-                        <td className="py-2">{actionsCell(row)}</td>
+                        <td className="py-2 whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
+                              View details
+                            </Button>
+                            {actionsCell(row)}
+                          </div>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -367,18 +357,11 @@ export function MatchReviewPage() {
               <p className="text-sm text-text-secondary">No unclaimed queue items found.</p>
             ) : (
               <div>
-                <table className="w-full text-sm text-left table-fixed">
+                <table className="w-full text-sm text-left">
                   <thead>
                     <tr className="border-b border-border/80">
                       <th className="py-2 pr-4 font-medium text-text-primary">Entity name</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Entity key</th>
                       <th className="py-2 pr-4 font-medium text-text-primary">Decision</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Business reference</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Reason for check</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Screening user</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Screened at</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Review status</th>
-                      <th className="py-2 pr-4 font-medium text-text-primary">Claimed by</th>
                       <th className="py-2 font-medium text-text-primary">Actions</th>
                     </tr>
                   </thead>
@@ -386,32 +369,26 @@ export function MatchReviewPage() {
                     {unclaimedItems.map((row) => (
                       <tr key={row.entity_key} className="border-b border-border/70 hover:bg-muted/40">
                         <td className="py-2 pr-4 text-text-secondary">{row.entity_name}</td>
-                        <td className="py-2 pr-4 text-text-secondary">
-                          <Button type="button" variant="ghost" size="sm" onClick={() => setIdModalKey(row.entity_key)}>
-                            Show ID
-                          </Button>
-                        </td>
                         <td className="py-2 pr-4 text-text-secondary">{row.decision}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.business_reference ?? '—'}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.reason_for_check ?? '—'}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.screening_user ?? '—'}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{formatDate(row.screening_timestamp)}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.review_status}</td>
-                        <td className="py-2 pr-4 text-text-secondary">{row.review_claimed_by ?? '—'}</td>
-                        <td className="py-2">
-                          {row.review_status === 'UNREVIEWED' ? (
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              size="sm"
-                              disabled={actionLoading}
-                              onClick={() => void handleClaim(row)}
-                            >
-                              Claim
+                        <td className="py-2 whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <Button type="button" variant="ghost" size="sm" onClick={() => setDetailItem(row)}>
+                              View details
                             </Button>
-                          ) : (
-                            <span className="text-xs text-text-muted">Unavailable</span>
-                          )}
+                            {row.review_status === 'UNREVIEWED' ? (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={actionLoading}
+                                onClick={() => void handleClaim(row)}
+                              >
+                                Claim
+                              </Button>
+                            ) : (
+                              <span className="text-xs text-text-muted">Unavailable</span>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -476,6 +453,62 @@ export function MatchReviewPage() {
             </div>
             {actionError && <ErrorBox message={actionError} />}
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={detailItem !== null}
+        onClose={() => setDetailItem(null)}
+        title="Review item details"
+        footer={
+          <Button type="button" variant="secondary" onClick={() => setDetailItem(null)}>
+            Close
+          </Button>
+        }
+      >
+        {detailItem && (
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div className="sm:col-span-2">
+              <dt className="text-xs font-medium text-text-muted">Entity name</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.entity_name}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Entity key</dt>
+              <dd className="mt-0.5">
+                <Button type="button" variant="ghost" size="sm" className="h-auto p-0" onClick={() => setIdModalKey(detailItem.entity_key)}>
+                  Show ID
+                </Button>
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Decision</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.decision}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Business reference</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.business_reference ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Reason for check</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.reason_for_check ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Screening user</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.screening_user ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Screened at</dt>
+              <dd className="text-text-primary mt-0.5">{formatDate(detailItem.screening_timestamp)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Review status</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.review_status}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-medium text-text-muted">Claimed by</dt>
+              <dd className="text-text-primary mt-0.5 break-words">{detailItem.review_claimed_by ?? '—'}</dd>
+            </div>
+          </dl>
         )}
       </Modal>
 
