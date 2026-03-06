@@ -78,6 +78,7 @@ export function MatchReviewPage() {
   const [idModalKey, setIdModalKey] = useState<string | null>(null)
   const [detailItem, setDetailItem] = useState<ReviewQueueItem | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  const [unclaimedCollapsed, setUnclaimedCollapsed] = useState(true)
 
   const currentUsername = (user?.username || '').trim().toLowerCase()
   const scopedItems = items.filter((item) => item.review_status !== 'COMPLETED')
@@ -387,9 +388,21 @@ export function MatchReviewPage() {
                 {unclaimedDisplay.length}
               </span>
             </div>
-            <span className="text-[11.5px] text-[#94a3b8]">Available to claim</span>
+            <div className="flex items-center gap-3">
+              <span className="text-[11.5px] text-[#94a3b8]">Available to claim</span>
+              <button
+                type="button"
+                onClick={() => setUnclaimedCollapsed((v) => !v)}
+                className="rounded-[20px] border border-[#e2e8f0] bg-[#f8fafc] px-3 py-1 text-[11.5px] font-semibold text-[#475569] hover:bg-[#f1f5f9]"
+                aria-expanded={!unclaimedCollapsed}
+              >
+                {unclaimedCollapsed ? 'Expand' : 'Collapse'}
+              </button>
+            </div>
           </div>
-          {loading ? (
+          {unclaimedCollapsed ? (
+            <div className="px-5 py-3 text-[12.5px] text-[#64748b]">Queue is collapsed.</div>
+          ) : loading ? (
             <div className="px-5 py-4 text-sm text-text-secondary">Loading…</div>
           ) : unclaimedDisplay.length === 0 ? (
             <div className="px-5 py-4 text-sm text-text-secondary">No unclaimed queue items found.</div>
