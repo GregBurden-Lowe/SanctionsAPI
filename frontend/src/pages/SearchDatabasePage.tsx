@@ -10,7 +10,7 @@ import {
   ErrorBox,
   Modal,
 } from '@/components'
-import { markFalsePositive, searchScreened } from '@/api/client'
+import { markFalsePositive, opcheck, searchScreened } from '@/api/client'
 import type { ScreenedEntity } from '@/types/api'
 import { ResultCard } from '@/pages/ScreeningPage'
 import { useAuth } from '@/context/AuthContext'
@@ -40,6 +40,11 @@ export function SearchDatabasePage() {
   const [overrideLoading, setOverrideLoading] = useState(false)
   const [overrideError, setOverrideError] = useState<string | null>(null)
   const [overrideSuccess, setOverrideSuccess] = useState<string | null>(null)
+  const [rerunDob, setRerunDob] = useState('')
+  const [rerunCountry, setRerunCountry] = useState('')
+  const [rerunLoading, setRerunLoading] = useState(false)
+  const [rerunError, setRerunError] = useState<string | null>(null)
+  const [rerunSuccess, setRerunSuccess] = useState<string | null>(null)
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -76,6 +81,9 @@ export function SearchDatabasePage() {
 
   const handleMarkFalsePositive = async () => {
     if (!detailRow) return
+    const result = detailRow.result_json ?? {}
+    const canOverride = Boolean(result['Is Sanctioned'] || result['Is PEP'])
+    if (!canOverride) return
     const confirmed = window.confirm(
       'Mark this screening result as a false positive and clear the sanction outcome?',
     )
@@ -131,6 +139,103 @@ export function SearchDatabasePage() {
       setOverrideError(err instanceof Error ? err.message : 'Failed to clear false positive.')
     } finally {
       setOverrideLoading(false)
+    }
+  }
+
+  const handleOpenDetails = (row: ScreenedEntity) => {
+    setDetailRow(row)
+    setOverrideError(null)
+    setOverrideSuccess(null)
+    setRerunError(null)
+    setRerunSuccess(null)
+    setRerunDob(row.date_of_birth ?? '')
+    setRerunCountry(row.country_input ?? '')
+  }
+
+  const handleRerunCheck = async () => {
+    if (!detailRow) return
+    const result = detailRow.result_json ?? {}
+    const canRerun = Boolean(result['Is Sanctioned'] || result['Is PEP'])
+    if (!canRerun) return
+
+    const isPerson = detailRow.entity_type === 'Person'
+    const isOrganization = detailRow.entity_type === 'Organization'
+    const dobTrim = rerunDob.trim()
+    const countryTrim = rerunCountry.trim()
+
+    if (isPerson && !dobTrim) {
+      setRerunError('Please enter date of birth before re-running.')
+      return
+    }
+    if (isOrganization && !countryTrim) {
+      setRerunError('Please enter country before re-running.')
+      return
+    }
+    if (!detailRow.business_reference?.trim()) {
+      setRerunError('Business reference is missing on this record; cannot re-run.')
+      return
+    }
+    if (!detailRow.reason_for_check?.trim()) {
+      setRerunError('Reason for check is missing on this record; cannot re-run.')
+      return
+    }
+
+    setRerunLoading(true)
+    setRerunError(null)
+    setRerunSuccess(null)
+    try {
+      const res = await opcheck({
+        name: detailRow.display_name,
+        dob: isPerson ? dobTrim : detailRow.date_of_birth || null,
+        country: isOrganization ? countryTrim : detailRow.country_input || null,
+        entity_type: detailRow.entity_type,
+        business_reference: detailRow.business_reference,
+        reason_for_check: detailRow.reason_for_check as
+          | 'Client Onboarding'
+          | 'Claim Payment'
+          | 'Business Partner Payment'
+          | 'Business Partner Due Diligence'
+          | 'Periodic Re-Screen'
+          | 'Ad-Hoc Compliance Review',
+        requestor: detailRow.last_requestor ?? null,
+        search_backend: 'postgres_beta',
+        rerun_entity_key: detailRow.entity_key,
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setRerunError((data as { detail?: string; message?: string; error?: string }).detail ?? (data as { detail?: string; message?: string; error?: string }).message ?? (data as { detail?: string; message?: string; error?: string }).error ?? 'Failed to re-run check.')
+        return
+      }
+      if ((data as { status?: string }).status === 'queued') {
+        setRerunError('Re-run was queued due to system load. Please refresh shortly.')
+        return
+      }
+
+      const nextResult = data as ScreenedEntity['result_json']
+      const nextStatus = nextResult['Check Summary']?.Status ?? detailRow.status
+      const nextRiskLevel = nextResult['Risk Level'] ?? detailRow.risk_level
+      const nextConfidence = nextResult.Confidence ?? detailRow.confidence
+      const nextScore = Number(nextResult.Score ?? detailRow.score)
+
+      const updatedRow: ScreenedEntity = {
+        ...detailRow,
+        date_of_birth: isPerson ? dobTrim : detailRow.date_of_birth,
+        country_input: isOrganization ? countryTrim : detailRow.country_input,
+        result_json: nextResult,
+        status: nextStatus,
+        risk_level: nextRiskLevel,
+        confidence: nextConfidence,
+        score: Number.isFinite(nextScore) ? nextScore : detailRow.score,
+        last_screened_at: new Date().toISOString(),
+      }
+
+      setDetailRow(updatedRow)
+      setItems((prev) => prev.map((it) => (it.entity_key === updatedRow.entity_key ? updatedRow : it)))
+      setRerunSuccess('Re-run completed and record updated.')
+    } catch (err) {
+      setRerunError(err instanceof Error ? err.message : 'Failed to re-run check.')
+    } finally {
+      setRerunLoading(false)
     }
   }
 
@@ -221,7 +326,7 @@ export function SearchDatabasePage() {
                             type="button"
                             variant="ghost"
                             size="sm"
-                            onClick={() => setDetailRow(row)}
+                            onClick={() => handleOpenDetails(row)}
                           >
                             View details
                           </Button>
@@ -248,7 +353,8 @@ export function SearchDatabasePage() {
         footer={
           detailRow ? (
             <div className="flex items-center gap-2">
-              {user?.is_admin && (
+              {user?.is_admin &&
+                Boolean(detailRow.result_json?.['Is Sanctioned'] || detailRow.result_json?.['Is PEP']) && (
                 <Button
                   variant="secondary"
                   onClick={() => void handleMarkFalsePositive()}
@@ -256,7 +362,7 @@ export function SearchDatabasePage() {
                 >
                   {overrideLoading ? 'Clearing…' : 'Mark false positive'}
                 </Button>
-              )}
+                )}
               <Button variant="secondary" onClick={() => setDetailRow(null)}>
                 Close
               </Button>
@@ -269,6 +375,44 @@ export function SearchDatabasePage() {
             {overrideError && <ErrorBox message={overrideError} />}
             {overrideSuccess && (
               <p className="text-sm text-semantic-success">{overrideSuccess}</p>
+            )}
+            {Boolean(detailRow.result_json?.['Is Sanctioned'] || detailRow.result_json?.['Is PEP']) && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>{detailRow.entity_type === 'Person' ? 'Refine with date of birth' : 'Refine with country'}</CardTitle>
+                </CardHeader>
+                <CardBody className="space-y-3">
+                  <p className="text-sm text-text-secondary">
+                    Re-run this check with additional details and keep the same entity key record.
+                  </p>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                    {detailRow.entity_type === 'Person' ? (
+                      <Input
+                        label="Date of birth"
+                        value={rerunDob}
+                        onChange={(e) => setRerunDob(e.target.value)}
+                        placeholder="DD-MM-YYYY or YYYY-MM-DD or YYYY"
+                      />
+                    ) : (
+                      <Input
+                        label="Country"
+                        value={rerunCountry}
+                        onChange={(e) => setRerunCountry(e.target.value)}
+                        placeholder="e.g. UK"
+                      />
+                    )}
+                    <Button type="button" onClick={() => void handleRerunCheck()} disabled={rerunLoading}>
+                      {rerunLoading
+                        ? 'Re-running…'
+                        : detailRow.entity_type === 'Person'
+                          ? 'Re-run with DoB'
+                          : 'Re-run with country'}
+                    </Button>
+                  </div>
+                  {rerunError && <ErrorBox message={rerunError} />}
+                  {rerunSuccess && <p className="text-sm text-semantic-success">{rerunSuccess}</p>}
+                </CardBody>
+              </Card>
             )}
             <p className="text-sm text-text-secondary">
               <span className="font-medium">Entity key</span>{' '}

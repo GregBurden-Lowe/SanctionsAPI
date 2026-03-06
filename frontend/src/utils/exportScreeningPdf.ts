@@ -125,8 +125,8 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const matchedRegime = result.Regime || '—'
   const personTypeStatus = result['Entity Type Checks']?.Person?.status || 'Not available'
   const orgTypeStatus = result['Entity Type Checks']?.Organization?.status || 'Not available'
-  const personTypeBadge = result['Entity Type Checks']?.Person?.is_match === true ? 'Cross (match)' : result['Entity Type Checks']?.Person?.is_match === false ? 'Tick (clear)' : 'Unknown'
-  const orgTypeBadge = result['Entity Type Checks']?.Organization?.is_match === true ? 'Cross (match)' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Tick (clear)' : 'Unknown'
+  const personTypeBadge = result['Entity Type Checks']?.Person?.is_match === true ? 'Match' : result['Entity Type Checks']?.Person?.is_match === false ? 'Clear' : 'Unknown'
+  const orgTypeBadge = result['Entity Type Checks']?.Organization?.is_match === true ? 'Match' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Clear' : 'Unknown'
   const pepProcess = result['PEP Check']?.checked === false
     ? `Skipped · ${result['PEP Check']?.message || 'Company-like name detected'}`
     : 'Checked'

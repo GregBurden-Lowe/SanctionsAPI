@@ -1624,6 +1624,58 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
     return _attach_entity_id(results, entity_key)
 
 
+async def _auto_complete_review_after_rerun_if_cleared(
+    *,
+    entity_key: str,
+    actor: str,
+    entity_type: str,
+    ip: Optional[str],
+) -> bool:
+    """
+    Apply the same auto-complete behavior used by review reruns when a re-screen clears.
+    This keeps review notes/status consistent even when reruns are triggered from other screens.
+    """
+    key = (entity_key or "").strip()
+    if not key:
+        return False
+    pool = await screening_db.get_pool()
+    if pool is None:
+        return False
+
+    async with pool.acquire() as conn:
+        rows = await screening_db.search_screened_entities(conn, entity_key=key, limit=1, offset=0)
+        if not rows:
+            return False
+        row = rows[0]
+        completed = await screening_db.complete_review(
+            conn,
+            entity_key=key,
+            completed_by=(actor or "unknown_user"),
+            review_outcome=ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
+            review_notes=f"Auto-resolved after re-run with additional {('DOB' if (entity_type or '').strip().lower() == 'person' else 'country')} information.",
+        )
+    if completed.get("status") != "ok":
+        return False
+
+    audit_log(
+        "review",
+        action="REVIEW_COMPLETED",
+        actor=(actor or "unknown_user"),
+        resource=key,
+        outcome="success",
+        ip=ip,
+        extra={
+            "entity_key": key,
+            "business_reference": row.get("business_reference"),
+            "reason_for_check": row.get("reason_for_check"),
+            "review_outcome": ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
+            "auto_completed": True,
+            "source": "opcheck_rerun",
+        },
+    )
+    return True
+
+
 @app.post("/opcheck")
 @limiter.limit("60/minute")
 async def check_opensanctions(request: Request, data: OpCheckRequest, payload: dict = Depends(get_current_user)):
@@ -1646,6 +1698,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest, payload: d
         status_code = 200
         decision = "Unknown"
         entity_key = None
+        auto_review_completed = False
         payload = out if isinstance(out, dict) else None
         if isinstance(out, JSONResponse):
             status_code = out.status_code
@@ -1663,6 +1716,17 @@ async def check_opensanctions(request: Request, data: OpCheckRequest, payload: d
                 or "Unknown"
             )
             entity_key = payload.get("entity_key")
+            decision_lower = str(decision).strip().lower()
+            rerun_cleared = decision_lower.startswith("cleared") or (
+                payload.get("Is Sanctioned") is False and payload.get("Is PEP") is False
+            )
+            if data.rerun_entity_key and status_code < 400 and rerun_cleared:
+                auto_review_completed = await _auto_complete_review_after_rerun_if_cleared(
+                    entity_key=str(entity_key or data.rerun_entity_key),
+                    actor=str(actor or "unknown_user"),
+                    entity_type=str(data.entity_type or "Person"),
+                    ip=_client_ip(request),
+                )
         audit_log(
             "screening",
             action="screening_completed",
@@ -1676,6 +1740,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest, payload: d
                 "entity_key": entity_key,
                 "business_reference": data.business_reference,
                 "reason_for_check": data.reason_for_check,
+                "review_auto_completed": auto_review_completed,
             },
         )
         return out
@@ -1714,6 +1779,7 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
         status_code = 200
         decision = "Unknown"
         entity_key = None
+        auto_review_completed = False
         payload = out if isinstance(out, dict) else None
         if isinstance(out, JSONResponse):
             status_code = out.status_code
@@ -1731,6 +1797,17 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
                 or "Unknown"
             )
             entity_key = payload.get("entity_key")
+            decision_lower = str(decision).strip().lower()
+            rerun_cleared = decision_lower.startswith("cleared") or (
+                payload.get("Is Sanctioned") is False and payload.get("Is PEP") is False
+            )
+            if data.rerun_entity_key and status_code < 400 and rerun_cleared:
+                auto_review_completed = await _auto_complete_review_after_rerun_if_cleared(
+                    entity_key=str(entity_key or data.rerun_entity_key),
+                    actor=str(actor or "unknown_user"),
+                    entity_type=str(data.entity_type or "Person"),
+                    ip=_client_ip(request),
+                )
         audit_log(
             "screening",
             action="screening_completed",
@@ -1744,6 +1821,7 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
                 "entity_key": entity_key,
                 "business_reference": data.business_reference,
                 "reason_for_check": data.reason_for_check,
+                "review_auto_completed": auto_review_completed,
             },
         )
         return out

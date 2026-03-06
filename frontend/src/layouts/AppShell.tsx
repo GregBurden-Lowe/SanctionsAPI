@@ -1,6 +1,18 @@
 import { Outlet } from 'react-router-dom'
 import { NavItem, Button } from '@/components'
 import { useAuth } from '@/context/AuthContext'
+import {
+  BiBuildingHouse,
+  BiGridAlt,
+  BiHomeAlt,
+  BiKey,
+  BiListUl,
+  BiSearch,
+  BiShieldAlt2,
+  BiUpload,
+  BiUser,
+  BiCog,
+} from 'react-icons/bi'
 
 /** layout.containers.AppShell + Sidebar + Main from design.json */
 const appShellClass = 'min-h-screen bg-app text-text-primary'
@@ -9,132 +21,49 @@ const sidebarClass =
 const mainClass = 'ml-72 min-h-screen flex flex-col'
 const topBarClass = 'h-20 px-10 flex items-center justify-between gap-6'
 
-function HomeIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-    </svg>
-  )
-}
-
-function DashboardIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 13h7V3H3v10zm0 8h7v-6H3v6zm11 0h7V11h-7v10zm0-18v6h7V3h-7z" />
-    </svg>
-  )
-}
-
-function SettingsIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-    </svg>
-  )
-}
-
-function SearchIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-    </svg>
-  )
-}
-
-function ReviewIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-    </svg>
-  )
-}
-
-function BuildingIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 21h18M5 21V7l7-4 7 4v14M9 9h1m-1 4h1m-1 4h1m4-8h1m-1 4h1m-1 4h1" />
-    </svg>
-  )
-}
-
-function UsersIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-    </svg>
-  )
-}
-
-function UploadIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 16V4m0 0l-4 4m4-4l4 4" />
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-    </svg>
-  )
-}
-
-function QueueIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 6h13M8 12h13M8 18h13" />
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 6h.01M3 12h.01M3 18h.01" />
-    </svg>
-  )
-}
-
-function KeyIcon() {
-  return (
-    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a5 5 0 11-9.9 1H2v2h2v2h2v2h3l1.3-1.3A5 5 0 0115 7z" />
-    </svg>
-  )
-}
-
 export function AppShell() {
   const { user, logout, loginRequired } = useAuth()
   return (
     <div className={appShellClass}>
       <aside className={sidebarClass}>
         <nav className="flex flex-col gap-1 mt-1" aria-label="Primary">
-          <NavItem to="/dashboard" icon={<DashboardIcon />}>
+          <NavItem to="/dashboard" icon={<BiGridAlt className="h-5 w-5" />}>
             Dashboard
           </NavItem>
-          <NavItem to="/" icon={<HomeIcon />}>
+          <NavItem to="/" icon={<BiHomeAlt className="h-5 w-5" />}>
             Screening
           </NavItem>
-          <NavItem to="/search" icon={<SearchIcon />}>
+          <NavItem to="/search" icon={<BiSearch className="h-5 w-5" />}>
             Search database
           </NavItem>
-          <NavItem to="/review" icon={<ReviewIcon />}>
+          <NavItem to="/review" icon={<BiShieldAlt2 className="h-5 w-5" />}>
             Match review
           </NavItem>
-          <NavItem to="/companies-house" icon={<BuildingIcon />}>
+          <NavItem to="/companies-house" icon={<BiBuildingHouse className="h-5 w-5" />}>
             Companies House
           </NavItem>
           {(!loginRequired || user?.is_admin) && (
-            <NavItem to="/admin" icon={<SettingsIcon />}>
+            <NavItem to="/admin" icon={<BiCog className="h-5 w-5" />}>
               Admin
             </NavItem>
           )}
           {user?.is_admin && (
-            <NavItem to="/admin/users" icon={<UsersIcon />}>
+            <NavItem to="/admin/users" icon={<BiUser className="h-5 w-5" />}>
               Users
             </NavItem>
           )}
           {user?.is_admin && (
-            <NavItem to="/admin/bulk-screening" icon={<UploadIcon />}>
+            <NavItem to="/admin/bulk-screening" icon={<BiUpload className="h-5 w-5" />}>
               Bulk screening
             </NavItem>
           )}
           {user?.is_admin && (
-            <NavItem to="/admin/jobs" icon={<QueueIcon />}>
+            <NavItem to="/admin/jobs" icon={<BiListUl className="h-5 w-5" />}>
               Screening jobs
             </NavItem>
           )}
           {user?.is_admin && (
-            <NavItem to="/admin/api-keys" icon={<KeyIcon />}>
+            <NavItem to="/admin/api-keys" icon={<BiKey className="h-5 w-5" />}>
               API keys
             </NavItem>
           )}

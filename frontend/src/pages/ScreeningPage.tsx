@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import type { IconType } from 'react-icons'
+import { BiCheckCircle, BiQuestionMark, BiXCircle } from 'react-icons/bi'
 import {
   Button,
   Input,
@@ -323,7 +325,8 @@ export function ScreeningResultPage() {
   const [rerunError, setRerunError] = useState<string | null>(null)
   const personRerunEnabled = searchDetails.entityType === 'Person'
   const organizationRerunEnabled = searchDetails.entityType === 'Organization'
-  const rerunEnabled = personRerunEnabled || organizationRerunEnabled
+  const hasAdverseOutcome = Boolean(result['Is Sanctioned'] || result['Is PEP'])
+  const rerunEnabled = (personRerunEnabled || organizationRerunEnabled) && hasAdverseOutcome
 
   const handleRerunWithDob = async () => {
     const dobTrim = rerunDob.trim()
@@ -547,10 +550,16 @@ export function ResultCard({
           : 'Person list result unavailable',
       badge:
         result['Entity Type Checks']?.Person?.is_match === true
-          ? 'Cross (match)'
+          ? 'Match'
           : result['Entity Type Checks']?.Person?.is_match === false
-            ? 'Tick (clear)'
+            ? 'Clear'
             : 'Unknown',
+      icon:
+        result['Entity Type Checks']?.Person?.is_match === true
+          ? BiXCircle
+          : result['Entity Type Checks']?.Person?.is_match === false
+            ? BiCheckCircle
+            : BiQuestionMark,
       tone:
         result['Entity Type Checks']?.Person?.is_match === true
           ? 'warn'
@@ -566,10 +575,16 @@ export function ResultCard({
           : 'Organisation list result unavailable',
       badge:
         result['Entity Type Checks']?.Organization?.is_match === true
-          ? 'Cross (match)'
+          ? 'Match'
           : result['Entity Type Checks']?.Organization?.is_match === false
-            ? 'Tick (clear)'
+            ? 'Clear'
             : 'Unknown',
+      icon:
+        result['Entity Type Checks']?.Organization?.is_match === true
+          ? BiXCircle
+          : result['Entity Type Checks']?.Organization?.is_match === false
+            ? BiCheckCircle
+            : BiQuestionMark,
       tone:
         result['Entity Type Checks']?.Organization?.is_match === true
           ? 'warn'
@@ -587,6 +602,10 @@ export function ResultCard({
         result['PEP Check']?.checked === false
           ? 'Skipped'
           : 'Checked',
+      icon:
+        result['PEP Check']?.checked === false
+          ? BiQuestionMark
+          : BiCheckCircle,
       tone:
         result['PEP Check']?.checked === false
           ? 'neutral'
@@ -596,27 +615,37 @@ export function ResultCard({
       title: 'Sanctions status',
       subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : 'No sanctions match detected',
       badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',
+      icon: result['Is Sanctioned'] ? BiXCircle : BiCheckCircle,
       tone: result['Is Sanctioned'] ? 'warn' : 'ok',
     },
     {
       title: 'PEP status',
       subtitle: result['Is PEP'] ? 'Politically Exposed Person indicator found' : 'No PEP indicator found',
       badge: result['Is PEP'] ? 'Monitor' : 'Clear',
+      icon: result['Is PEP'] ? BiQuestionMark : BiCheckCircle,
       tone: result['Is PEP'] ? 'warn' : 'ok',
     },
     {
       title: 'Confidence',
       subtitle: `Engine confidence: ${result.Confidence}`,
       badge: String(result.Score),
+      icon: BiQuestionMark,
       tone: 'neutral',
     },
     {
       title: 'Source coverage',
       subtitle: sourceSummaryLines.join(' · '),
       badge: sourceList.length > 0 ? `${sourceList.length} source${sourceList.length > 1 ? 's' : ''}` : 'No sources',
+      icon: BiQuestionMark,
       tone: 'neutral',
     },
-  ] as const
+  ] as const satisfies ReadonlyArray<{
+    title: string
+    subtitle: string
+    badge: string
+    icon: IconType
+    tone: 'ok' | 'warn' | 'neutral'
+  }>
 
   const handleDownloadPdf = async () => {
     setPdfError(null)
@@ -776,7 +805,7 @@ export function ResultCard({
                     <p className="text-xs text-text-secondary mt-0.5">{row.subtitle}</p>
                   </div>
                   <span
-                    className={`shrink-0 rounded-md px-2 py-1 text-xs font-semibold ${
+                    className={`shrink-0 rounded-md px-2 py-1 text-xs font-semibold inline-flex items-center gap-1 ${
                       row.tone === 'ok'
                         ? 'bg-semantic-success/15 text-semantic-success'
                         : row.tone === 'warn'
@@ -784,6 +813,7 @@ export function ResultCard({
                           : 'bg-surface text-text-secondary border border-border'
                     }`}
                   >
+                    <row.icon className="h-4 w-4" aria-hidden />
                     {row.badge}
                   </span>
                 </div>
