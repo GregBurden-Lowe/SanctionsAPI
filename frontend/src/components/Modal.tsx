@@ -35,7 +35,6 @@ export function Modal({ isOpen, onClose, title, children, footer, size = 'defaul
   return (
     <div
       className={overlayClass}
-      onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-labelledby="modal-title"
