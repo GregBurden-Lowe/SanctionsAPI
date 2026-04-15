@@ -1,9 +1,9 @@
 import { useEffect } from 'react'
 
 /** design.json Modal: overlay, panel, header, title, body, footer */
-const overlayClass = 'fixed inset-0 bg-black/35'
+const overlayClass = 'fixed inset-0 z-50 overflow-y-auto bg-black/35 p-4 sm:p-6'
 const panelBaseClass =
-  'fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-[13px] border border-[#e2e8f0] bg-surface p-5 shadow-none max-h-[calc(100vh-2rem)] overflow-y-auto'
+  'relative mx-auto my-4 rounded-[13px] border border-[#e2e8f0] bg-surface p-5 shadow-none max-h-[calc(100vh-2rem)] overflow-y-auto sm:my-8'
 const panelDefaultClass = 'w-[min(560px,calc(100%-2rem))]'
 const panelWideClass = 'w-[min(1120px,calc(100%-2rem))]'
 const headerClass = 'mb-4 flex items-center justify-between'

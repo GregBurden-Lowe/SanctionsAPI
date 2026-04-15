@@ -970,7 +970,9 @@ async def list_review_queue(
             last_requestor AS screening_user,
             last_screened_at AS screening_timestamp,
             COALESCE(review_status, 'UNREVIEWED') AS review_status,
-            review_claimed_by
+            review_claimed_by,
+            result_json->'Input Classification'->>'inferred_as' AS inferred_entity_type,
+            COALESCE((result_json->'Input Classification'->>'likely_misclassified')::boolean, FALSE) AS likely_misclassified
         FROM screened_entities
         {where_sql}
         ORDER BY last_screened_at DESC

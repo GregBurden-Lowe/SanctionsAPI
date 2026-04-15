@@ -98,6 +98,12 @@ from utils import (
     derive_entity_key,
     derive_entity_key_variants,
     _normalize_text,
+    detect_company_likeness,
+    build_input_classification,
+    get_matching_config,
+    save_matching_config,
+    get_effective_org_generic_tokens,
+    get_protected_org_legal_suffixes,
     DATA_DIR,
 )
 import screening_db
@@ -421,6 +427,10 @@ class ReviewRerunRequest(BaseModel):
     dob: Optional[str] = Field(None, description="Date of birth for person rerun")
     country: Optional[constr(strip_whitespace=True, min_length=1)] = Field(None, description="Country for organization rerun")
     entity_type: Optional[Literal["Person", "Organization"]] = Field(None, description="Optional override for rerun entity type")
+
+
+class MatchingConfigUpdateRequest(BaseModel):
+    custom_generic_words: List[str] = Field(default_factory=list, description="Additional generic organization words to exclude from strong matching")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -1202,6 +1212,57 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
     return app.openapi()
 
 
+@app.get("/admin/matching-config", dependencies=[Depends(require_admin)])
+@limiter.limit("30/minute")
+async def admin_get_matching_config(request: Request, payload: dict = Depends(require_admin)):
+    cfg = get_matching_config()
+    custom_generic_words = sorted(cfg.get("custom_generic_words") or [])
+    effective_generic_words = sorted(get_effective_org_generic_tokens())
+    default_generic_words = sorted(set(effective_generic_words) - set(custom_generic_words))
+    audit_log(
+        "admin",
+        action="matching_config_view",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"custom_word_count": len(custom_generic_words)},
+    )
+    return {
+        "protected_legal_suffixes": sorted(get_protected_org_legal_suffixes()),
+        "default_generic_words": default_generic_words,
+        "custom_generic_words": custom_generic_words,
+        "effective_generic_words": effective_generic_words,
+    }
+
+
+@app.put("/admin/matching-config", dependencies=[Depends(require_admin)])
+@limiter.limit("10/minute")
+async def admin_update_matching_config(
+    request: Request,
+    body: MatchingConfigUpdateRequest,
+    payload: dict = Depends(require_admin),
+):
+    saved = save_matching_config(custom_generic_words=body.custom_generic_words)
+    custom_generic_words = sorted(saved.get("custom_generic_words") or [])
+    effective_generic_words = sorted(get_effective_org_generic_tokens())
+    default_generic_words = sorted(set(effective_generic_words) - set(custom_generic_words))
+    audit_log(
+        "admin",
+        action="matching_config_update",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"custom_word_count": len(custom_generic_words)},
+    )
+    return {
+        "status": "ok",
+        "protected_legal_suffixes": sorted(get_protected_org_legal_suffixes()),
+        "default_generic_words": default_generic_words,
+        "custom_generic_words": custom_generic_words,
+        "effective_generic_words": effective_generic_words,
+    }
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/dataverse")
 @app.options("/opcheck/screened")
@@ -1223,6 +1284,7 @@ async def admin_openapi_schema(request: Request, payload: dict = Depends(require
 @app.options("/auth/api-keys/{api_key_id}")
 @app.options("/admin/testing/clear-screening-data")
 @app.options("/admin/screening/jobs/bulk")
+@app.options("/admin/matching-config")
 @app.options("/admin/screening/jobs")
 @app.options("/admin/screening/false-positive")
 @app.options("/admin/screening/rescreen-summary")
@@ -1264,6 +1326,8 @@ def _run_check_sync(data: OpCheckRequest):
     merged = _merge_dual_type_results(
         person_result,
         organization_result,
+        name=name,
+        submitted_entity_type=entity_type,
         pep_checked=pep_enabled,
         pep_skip_reason=pep_skip_reason,
     )
@@ -1315,21 +1379,15 @@ def _status_for_type_check(result: dict) -> str:
 
 
 def _looks_like_company_name(name: str) -> bool:
-    normalized = _normalize_text(name or "")
-    if not normalized:
-        return False
-    tokens = set(normalized.split())
-    org_markers = {
-        "ltd", "limited", "llp", "plc", "inc", "corp", "co", "company", "holdings",
-        "group", "gmbh", "sa", "bv", "pte", "pty", "sarl", "partners",
-    }
-    return any(marker in tokens for marker in org_markers)
+    return bool(detect_company_likeness(name).get("looks_like_company"))
 
 
 def _merge_dual_type_results(
     person_result: dict,
     organization_result: dict,
     *,
+    name: str,
+    submitted_entity_type: str,
     pep_checked: bool,
     pep_skip_reason: Optional[str] = None,
 ) -> dict:
@@ -1369,6 +1427,13 @@ def _merge_dual_type_results(
             else "PEP screening executed."
         ),
     }
+    merged["Input Classification"] = build_input_classification(
+        name=name,
+        submitted_as=submitted_entity_type,
+        person_result=person_result,
+        organization_result=organization_result,
+        pep_checked=pep_checked,
+    )
     return merged
 
 
@@ -1409,6 +1474,8 @@ async def _run_postgres_dual_check(
     merged = _merge_dual_type_results(
         person_result,
         organization_result,
+        name=name,
+        submitted_entity_type=entity_type,
         pep_checked=pep_enabled,
         pep_skip_reason=pep_skip_reason,
     )
@@ -1623,6 +1690,8 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
     results = _merge_dual_type_results(
         person_result,
         organization_result,
+        name=name,
+        submitted_entity_type=entity_type,
         pep_checked=pep_enabled,
         pep_skip_reason=pep_skip_reason,
     )
@@ -2086,12 +2155,13 @@ async def rerun_review(
         raise HTTPException(status_code=404, detail="Entity not found")
 
     row = rows[0]
+    original_entity_type = str(row.get("entity_type") or "Person").strip() or "Person"
     if (row.get("review_status") or "").upper() != "IN_REVIEW":
         raise HTTPException(status_code=409, detail="Only IN_REVIEW matches can be re-run")
     if (row.get("review_claimed_by") or "").strip().lower() != actor.lower():
         raise HTTPException(status_code=403, detail="Only the claiming user can re-run this review")
 
-    entity_type = (body.entity_type or str(row.get("entity_type") or "Person")).strip() or "Person"
+    entity_type = (body.entity_type or original_entity_type).strip() or "Person"
     type_norm = entity_type.strip().lower()
     rerun_dob = (body.dob.strip() if isinstance(body.dob, str) else body.dob) or None
     rerun_country = (body.country.strip() if isinstance(body.country, str) else body.country) or None
@@ -2110,7 +2180,9 @@ async def rerun_review(
         extra={
             "business_reference": row.get("business_reference"),
             "reason_for_check": row.get("reason_for_check"),
+            "original_entity_type": original_entity_type,
             "entity_type": entity_type,
+            "type_corrected": entity_type != original_entity_type,
         },
     )
 
@@ -2151,7 +2223,10 @@ async def rerun_review(
                 entity_key=key,
                 completed_by=actor,
                 review_outcome=ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
-                review_notes=f"Auto-resolved after re-run with additional {('DOB' if type_norm == 'person' else 'country')} information.",
+                review_notes=(
+                    f"Auto-resolved after re-run with additional {('DOB' if type_norm == 'person' else 'country')} "
+                    f"information{' and entity type correction' if entity_type != original_entity_type else ''}."
+                ),
             )
         if completed.get("status") == "ok":
             auto_completed = True
@@ -2183,6 +2258,9 @@ async def rerun_review(
             "entity_key": key,
             "decision": decision,
             "auto_completed": auto_completed,
+            "original_entity_type": original_entity_type,
+            "corrected_entity_type": entity_type,
+            "type_corrected": entity_type != original_entity_type,
             "business_reference": row.get("business_reference"),
             "reason_for_check": row.get("reason_for_check"),
         },
@@ -2192,6 +2270,9 @@ async def rerun_review(
         "entity_key": key,
         "decision": decision,
         "auto_completed": auto_completed,
+        "original_entity_type": original_entity_type,
+        "corrected_entity_type": entity_type,
+        "type_corrected": entity_type != original_entity_type,
         "result": rerun_payload,
         "review_item": completed_item,
     }

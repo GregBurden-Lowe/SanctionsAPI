@@ -73,6 +73,13 @@ export interface OpCheckResponse {
     reason?: string | null
     message?: string
   };
+  'Input Classification'?: {
+    submitted_as?: string
+    inferred_as?: string
+    likely_misclassified?: boolean
+    confidence?: string
+    signals?: string[]
+  };
   entity_key?: string;
 }
 
@@ -119,6 +126,8 @@ export interface ReviewQueueItem {
   screening_timestamp: string | null
   review_status: ReviewStatus
   review_claimed_by: string | null
+  inferred_entity_type?: string | null
+  likely_misclassified?: boolean
 }
 
 export interface RefreshRequest {

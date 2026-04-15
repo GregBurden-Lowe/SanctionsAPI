@@ -225,10 +225,13 @@ export function MatchReviewPage() {
         setActionError(data.detail ?? 'Re-run failed.')
         return
       }
+      const correctionMessage = data.type_corrected
+        ? ` Stored type updated from ${data.original_entity_type ?? rerunTarget.entity_type} to ${data.corrected_entity_type ?? rerunEntityType}.`
+        : ''
       setRerunMessage(
         data.auto_completed
-          ? `Re-run decision: ${data.decision ?? 'Unknown'}. Match was auto-completed as reviewed.`
-          : `Re-run decision: ${data.decision ?? 'Unknown'}.`,
+          ? `Re-run decision: ${data.decision ?? 'Unknown'}.${correctionMessage} Match was auto-completed as reviewed.`
+          : `Re-run decision: ${data.decision ?? 'Unknown'}.${correctionMessage}`,
       )
       await load()
     } catch (err) {
@@ -539,6 +542,10 @@ export function MatchReviewPage() {
               <dd className="text-text-primary mt-0.5">{detailItem.decision}</dd>
             </div>
             <div>
+              <dt className="text-xs font-medium text-text-muted">Engine inferred type</dt>
+              <dd className="text-text-primary mt-0.5">{detailItem.inferred_entity_type ?? '—'}</dd>
+            </div>
+            <div>
               <dt className="text-xs font-medium text-text-muted">Business reference</dt>
               <dd className="text-text-primary mt-0.5">{detailItem.business_reference ?? '—'}</dd>
             </div>
@@ -569,7 +576,7 @@ export function MatchReviewPage() {
       <Modal
         isOpen={rerunTarget !== null}
         onClose={() => setRerunTarget(null)}
-        title="Re-run check"
+        title="Correct Type And Re-Run"
         footer={
           <div className="flex items-center gap-2">
             <Button type="button" variant="secondary" onClick={() => setRerunTarget(null)} disabled={rerunLoading}>
@@ -588,9 +595,18 @@ export function MatchReviewPage() {
               {' · '}
               <span className="font-medium">Current Type:</span> {rerunTarget.entity_type}
             </p>
+            {rerunTarget.inferred_entity_type && rerunTarget.inferred_entity_type !== rerunTarget.entity_type && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                <span className="font-medium">Engine inference:</span> This name looks more like an{' '}
+                {rerunTarget.inferred_entity_type === 'Organization' ? 'organisation' : 'person'} than the stored type.
+              </div>
+            )}
+            <p className="text-sm text-text-secondary">
+              Changing the type here updates the stored review item and re-runs the search using the same record.
+            </p>
             <div>
               <label htmlFor="rerun-entity-type" className="block text-xs font-medium text-text-primary mb-1">
-                Entity type for re-run
+                Corrected entity type
               </label>
               <select
                 id="rerun-entity-type"
@@ -604,14 +620,14 @@ export function MatchReviewPage() {
             </div>
             {rerunEntityType === 'Person' ? (
               <Input
-                label="Date of birth"
+                label="Date of birth for corrected person check"
                 value={rerunDob}
                 onChange={(e) => setRerunDob(e.target.value)}
                 placeholder="DD-MM-YYYY or YYYY-MM-DD"
               />
             ) : (
               <Input
-                label="Country"
+                label="Country for corrected organisation check"
                 value={rerunCountry}
                 onChange={(e) => setRerunCountry(e.target.value)}
                 placeholder="e.g. UK, United Kingdom, USA, United States"

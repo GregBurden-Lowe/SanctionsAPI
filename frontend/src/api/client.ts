@@ -154,6 +154,29 @@ export async function getAdminOpenApiSchema(): Promise<Response> {
   })
 }
 
+export interface MatchingConfigResponse {
+  protected_legal_suffixes: string[]
+  default_generic_words: string[]
+  custom_generic_words: string[]
+  effective_generic_words: string[]
+  status?: 'ok'
+}
+
+export async function getMatchingConfig(): Promise<Response> {
+  return authFetch(resolve('/admin/matching-config'), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function updateMatchingConfig(customGenericWords: string[]): Promise<Response> {
+  return authFetch(resolve('/admin/matching-config'), {
+    method: 'PUT',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ custom_generic_words: customGenericWords }),
+  })
+}
+
 export async function getDashboardSummary(): Promise<Response> {
   return authFetch(resolve('/dashboard/summary'), {
     method: 'GET',
@@ -351,6 +374,9 @@ export interface ReviewRerunResponse {
   entity_key: string
   decision: string
   auto_completed: boolean
+  original_entity_type?: string
+  corrected_entity_type?: string
+  type_corrected?: boolean
   result: OpCheckResponse
 }
 

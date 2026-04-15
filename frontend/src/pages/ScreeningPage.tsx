@@ -533,6 +533,7 @@ export function ResultCard({
   const [showSourcesModal, setShowSourcesModal] = useState(false)
   const [pdfError, setPdfError] = useState<string | null>(null)
   const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch)
+  const inputClassification = result['Input Classification']
 
   const statusClasses =
     semantic === 'success'
@@ -611,6 +612,25 @@ export function ResultCard({
       tone:
         result['PEP Check']?.checked === false
           ? 'neutral'
+          : 'ok',
+    },
+    {
+      title: 'Input classification',
+      subtitle:
+        inputClassification?.likely_misclassified
+          ? `Submitted as ${inputClassification?.submitted_as ?? 'Unknown'}, but engine inference is ${inputClassification?.inferred_as ?? 'Unknown'}.`
+          : inputClassification?.signals?.[0] || 'No entity-type mismatch indicators detected.',
+      badge:
+        inputClassification?.likely_misclassified
+          ? 'Check type'
+          : inputClassification?.inferred_as ?? 'Aligned',
+      icon:
+        inputClassification?.likely_misclassified
+          ? BiQuestionMark
+          : BiCheckCircle,
+      tone:
+        inputClassification?.likely_misclassified
+          ? 'warn'
           : 'ok',
     },
     {

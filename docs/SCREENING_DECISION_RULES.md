@@ -47,6 +47,10 @@ Business outcome rules are intentionally aligned across both backends.
 ## 3.2 Name similarity
 
 - Core similarity uses fuzzy token-set matching (`rapidfuzz`).
+- Organization matching applies additional organization-specific heuristics:
+- generic legal and business/domain words (for example `ltd`, `limited`, `company`, `partners`, `property`, `management`, `services`) are discounted
+- strong organization matches normally require at least one shared distinctive token after generic-word cleanup
+- token order and extra distinctive unmatched tokens can reduce organization scores
 - Thresholds:
 - Decision matching threshold: `75`
 - Suggestions threshold (non-decision): `60`
@@ -66,6 +70,22 @@ Business outcome rules are intentionally aligned across both backends.
 - `Top Matches` are suggestions only.
 - They do not change risk level or final decision.
 - They ignore strict DOB rejection used in the final decision path.
+- For organization-style names, suggestions still rank down candidates that only overlap on generic business/domain words.
+
+## 3.5 Input classification
+
+- The app evaluates whether an input looks more like a `Person` or an `Organization`, even if the submitted `entity_type` says `Person`.
+- Classification is advisory only and does not by itself block screening.
+- Optional response metadata may include:
+- `submitted_as`
+- `inferred_as`
+- `likely_misclassified`
+- `confidence`
+- `signals`
+- Example signals include:
+- organization markers in the query
+- organization result materially stronger than person result
+- PEP skipped because the input looked company-like
 
 ## 4. Decision Precedence and Outcomes
 
@@ -114,6 +134,7 @@ This is what "under current rules" refers to.
 - Name-based fuzzy matching can produce duplicate logical searches for variants/typos unless a separate dedupe policy is applied at persistence level.
 - If DOB is omitted, more false positives are possible; if DOB is provided, matches become stricter.
 - Decision logic is deterministic but not identity-proofing; analyst review remains required for adverse outcomes.
+- Review-stage reruns can permanently correct the stored entity type on the same screening record; this preserves the original search record while updating the canonical review-time type used for future display and follow-up.
 
 ## 7. Code References
 

@@ -22,6 +22,7 @@ from rapidfuzz import fuzz
 
 DATA_DIR = "data"
 OSN_PARQUET = os.path.join(DATA_DIR, "opensanctions.parquet")
+MATCHING_CONFIG_PATH = os.path.join(DATA_DIR, "matching_config.json")
 
 # Latest consolidated dumps
 CONSOLIDATED_SANCTIONS_URL = (
@@ -70,6 +71,19 @@ _ORG_SUFFIX_STOPWORDS = frozenset({
     "sarl", "pte", "pty", "holdings", "holding", "group",
 })
 
+_ORG_LEGAL_SUFFIXES = frozenset({
+    "ltd", "limited", "llp", "llc", "inc", "corp", "co", "company", "plc", "doo", "sa", "ag", "gmbh",
+    "bv", "sarl", "pte", "pty",
+})
+
+_ORG_GENERIC_TOKENS_DEFAULT = frozenset({
+    "partners", "partner", "group", "holding", "holdings", "services", "solutions", "international", "global",
+    "property", "management", "real", "estate", "move",
+})
+
+_ORG_CONNECTOR_TOKENS = frozenset({"and", "the", "of"})
+_MATCHING_CONFIG_CACHE: Dict[str, Any] = {"mtime": None, "data": None}
+
 # Country alias normalization to avoid false clears when users enter short forms
 # (e.g., UK vs United Kingdom, USA vs United States).
 _COUNTRY_ALIAS_RAW: Dict[str, Tuple[str, ...]] = {
@@ -106,6 +120,94 @@ def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("utf-8")
     s = re.sub(r"[^\w\s]", "", s)
     return re.sub(r"\s+", " ", s).lower().strip()
+
+
+def _normalize_word_list(words: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for word in words:
+        normalized = _normalize_text(str(word or ""))
+        if not normalized or " " in normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _default_matching_config() -> Dict[str, Any]:
+    return {
+        "custom_generic_words": [],
+    }
+
+
+def get_matching_config() -> Dict[str, Any]:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        mtime = os.path.getmtime(MATCHING_CONFIG_PATH) if os.path.exists(MATCHING_CONFIG_PATH) else None
+    except OSError:
+        mtime = None
+    if _MATCHING_CONFIG_CACHE["data"] is not None and _MATCHING_CONFIG_CACHE["mtime"] == mtime:
+        return dict(_MATCHING_CONFIG_CACHE["data"])
+
+    data = _default_matching_config()
+    if os.path.exists(MATCHING_CONFIG_PATH):
+        try:
+            with open(MATCHING_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                data["custom_generic_words"] = _normalize_word_list(list(raw.get("custom_generic_words") or []))
+        except Exception:
+            pass
+    _MATCHING_CONFIG_CACHE["mtime"] = mtime
+    _MATCHING_CONFIG_CACHE["data"] = dict(data)
+    return dict(data)
+
+
+def save_matching_config(*, custom_generic_words: List[str]) -> Dict[str, Any]:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    payload = {
+        "custom_generic_words": _normalize_word_list(custom_generic_words),
+    }
+    with open(MATCHING_CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=True, indent=2, sort_keys=True)
+        fh.write("\n")
+    _MATCHING_CONFIG_CACHE["mtime"] = os.path.getmtime(MATCHING_CONFIG_PATH)
+    _MATCHING_CONFIG_CACHE["data"] = dict(payload)
+    return dict(payload)
+
+
+def get_effective_org_generic_tokens() -> Set[str]:
+    cfg = get_matching_config()
+    return set(_ORG_GENERIC_TOKENS_DEFAULT) | set(cfg.get("custom_generic_words") or [])
+
+
+def get_protected_org_legal_suffixes() -> Set[str]:
+    return set(_ORG_LEGAL_SUFFIXES)
+
+
+def _org_token_profile(name: str) -> Dict[str, Any]:
+    norm = _normalize_text(name or "")
+    tokens = [t for t in norm.split() if t]
+    generic_token_set = get_effective_org_generic_tokens()
+    legal_tokens = [t for t in tokens if t in _ORG_LEGAL_SUFFIXES]
+    generic_tokens = [t for t in tokens if t in generic_token_set]
+    informative_tokens = [
+        t for t in tokens
+        if t not in _ORG_LEGAL_SUFFIXES and t not in generic_token_set and t not in _ORG_CONNECTOR_TOKENS
+    ]
+    return {
+        "normalized": norm,
+        "tokens": tokens,
+        "token_set": set(tokens),
+        "legal_tokens": legal_tokens,
+        "generic_tokens": generic_tokens,
+        "generic_set": set(legal_tokens) | set(generic_tokens),
+        "informative_tokens": informative_tokens,
+        "informative_set": set(informative_tokens),
+        "informative_clean": " ".join(informative_tokens),
+    }
 
 
 def _build_country_alias_canonical() -> Dict[str, str]:
@@ -747,6 +849,137 @@ def derive_entity_key_variants(display_name: str, entity_type: str, dob: Optiona
         return [preferred]
     return [preferred, legacy]
 
+
+def _score_person_candidate(
+    search_name: str,
+    candidate_name: str,
+    *,
+    threshold: int,
+    has_dob: bool,
+    strict_short_queries: bool,
+) -> Optional[int]:
+    def preprocess(name):
+        name = _normalize_text(name)
+        blacklist = {
+            "the", "ltd", "llc", "inc", "co", "company", "corp", "plc", "limited",
+            "real", "estate", "group", "services", "solutions", "hub", "global",
+            "trust", "association", "federation", "union", "committee", "organization",
+            "network", "centre", "center", "international", "foundation", "institute", "bank",
+        }
+        tokens = [w for w in name.split() if w and w not in blacklist]
+        return " ".join(tokens), set(tokens)
+
+    s_clean, s_tokens = preprocess(search_name)
+    c_clean, c_tokens = preprocess(candidate_name)
+    if not s_clean or not c_clean:
+        return None
+
+    effective_threshold = int(threshold)
+    if strict_short_queries and not has_dob:
+        if len(s_tokens) <= 1:
+            effective_threshold = max(effective_threshold, 88)
+        elif len(s_tokens) == 2:
+            effective_threshold = max(effective_threshold, 82)
+
+    score = int(fuzz.token_set_ratio(s_clean, c_clean))
+    if score < effective_threshold:
+        return None
+    token_union = s_tokens | c_tokens
+    overlap = len(s_tokens & c_tokens)
+    jaccard = overlap / max(1, len(token_union))
+
+    if len(s_tokens) <= 2 and s_clean == c_clean:
+        return score
+
+    min_overlap = min(2, len(s_tokens))
+    if overlap < min_overlap:
+        return None
+    if len(s_tokens) > 2 and jaccard < 0.4:
+        return None
+    if len(s_tokens) == 1 and len(c_tokens) > 5:
+        score -= 10
+    if abs(len(s_tokens) - len(c_tokens)) > 2:
+        score -= 15
+    if len(c_tokens) <= 2 and len(s_tokens) > 3:
+        score -= 20
+    if score < effective_threshold:
+        return None
+    return score
+
+
+def _score_org_candidate(
+    search_name: str,
+    candidate_name: str,
+    *,
+    threshold: int,
+    suggestions: bool,
+) -> Optional[int]:
+    query = _org_token_profile(search_name)
+    candidate = _org_token_profile(candidate_name)
+    if not query["normalized"] or not candidate["normalized"]:
+        return None
+
+    full_ratio = int(fuzz.ratio(query["normalized"], candidate["normalized"]))
+    token_set = int(fuzz.token_set_ratio(query["normalized"], candidate["normalized"]))
+    informative_query = query["informative_clean"] or query["normalized"]
+    informative_candidate = candidate["informative_clean"] or candidate["normalized"]
+    informative_set_ratio = int(fuzz.token_set_ratio(informative_query, informative_candidate))
+    informative_order_ratio = int(fuzz.ratio(informative_query, informative_candidate))
+
+    shared_informative = query["informative_set"] & candidate["informative_set"]
+    shared_generic = query["generic_set"] & candidate["generic_set"]
+    near_identical_clean = bool(
+        query["informative_clean"]
+        and candidate["informative_clean"]
+        and (
+            query["informative_clean"] == candidate["informative_clean"]
+            or informative_set_ratio >= 96
+        )
+    )
+
+    if not shared_informative and not near_identical_clean:
+        if not suggestions:
+            return None
+        if token_set < max(60, threshold):
+            return None
+
+    score = int(max(token_set, informative_set_ratio))
+    if informative_query and informative_candidate:
+        score = int(round((score * 0.55) + (full_ratio * 0.15) + (informative_order_ratio * 0.30)))
+
+    if shared_generic and len(shared_informative) <= len(shared_generic):
+        score -= 12
+    if not shared_informative:
+        score -= 24
+
+    extra_distinctive = len(query["informative_set"] - candidate["informative_set"]) + len(candidate["informative_set"] - query["informative_set"])
+    score -= min(18, extra_distinctive * 6)
+
+    if len(shared_informative) >= 2 and informative_order_ratio < 72:
+        score -= 10
+    elif len(shared_informative) >= 1 and informative_order_ratio < 55:
+        score -= 6
+
+    if (
+        len(shared_informative) == len(query["informative_set"]) == len(candidate["informative_set"])
+        and query["informative_set"] == candidate["informative_set"]
+        and query["informative_clean"] != candidate["informative_clean"]
+    ):
+        score -= 8
+
+    if suggestions:
+        if shared_informative:
+            score += 4
+        if not shared_informative and shared_generic:
+            score -= 10
+    elif not shared_informative and not near_identical_clean:
+        return None
+
+    if score < threshold:
+        return None
+    return max(0, min(100, score))
+
+
 def get_best_name_matches(
     search_name: str,
     candidates: List[str],
@@ -755,66 +988,104 @@ def get_best_name_matches(
     *,
     has_dob: bool = False,
     strict_short_queries: bool = True,
+    entity_type: str = "Person",
 ):
-    """Robust fuzzy match with simple heuristics."""
-    def preprocess(name):
-        name = _normalize_text(name)
-        blacklist = {
-            "the","ltd","llc","inc","co","company","corp","plc","limited",
-            "real","estate","group","services","solutions","hub","global",
-            "trust","association","federation","union","committee","organization",
-            "network","centre","center","international","foundation","institute","bank"
-        }
-        tokens = [w for w in name.split() if w and w not in blacklist]
-        return " ".join(tokens), set(tokens)
-
-    s_clean, s_tokens = preprocess(search_name)
-    if not s_clean:
+    """Robust fuzzy match with entity-type-specific heuristics."""
+    if not _normalize_text(search_name):
         return []
 
-    effective_threshold = int(threshold)
-    if strict_short_queries and not has_dob:
-        # Hardening: short/no-DOB queries are more ambiguous, so require stronger similarity.
-        if len(s_tokens) <= 1:
-            effective_threshold = max(effective_threshold, 88)
-        elif len(s_tokens) == 2:
-            effective_threshold = max(effective_threshold, 82)
-
-    clean_candidates = [(i, *preprocess(c)) for i, c in enumerate(candidates)]
     results = []
+    entity_type_norm = (entity_type or "Person").strip().lower()
 
-    for idx, c_clean, c_tokens in clean_candidates:
-        if not c_clean:
+    for idx, candidate in enumerate(candidates):
+        if entity_type_norm == "organization":
+            score = _score_org_candidate(
+                search_name,
+                candidate,
+                threshold=int(threshold),
+                suggestions=not strict_short_queries,
+            )
+            cleaned_name = _org_token_profile(candidate)["normalized"]
+        else:
+            score = _score_person_candidate(
+                search_name,
+                candidate,
+                threshold=int(threshold),
+                has_dob=has_dob,
+                strict_short_queries=strict_short_queries,
+            )
+            cleaned_name = _normalize_text(candidate)
+        if score is None:
             continue
-        score = fuzz.token_set_ratio(s_clean, c_clean)
-        if score < effective_threshold:
-            continue
-        token_union = s_tokens | c_tokens
-        overlap = len(s_tokens & c_tokens)
-        jaccard = overlap / max(1, len(token_union))
-
-        # exact(ish) short matches
-        if len(s_tokens) <= 2 and s_clean == c_clean:
-            results.append((c_clean, score, idx))
-            continue
-
-        # Allow short queries (e.g. "Putin") to match longer names; require overlap >= 1 for single-token search
-        min_overlap = min(2, len(s_tokens))
-        if overlap < min_overlap:
-            continue
-        if len(s_tokens) > 2 and jaccard < 0.4:
-            continue
-        if len(s_tokens) == 1 and len(c_tokens) > 5:
-            score -= 10
-        if abs(len(s_tokens) - len(c_tokens)) > 2:
-            score -= 15
-        if len(c_tokens) <= 2 and len(s_tokens) > 3:
-            score -= 20
-
-        if score >= effective_threshold:
-            results.append((c_clean, score, idx))
+        results.append((cleaned_name, score, idx))
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
+
+
+def detect_company_likeness(name: str) -> Dict[str, Any]:
+    profile = _org_token_profile(name)
+    marker_token_set = get_protected_org_legal_suffixes() | get_effective_org_generic_tokens() | {"company"}
+    marker_tokens = [t for t in profile["tokens"] if t in marker_token_set]
+    signals: List[str] = []
+    if marker_tokens:
+        signals.append(f"Organisation markers detected: {', '.join(dict.fromkeys(marker_tokens))}")
+    if len(profile["tokens"]) >= 3 and marker_tokens:
+        signals.append("Name structure looks organization-like rather than person-like")
+    inferred_as = "Organization" if marker_tokens else "Person"
+    confidence = "high" if len(set(marker_tokens)) >= 2 else "medium" if marker_tokens else "low"
+    return {
+        "looks_like_company": bool(marker_tokens),
+        "confidence": confidence,
+        "signals": signals,
+        "marker_tokens": list(dict.fromkeys(marker_tokens)),
+        "submitted_as": None,
+        "inferred_as": inferred_as,
+        "likely_misclassified": False,
+    }
+
+
+def build_input_classification(
+    *,
+    name: str,
+    submitted_as: str,
+    person_result: Optional[Dict[str, Any]] = None,
+    organization_result: Optional[Dict[str, Any]] = None,
+    pep_checked: Optional[bool] = None,
+) -> Dict[str, Any]:
+    base = detect_company_likeness(name)
+    submitted = "Organization" if str(submitted_as or "").strip().lower() == "organization" else "Person"
+    inferred = base["inferred_as"]
+    signals = list(base["signals"])
+    person_score = float((person_result or {}).get("Score") or 0)
+    org_score = float((organization_result or {}).get("Score") or 0)
+    person_match = bool((person_result or {}).get("Match Found"))
+    org_match = bool((organization_result or {}).get("Match Found"))
+
+    if org_match and (not person_match or org_score >= person_score + 8):
+        inferred = "Organization"
+        signals.append("Organisation result is materially stronger than person result")
+    elif person_match and (not org_match or person_score >= org_score + 8):
+        inferred = "Person"
+
+    if pep_checked is False and base["looks_like_company"]:
+        signals.append("PEP screening was skipped because the input looked company-like")
+
+    likely_misclassified = submitted != inferred and (
+        base["looks_like_company"] or org_match or person_match
+    )
+    confidence = base["confidence"]
+    if likely_misclassified and org_match and not person_match:
+        confidence = "high"
+    elif likely_misclassified and confidence == "low":
+        confidence = "medium"
+
+    return {
+        "submitted_as": submitted,
+        "inferred_as": inferred,
+        "likely_misclassified": bool(likely_misclassified),
+        "confidence": confidence,
+        "signals": list(dict.fromkeys(signals)),
+    }
 
 
 def _dob_matches(candidate_dob: Optional[str], query_dob: Optional[str]) -> bool:
@@ -830,7 +1101,9 @@ def _top_name_suggestions(
     df_subset: pd.DataFrame,
     search_name: str,
     limit: int = 5,
-    threshold: int = 60
+    threshold: int = 60,
+    *,
+    entity_type: str = "Person",
 ) -> List[Tuple[str, int]]:
     """
     Return up to 'limit' fuzzy suggestions [(name, score), ...] based ONLY on name similarity.
@@ -846,6 +1119,7 @@ def _top_name_suggestions(
         threshold=threshold,
         has_dob=False,
         strict_short_queries=False,
+        entity_type=entity_type,
     )
     # Deduplicate by display name, keep highest score, then take top 'limit'
     seen: Dict[str, float] = {}
@@ -907,7 +1181,7 @@ def perform_opensanctions_check(
 
     # Suggestions are based only on name similarity and do NOT affect result
     top_suggestions = _top_name_suggestions(
-        combined_for_suggestions, norm_name, limit=5, threshold=60
+        combined_for_suggestions, norm_name, limit=5, threshold=60, entity_type=entity_type
     )
 
     def parse_dob(val):
@@ -939,6 +1213,7 @@ def perform_opensanctions_check(
             threshold=threshold,
             has_dob=bool(norm_dob),
             strict_short_queries=True,
+            entity_type=entity_type,
         )
         if not matches:
             return None, None
@@ -1170,6 +1445,7 @@ async def perform_postgres_watchlist_check(
             threshold=threshold,
             has_dob=bool(norm_dob),
             strict_short_queries=True,
+            entity_type=entity_type,
         )
         if not matches:
             return None, None
@@ -1204,6 +1480,7 @@ async def perform_postgres_watchlist_check(
             threshold=60,
             has_dob=False,
             strict_short_queries=False,
+            entity_type=entity_type,
         )
         seen: Dict[str, float] = {}
         for cleaned_name, score, idx in hits:
