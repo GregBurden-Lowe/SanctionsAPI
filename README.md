@@ -211,7 +211,8 @@ Docker Compose now also starts:
 - `ai-triage-worker` for nightly out-of-hours triage runs
 
 Notes:
-- The first `docker compose up -d` can take a while because `qwen2.5:14b-instruct` must be downloaded into the persistent `ollama-data` volume.
+- Docker Compose defaults `LOCAL_LLM_MODEL` to `qwen2.5:3b-instruct`, which is a safer fit for smaller app droplets.
+- The first `docker compose up -d` can take a while because the configured Ollama model must be downloaded into the persistent `ollama-data` volume.
 - Normal screening does not depend on the model being ready; only AI triage features will show unavailable until Ollama is reachable and the model is present.
 - Admin → AI triage shows whether Ollama is reachable and whether the configured model has finished loading.
 

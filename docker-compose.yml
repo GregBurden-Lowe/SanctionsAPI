@@ -14,7 +14,7 @@ services:
       - RESEND_API_KEY=${RESEND_API_KEY}
       - RESEND_FROM=${RESEND_FROM}
       - LOCAL_LLM_BASE_URL=http://ollama:11434
-      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:3b-instruct}
       - LOCAL_LLM_TIMEOUT_SECONDS=${LOCAL_LLM_TIMEOUT_SECONDS:-90}
       - LOCAL_LLM_MAX_CONCURRENCY=${LOCAL_LLM_MAX_CONCURRENCY:-2}
     volumes:
@@ -35,7 +35,7 @@ services:
       - SCREENED_ENTITIES_RETENTION_MONTHS=${SCREENED_ENTITIES_RETENTION_MONTHS:-0}
       - SCREENING_CLEANUP_EVERY_N_LOOPS=${SCREENING_CLEANUP_EVERY_N_LOOPS:-50}
       - LOCAL_LLM_BASE_URL=http://ollama:11434
-      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:3b-instruct}
       - LOCAL_LLM_TIMEOUT_SECONDS=${LOCAL_LLM_TIMEOUT_SECONDS:-90}
       - LOCAL_LLM_MAX_CONCURRENCY=${LOCAL_LLM_MAX_CONCURRENCY:-2}
     volumes:
@@ -53,7 +53,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - LOCAL_LLM_BASE_URL=http://ollama:11434
-      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:3b-instruct}
       - LOCAL_LLM_TIMEOUT_SECONDS=${LOCAL_LLM_TIMEOUT_SECONDS:-90}
       - LOCAL_LLM_MAX_CONCURRENCY=${LOCAL_LLM_MAX_CONCURRENCY:-2}
       - AI_TRIAGE_ENABLED=${AI_TRIAGE_ENABLED:-true}
@@ -79,7 +79,7 @@ services:
     depends_on:
       - ollama
     environment:
-      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:3b-instruct}
     command:
       - sh
       - -c
