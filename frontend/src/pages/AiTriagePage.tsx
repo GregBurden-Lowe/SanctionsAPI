@@ -33,6 +33,17 @@ function RecommendationBadge({ value }: { value: string }) {
   )
 }
 
+function formatConfidencePercent(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return `${Math.round(Number(value) * 100)}%`
+}
+
+function formatConfidenceBandPercent(value: string | null | undefined): string {
+  if (!value) return '—'
+  if (value === '<0.70') return '<70%'
+  return value.replace('0.', '').replace('-', '%-') + '%'
+}
+
 export function AiTriagePage() {
   const [items, setItems] = useState<AiTriageTask[]>([])
   const [loading, setLoading] = useState(false)
@@ -205,8 +216,8 @@ export function AiTriagePage() {
                           </div>
                         </td>
                         <td className="px-3 py-3 text-text-secondary">
-                          <div>{item.ai_confidence_band ?? '—'}</div>
-                          <div className="text-xs">{item.ai_confidence_raw != null ? Number(item.ai_confidence_raw).toFixed(2) : '—'}</div>
+                          <div>{formatConfidenceBandPercent(item.ai_confidence_band)}</div>
+                          <div className="text-xs">{formatConfidencePercent(item.ai_confidence_raw)}</div>
                         </td>
                         <td className="px-3 py-3 text-text-secondary max-w-[320px]">{item.rationale_short ?? '—'}</td>
                         <td className="px-3 py-3 text-text-secondary">{formatDate(item.created_at)}</td>
@@ -302,7 +313,7 @@ export function AiTriagePage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <RecommendationBadge value={selected.effective_recommended_action} />
                   <span className="rounded-full border border-border bg-white px-3 py-1 text-xs">
-                    Confidence {selected.ai_confidence_band ?? '—'}
+                    Confidence {formatConfidenceBandPercent(selected.ai_confidence_band)}
                   </span>
                   {selected.guardrail_overridden && (
                     <span className="rounded-full border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-3 py-1 text-xs text-[#dc2626]">

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, CardHeader, CardTitle, CardBody, SectionHeader, ErrorBox } from '@/components'
 import {
+  clearAiTriageRuns,
   clearScreeningData,
   getAiTriageHealth,
   getMatchingConfig,
@@ -31,6 +32,7 @@ export function AdminPage() {
   const [aiRuns, setAiRuns] = useState<AiTriageRun[]>([])
   const [aiLoading, setAiLoading] = useState(false)
   const [aiRunning, setAiRunning] = useState(false)
+  const [aiClearingRuns, setAiClearingRuns] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
   const [aiMessage, setAiMessage] = useState<string | null>(null)
 
@@ -190,6 +192,29 @@ export function AdminPage() {
     }
   }
 
+  const handleClearAiRuns = async () => {
+    const ok = window.confirm('Clear the recent AI triage run history from this page? This does not delete AI suggestions or screening records.')
+    if (!ok) return
+    setAiClearingRuns(true)
+    setAiError(null)
+    setAiMessage(null)
+    try {
+      const res = await clearAiTriageRuns()
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setAiError((data as { detail?: string }).detail ?? 'Failed to clear AI triage run history.')
+        return
+      }
+      const deleted = (data as { deleted_count?: number }).deleted_count ?? 0
+      setAiRuns([])
+      setAiMessage(`Cleared ${deleted} AI triage run entr${deleted === 1 ? 'y' : 'ies'} from recent history.`)
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'Failed to clear AI triage run history.')
+    } finally {
+      setAiClearingRuns(false)
+    }
+  }
+
   return (
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-2xl space-y-6">
@@ -319,11 +344,14 @@ export function AdminPage() {
               Run local Ollama triage for outstanding sanctions and PEP matches. Recommendations stay advisory until a human approves them in the AI Suggestions queue.
             </p>
             <div className="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="secondary" onClick={() => void loadAiTriage()} disabled={aiLoading || aiRunning}>
+              <Button type="button" variant="secondary" onClick={() => void loadAiTriage()} disabled={aiLoading || aiRunning || aiClearingRuns}>
                 {aiLoading ? 'Refreshing…' : 'Refresh AI status'}
               </Button>
-              <Button type="button" onClick={() => void handleRunAiTriage()} disabled={aiRunning || aiLoading}>
+              <Button type="button" onClick={() => void handleRunAiTriage()} disabled={aiRunning || aiLoading || aiClearingRuns}>
                 {aiRunning ? 'Running…' : 'Run AI triage now'}
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => void handleClearAiRuns()} disabled={aiClearingRuns || aiLoading || aiRunning || aiRuns.length === 0}>
+                {aiClearingRuns ? 'Clearing…' : 'Clear recent runs'}
               </Button>
             </div>
             {aiError && <ErrorBox message={aiError} />}

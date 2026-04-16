@@ -201,6 +201,13 @@ export async function listAiTriageRuns(limit = 20): Promise<Response> {
   })
 }
 
+export async function clearAiTriageRuns(): Promise<Response> {
+  return authFetch(resolve('/admin/ai-triage/runs/clear'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+  })
+}
+
 export async function runAiTriage(limit = 25): Promise<Response> {
   return authFetch(resolve('/admin/ai-triage/run'), {
     method: 'POST',

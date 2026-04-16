@@ -798,6 +798,14 @@ async def list_ai_triage_runs(conn, *, limit: int = 20) -> List[Dict[str, Any]]:
     return [_to_json_safe(dict(r)) for r in rows]
 
 
+async def clear_ai_triage_runs(conn) -> int:
+    result = await conn.execute("DELETE FROM ai_triage_runs")
+    try:
+        return int(result.split()[-1]) if result else 0
+    except (ValueError, IndexError):
+        return 0
+
+
 async def get_latest_ai_triage_run(conn) -> Optional[Dict[str, Any]]:
     row = await conn.fetchrow(
         """

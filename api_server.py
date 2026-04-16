@@ -1326,6 +1326,25 @@ async def admin_ai_triage_runs(
     return {"items": items}
 
 
+@app.post("/admin/ai-triage/runs/clear", dependencies=[Depends(require_admin)])
+@limiter.limit("10/minute")
+async def admin_clear_ai_triage_runs(request: Request, payload: dict = Depends(require_admin)):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    async with pool.acquire() as conn:
+        deleted = await screening_db.clear_ai_triage_runs(conn)
+    audit_log(
+        "admin",
+        action="ai_triage_runs_clear",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"deleted_count": deleted},
+    )
+    return {"status": "ok", "deleted_count": deleted}
+
+
 @app.post("/admin/ai-triage/run", dependencies=[Depends(require_admin)])
 @limiter.limit("10/minute")
 async def admin_run_ai_triage(
@@ -1381,6 +1400,7 @@ async def admin_run_ai_triage(
 @app.options("/admin/matching-config")
 @app.options("/admin/ai-triage/health")
 @app.options("/admin/ai-triage/runs")
+@app.options("/admin/ai-triage/runs/clear")
 @app.options("/admin/ai-triage/run")
 @app.options("/admin/screening/jobs")
 @app.options("/admin/screening/false-positive")
