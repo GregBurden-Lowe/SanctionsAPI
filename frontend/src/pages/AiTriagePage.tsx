@@ -41,7 +41,15 @@ function formatConfidencePercent(value: number | null | undefined): string {
 function formatConfidenceBandPercent(value: string | null | undefined): string {
   if (!value) return '—'
   if (value === '<0.70') return '<70%'
-  return value.replace('0.', '').replace('-', '%-') + '%'
+  const rangeMatch = value.match(/^0\.(\d+)-0\.(\d+)$/)
+  if (rangeMatch) {
+    return `${rangeMatch[1]}%-${rangeMatch[2]}%`
+  }
+  const plusMatch = value.match(/^0\.(\d+)\+$/)
+  if (plusMatch) {
+    return `${plusMatch[1]}%+`
+  }
+  return value
 }
 
 export function AiTriagePage() {
