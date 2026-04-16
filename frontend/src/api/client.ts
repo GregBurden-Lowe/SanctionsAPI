@@ -5,7 +5,15 @@
  */
 
 import { clearStoredAuth, getStoredToken } from '@/context/AuthContext'
-import type { OpCheckResponse, ReviewOutcome, ReviewQueueItem, ReviewStatus } from '@/types/api'
+import type {
+  AiTriageHealthResponse,
+  AiTriageRun,
+  AiTriageTask,
+  OpCheckResponse,
+  ReviewOutcome,
+  ReviewQueueItem,
+  ReviewStatus,
+} from '@/types/api'
 import type { CompaniesHouseScreeningBundle, CompaniesHouseSearchItem } from '@/types/api'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
@@ -174,6 +182,30 @@ export async function updateMatchingConfig(customGenericWords: string[]): Promis
     method: 'PUT',
     headers: defaultHeaders(),
     body: JSON.stringify({ custom_generic_words: customGenericWords }),
+  })
+}
+
+export async function getAiTriageHealth(): Promise<Response> {
+  return authFetch(resolve('/admin/ai-triage/health'), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function listAiTriageRuns(limit = 20): Promise<Response> {
+  const sp = new URLSearchParams()
+  sp.set('limit', String(limit))
+  return authFetch(resolve(`/admin/ai-triage/runs?${sp.toString()}`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function runAiTriage(limit = 25): Promise<Response> {
+  return authFetch(resolve('/admin/ai-triage/run'), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ limit }),
   })
 }
 
@@ -395,4 +427,44 @@ export async function rerunReview(
   })
 }
 
+export async function listAiTriageTasks(params: {
+  status?: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED' | 'ERROR'
+  limit?: number
+  offset?: number
+} = {}): Promise<Response> {
+  const sp = new URLSearchParams()
+  if (params.status) sp.set('status', params.status)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return authFetch(resolve(`/ai-triage/tasks${qs ? `?${qs}` : ''}`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function getAiTriageTask(triageId: string): Promise<Response> {
+  return authFetch(resolve(`/ai-triage/tasks/${encodeURIComponent(triageId)}`), {
+    method: 'GET',
+    headers: defaultHeaders(),
+  })
+}
+
+export async function approveAiTriageTask(triageId: string, reviewerNotes?: string): Promise<Response> {
+  return authFetch(resolve(`/ai-triage/tasks/${encodeURIComponent(triageId)}/approve`), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ reviewer_notes: reviewerNotes ?? null }),
+  })
+}
+
+export async function rejectAiTriageTask(triageId: string, reviewerNotes?: string): Promise<Response> {
+  return authFetch(resolve(`/ai-triage/tasks/${encodeURIComponent(triageId)}/reject`), {
+    method: 'POST',
+    headers: defaultHeaders(),
+    body: JSON.stringify({ reviewer_notes: reviewerNotes ?? null }),
+  })
+}
+
+export type { AiTriageHealthResponse, AiTriageRun, AiTriageTask }
 export type { ReviewQueueItem }

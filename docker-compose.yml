@@ -13,9 +13,14 @@ services:
       - GUI_JWT_SECRET=${GUI_JWT_SECRET}
       - RESEND_API_KEY=${RESEND_API_KEY}
       - RESEND_FROM=${RESEND_FROM}
+      - LOCAL_LLM_BASE_URL=http://ollama:11434
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_TIMEOUT_SECONDS=${LOCAL_LLM_TIMEOUT_SECONDS:-90}
+      - LOCAL_LLM_MAX_CONCURRENCY=${LOCAL_LLM_MAX_CONCURRENCY:-2}
     volumes:
-      # Persist parquet and search log across restarts
       - sanctions-data:/app/data
+    depends_on:
+      - ollama
     restart: unless-stopped
 
   worker:
@@ -29,11 +34,63 @@ services:
       - SCREENING_JOBS_RETENTION_DAYS=${SCREENING_JOBS_RETENTION_DAYS:-7}
       - SCREENED_ENTITIES_RETENTION_MONTHS=${SCREENED_ENTITIES_RETENTION_MONTHS:-0}
       - SCREENING_CLEANUP_EVERY_N_LOOPS=${SCREENING_CLEANUP_EVERY_N_LOOPS:-50}
+      - LOCAL_LLM_BASE_URL=http://ollama:11434
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_TIMEOUT_SECONDS=${LOCAL_LLM_TIMEOUT_SECONDS:-90}
+      - LOCAL_LLM_MAX_CONCURRENCY=${LOCAL_LLM_MAX_CONCURRENCY:-2}
     volumes:
       - sanctions-data:/app/data
     depends_on:
       - app
+      - ollama
     restart: unless-stopped
+
+  ai-triage-worker:
+    build: .
+    command: ["python", "ai_triage_worker.py"]
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - LOCAL_LLM_BASE_URL=http://ollama:11434
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+      - LOCAL_LLM_TIMEOUT_SECONDS=${LOCAL_LLM_TIMEOUT_SECONDS:-90}
+      - LOCAL_LLM_MAX_CONCURRENCY=${LOCAL_LLM_MAX_CONCURRENCY:-2}
+      - AI_TRIAGE_ENABLED=${AI_TRIAGE_ENABLED:-true}
+      - AI_TRIAGE_RUN_HOUR=${AI_TRIAGE_RUN_HOUR:-22}
+      - AI_TRIAGE_POLL_SECONDS=${AI_TRIAGE_POLL_SECONDS:-300}
+      - AI_TRIAGE_BATCH_LIMIT=${AI_TRIAGE_BATCH_LIMIT:-25}
+    volumes:
+      - sanctions-data:/app/data
+    depends_on:
+      - app
+      - ollama
+      - ollama-model-init
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+  ollama-model-init:
+    image: curlimages/curl:8.12.1
+    depends_on:
+      - ollama
+    environment:
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL:-qwen2.5:14b-instruct}
+    command:
+      - sh
+      - -c
+      - |
+        until curl -fsS http://ollama:11434/api/tags >/dev/null; do
+          echo "Waiting for Ollama...";
+          sleep 3;
+        done;
+        curl -fsS http://ollama:11434/api/pull -d "{\"name\":\"$${LOCAL_LLM_MODEL}\"}";
+    restart: "no"
 
 volumes:
   sanctions-data:
+  ollama-data:

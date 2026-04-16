@@ -76,3 +76,64 @@ CREATE TABLE IF NOT EXISTS access_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests (email);
+
+-- AI triage runs and human-reviewable recommendation queue.
+CREATE TABLE IF NOT EXISTS ai_triage_runs (
+    run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trigger_type TEXT NOT NULL,
+    triggered_by TEXT,
+    llm_runtime TEXT NOT NULL,
+    llm_model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    selected_count INTEGER NOT NULL DEFAULT 0,
+    created_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    superseded_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS ai_triage_recommendations (
+    triage_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID REFERENCES ai_triage_runs(run_id) ON DELETE SET NULL,
+    entity_key TEXT NOT NULL,
+    screening_state_hash TEXT NOT NULL,
+    submitted_name TEXT NOT NULL,
+    submitted_entity_type TEXT,
+    matched_name TEXT,
+    matched_entity_type TEXT,
+    matched_birth_date TEXT,
+    matched_country TEXT,
+    source_label TEXT,
+    screening_status TEXT,
+    screening_risk_level TEXT,
+    screening_score NUMERIC(5,2),
+    llm_runtime TEXT NOT NULL,
+    llm_model TEXT NOT NULL,
+    raw_recommended_action TEXT NOT NULL,
+    effective_recommended_action TEXT NOT NULL,
+    ai_confidence_raw NUMERIC(5,4),
+    ai_confidence_band TEXT,
+    rationale_short TEXT,
+    explanation_json JSONB,
+    raw_output_json JSONB,
+    result_snapshot_json JSONB NOT NULL,
+    guardrail_overridden BOOLEAN NOT NULL DEFAULT FALSE,
+    guardrail_reasons JSONB,
+    status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+    human_decision TEXT,
+    reviewer TEXT,
+    reviewed_at TIMESTAMPTZ,
+    reviewer_notes TEXT,
+    final_screening_outcome TEXT,
+    agreement_indicator TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_triage_recommendations_status
+    ON ai_triage_recommendations (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_triage_recommendations_entity_key
+    ON ai_triage_recommendations (entity_key, created_at DESC);

@@ -8,12 +8,14 @@ import os
 import logging
 import secrets
 import json
+import csv
+import io
 
 import jwt
 
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, constr
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -31,6 +33,7 @@ class SPAStaticFiles(StaticFiles):
         "redoc",
         "openapi.json",
         "admin/openapi.json",
+        "mi/",
         "opcheck",
         "review/",
         "internal/",
@@ -106,6 +109,7 @@ from utils import (
     get_protected_org_legal_suffixes,
     DATA_DIR,
 )
+from ai_triage import get_local_llm_config, ollama_health, run_ai_triage_batch
 import screening_db
 import auth_db
 from routes.companies_house import router as companies_house_router
@@ -433,6 +437,14 @@ class MatchingConfigUpdateRequest(BaseModel):
     custom_generic_words: List[str] = Field(default_factory=list, description="Additional generic organization words to exclude from strong matching")
 
 
+class AiTriageRunRequest(BaseModel):
+    limit: int = Field(25, ge=1, le=250, description="Maximum number of outstanding sanctions matches to triage")
+
+
+class AiTriageDecisionRequest(BaseModel):
+    reviewer_notes: Optional[constr(strip_whitespace=True, min_length=3)] = Field(None, description="Optional reviewer note")
+
+
 # Internal queue-ingestion API: request body (no screening results returned).
 class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
@@ -520,7 +532,7 @@ def _get_token_from_request(request: Request) -> str:
 def _api_key_route_allowed(path: str) -> bool:
     """API keys may access screening routes only."""
     p = (path or "").strip()
-    return p == "/opcheck" or p.startswith("/opcheck/")
+    return p == "/opcheck" or p.startswith("/opcheck/") or p == "/mi/export.csv"
 
 
 async def get_current_user(request: Request) -> dict:
@@ -580,6 +592,14 @@ async def require_admin(request: Request) -> dict:
     payload = await get_current_user(request)
     if not payload.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin required")
+    return payload
+
+
+async def require_api_key_user(request: Request) -> dict:
+    """Require authentication via API key only."""
+    payload = await get_current_user(request)
+    if payload.get("auth_type") != "api_key":
+        raise HTTPException(status_code=403, detail="API key required")
     return payload
 
 
@@ -1263,10 +1283,83 @@ async def admin_update_matching_config(
     }
 
 
+@app.get("/admin/ai-triage/health", dependencies=[Depends(require_admin)])
+@limiter.limit("30/minute")
+async def admin_ai_triage_health(request: Request, payload: dict = Depends(require_admin)):
+    health = ollama_health()
+    cfg = get_local_llm_config()
+    audit_log(
+        "admin",
+        action="ai_triage_health_view",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+    )
+    return {
+        **health,
+        "timeout_seconds": cfg["timeout_seconds"],
+        "max_concurrency": cfg["max_concurrency"],
+    }
+
+
+@app.get("/admin/ai-triage/runs", dependencies=[Depends(require_admin)])
+@limiter.limit("30/minute")
+async def admin_ai_triage_runs(
+    request: Request,
+    payload: dict = Depends(require_admin),
+    limit: int = 20,
+):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    async with pool.acquire() as conn:
+        items = await screening_db.list_ai_triage_runs(conn, limit=limit)
+    audit_log(
+        "admin",
+        action="ai_triage_runs_view",
+        actor=payload.get("sub"),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={"count": len(items)},
+    )
+    return {"items": items}
+
+
+@app.post("/admin/ai-triage/run", dependencies=[Depends(require_admin)])
+@limiter.limit("10/minute")
+async def admin_run_ai_triage(
+    request: Request,
+    body: AiTriageRunRequest,
+    payload: dict = Depends(require_admin),
+):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    actor = str(payload.get("sub") or "").strip() or "unknown_user"
+    async with pool.acquire() as conn:
+        result = await run_ai_triage_batch(
+            conn,
+            screening_db_module=screening_db,
+            trigger_type="manual",
+            triggered_by=actor,
+            limit=body.limit,
+        )
+    audit_log(
+        "admin",
+        action="ai_triage_run",
+        actor=actor,
+        outcome="success",
+        ip=_client_ip(request),
+        extra=result,
+    )
+    return result
+
+
 @app.options("/opcheck")
 @app.options("/opcheck/dataverse")
 @app.options("/opcheck/screened")
 @app.options("/dashboard/summary")
+@app.options("/mi/export.csv")
 @app.options("/review/queue")
 @app.options("/review/{entity_key}/claim")
 @app.options("/review/{entity_key}/complete")
@@ -1285,10 +1378,17 @@ async def admin_update_matching_config(
 @app.options("/admin/testing/clear-screening-data")
 @app.options("/admin/screening/jobs/bulk")
 @app.options("/admin/matching-config")
+@app.options("/admin/ai-triage/health")
+@app.options("/admin/ai-triage/runs")
+@app.options("/admin/ai-triage/run")
 @app.options("/admin/screening/jobs")
 @app.options("/admin/screening/false-positive")
 @app.options("/admin/screening/rescreen-summary")
 @app.options("/admin/openapi.json")
+@app.options("/ai-triage/tasks")
+@app.options("/ai-triage/tasks/{triage_id}")
+@app.options("/ai-triage/tasks/{triage_id}/approve")
+@app.options("/ai-triage/tasks/{triage_id}/reject")
 @app.options("/internal/screening/jobs")
 @app.options("/internal/screening/jobs/bulk")
 async def cors_preflight():
@@ -2000,6 +2100,126 @@ async def get_dashboard_summary(request: Request, payload: dict = Depends(get_cu
         raise HTTPException(status_code=500, detail="Dashboard summary failed. Please try again or contact support.")
 
 
+@app.get("/mi/export.csv", dependencies=[Depends(require_api_key_user)])
+@limiter.limit("30/minute")
+async def export_mi_csv(
+    request: Request,
+    payload: dict = Depends(require_api_key_user),
+    screened_from: Optional[str] = None,
+    screened_to: Optional[str] = None,
+    review_status: Optional[str] = None,
+    include_cleared: bool = True,
+):
+    """
+    CSV export for MI / Power BI.
+    API key only. Returns a flat extract of screened_entities plus selected result_json fields.
+    """
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="MI export unavailable (configure DATABASE_URL)")
+    try:
+        async with pool.acquire() as conn:
+            items = await screening_db.export_screened_entities_for_mi(
+                conn,
+                screened_from=screened_from,
+                screened_to=screened_to,
+                review_status=review_status,
+                include_cleared=include_cleared,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("GET /mi/export.csv failed: %s", e)
+        raise HTTPException(status_code=500, detail="MI export failed. Please try again or contact support.")
+
+    fieldnames = [
+        "entity_key",
+        "display_name",
+        "normalized_name",
+        "date_of_birth",
+        "country_input",
+        "entity_type",
+        "last_screened_at",
+        "screening_valid_until",
+        "status",
+        "risk_level",
+        "confidence",
+        "score",
+        "uk_sanctions_flag",
+        "pep_flag",
+        "last_requestor",
+        "business_reference",
+        "reason_for_check",
+        "review_status",
+        "review_claimed_by",
+        "review_claimed_at",
+        "review_outcome",
+        "review_notes",
+        "review_completed_by",
+        "review_completed_at",
+        "updated_at",
+        "result_sanctions_name",
+        "result_birth_date",
+        "result_regime",
+        "result_is_sanctioned",
+        "result_is_pep",
+        "result_match_found",
+        "result_risk_level",
+        "result_confidence",
+        "result_score",
+        "result_check_status",
+        "result_check_source",
+        "result_check_date",
+        "person_check_status",
+        "person_check_is_match",
+        "person_check_score",
+        "organization_check_status",
+        "organization_check_is_match",
+        "organization_check_score",
+        "pep_check_checked",
+        "pep_check_status",
+        "pep_check_reason",
+        "pep_check_message",
+        "input_submitted_as",
+        "input_inferred_as",
+        "input_likely_misclassified",
+        "input_classification_confidence",
+        "input_classification_signals_json",
+        "top_matches_json",
+        "result_json",
+    ]
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for item in items:
+        writer.writerow({key: item.get(key) for key in fieldnames})
+
+    audit_log(
+        "data_access",
+        action="mi_export_csv",
+        actor=payload.get("sub"),
+        resource="mi/export.csv",
+        outcome="success",
+        ip=_client_ip(request),
+        extra={
+            "row_count": len(items),
+            "screened_from": screened_from,
+            "screened_to": screened_to,
+            "review_status": review_status,
+            "include_cleared": include_cleared,
+            "api_key_id": payload.get("api_key_id"),
+        },
+    )
+
+    filename_date = datetime.now().strftime("%Y%m%d")
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="screening-mi-export-{filename_date}.csv"'},
+    )
+
+
 @app.get("/review/queue", dependencies=[Depends(get_current_user)])
 @limiter.limit("120/minute")
 async def get_review_queue(
@@ -2276,6 +2496,152 @@ async def rerun_review(
         "result": rerun_payload,
         "review_item": completed_item,
     }
+
+
+@app.get("/ai-triage/tasks", dependencies=[Depends(get_current_user)])
+@limiter.limit("120/minute")
+async def list_ai_triage_tasks(
+    request: Request,
+    payload: dict = Depends(get_current_user),
+    status: Optional[str] = "PENDING_REVIEW",
+    limit: int = 100,
+    offset: int = 0,
+):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    try:
+        async with pool.acquire() as conn:
+            items = await screening_db.list_ai_triage_tasks(
+                conn,
+                status=(status or "").strip().upper() or None,
+                limit=limit,
+                offset=offset,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"items": items}
+
+
+@app.get("/ai-triage/tasks/{triage_id}", dependencies=[Depends(get_current_user)])
+@limiter.limit("120/minute")
+async def get_ai_triage_task(
+    request: Request,
+    triage_id: str,
+    payload: dict = Depends(get_current_user),
+):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    async with pool.acquire() as conn:
+        item = await screening_db.get_ai_triage_task(conn, triage_id=triage_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="AI triage task not found")
+    return item
+
+
+@app.post("/ai-triage/tasks/{triage_id}/approve", dependencies=[Depends(get_current_user)])
+@limiter.limit("60/minute")
+async def approve_ai_triage_task(
+    request: Request,
+    triage_id: str,
+    body: AiTriageDecisionRequest,
+    payload: dict = Depends(get_current_user),
+):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    actor = str(payload.get("sub") or "").strip() or "unknown_user"
+    async with pool.acquire() as conn:
+        task = await screening_db.get_ai_triage_task(conn, triage_id=triage_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="AI triage task not found")
+        if str(task.get("status") or "").upper() != "PENDING_REVIEW":
+            raise HTTPException(status_code=409, detail="Only pending AI tasks can be approved")
+        final_screening_outcome = task.get("screening_status") or task.get("final_screening_outcome")
+        effective_action = str(task.get("effective_recommended_action") or "UNSURE").upper()
+        if effective_action == "CLEAR":
+            cleared = await screening_db.mark_false_positive(
+                conn,
+                entity_key=str(task.get("entity_key") or ""),
+                actor=actor,
+                reason=(
+                    f"AI triage approved by {actor}. "
+                    f"Model={task.get('llm_model')}; recommendation=CLEAR; "
+                    f"confidence={task.get('ai_confidence_band') or task.get('ai_confidence_raw')}. "
+                    f"{(body.reviewer_notes or '').strip()}".strip()
+                ),
+            )
+            if cleared is not None:
+                summary = cleared.get("Check Summary") if isinstance(cleared.get("Check Summary"), dict) else {}
+                final_screening_outcome = summary.get("Status") or "Cleared - False Positive"
+        approved = await screening_db.approve_ai_triage_task(
+            conn,
+            triage_id=triage_id,
+            reviewer=actor,
+            reviewer_notes=body.reviewer_notes,
+            final_screening_outcome=str(final_screening_outcome or ""),
+        )
+    if approved is None:
+        raise HTTPException(status_code=409, detail="Only pending AI tasks can be approved")
+    audit_log(
+        "review",
+        action="AI_TRIAGE_APPROVED",
+        actor=actor,
+        resource=str(task.get("entity_key") or triage_id),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={
+            "triage_id": triage_id,
+            "recommended_action": task.get("effective_recommended_action"),
+            "raw_recommended_action": task.get("raw_recommended_action"),
+            "guardrail_overridden": task.get("guardrail_overridden"),
+        },
+    )
+    return {"status": "ok", "item": approved}
+
+
+@app.post("/ai-triage/tasks/{triage_id}/reject", dependencies=[Depends(get_current_user)])
+@limiter.limit("60/minute")
+async def reject_ai_triage_task(
+    request: Request,
+    triage_id: str,
+    body: AiTriageDecisionRequest,
+    payload: dict = Depends(get_current_user),
+):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
+    actor = str(payload.get("sub") or "").strip() or "unknown_user"
+    async with pool.acquire() as conn:
+        task = await screening_db.get_ai_triage_task(conn, triage_id=triage_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="AI triage task not found")
+        if str(task.get("status") or "").upper() != "PENDING_REVIEW":
+            raise HTTPException(status_code=409, detail="Only pending AI tasks can be rejected")
+        rejected = await screening_db.reject_ai_triage_task(
+            conn,
+            triage_id=triage_id,
+            reviewer=actor,
+            reviewer_notes=body.reviewer_notes,
+            final_screening_outcome=str(task.get("screening_status") or ""),
+        )
+    if rejected is None:
+        raise HTTPException(status_code=409, detail="Only pending AI tasks can be rejected")
+    audit_log(
+        "review",
+        action="AI_TRIAGE_REJECTED",
+        actor=actor,
+        resource=str(task.get("entity_key") or triage_id),
+        outcome="success",
+        ip=_client_ip(request),
+        extra={
+            "triage_id": triage_id,
+            "recommended_action": task.get("effective_recommended_action"),
+            "raw_recommended_action": task.get("raw_recommended_action"),
+        },
+    )
+    return {"status": "ok", "item": rejected}
 
 
 # ---------------------------

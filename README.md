@@ -48,6 +48,14 @@ npm run dev
 | `REFRESH_OPENSANCTIONS_API_KEY` | Optional. When set, **POST /refresh_opensanctions** can be called with this key via header `X-Refresh-Opensanctions-Key` or `Authorization: Bearer <key>` (for scripts/cron). When unset, only admin JWT can be used. |
 | `TRUSTED_PROXY_IPS` | Comma-separated IPs of trusted reverse proxies (e.g. `127.0.0.1,::1`). Only when the direct client is in this set is `X-Forwarded-For` used for client IP (rate limiting and internal screening). Default: `127.0.0.1,::1`. |
 | `RATE_LIMIT_STORAGE_URL` | Optional shared backend for rate limiting (recommended for multi-instance deploys), e.g. `redis://:password@redis-host:6379/0`. If unset, in-memory per-process limiting is used. |
+| `LOCAL_LLM_BASE_URL` | Local Ollama base URL for AI triage. In Docker Compose this defaults to `http://ollama:11434`. |
+| `LOCAL_LLM_MODEL` | Ollama model used for AI triage. Default: `qwen2.5:14b-instruct`. |
+| `LOCAL_LLM_TIMEOUT_SECONDS` | Timeout for local LLM calls. Default: `90`. |
+| `LOCAL_LLM_MAX_CONCURRENCY` | Maximum concurrent Ollama requests for triage batches. Default: `2`. |
+| `AI_TRIAGE_ENABLED` | Enable scheduled AI triage worker loop. Default: `true`. |
+| `AI_TRIAGE_RUN_HOUR` | 24-hour local hour when the scheduled AI triage worker should run. Default: `22`. |
+| `AI_TRIAGE_POLL_SECONDS` | Sleep interval for the AI triage worker loop. Default: `300`. |
+| `AI_TRIAGE_BATCH_LIMIT` | Max outstanding sanctions matches triaged per run. Default: `25`. |
 
 **Rate limiting** (per client IP): `/auth/login` 5/min, `/auth/signup` 3/min, `POST /opcheck` 60/min, `GET /opcheck/jobs/{job_id}` 60/min, `POST /refresh_opensanctions` 2/min, `POST /internal/screening/jobs` 120/min, `POST /internal/screening/jobs/bulk` 20/min. Exceeding returns 429. The client IP is taken from the direct connection unless behind a trusted proxy (see below).
 
@@ -166,6 +174,14 @@ VITE_API_BASE_URL=https://sanctions-check.co.uk
 
 - **GET /health** — Returns plain text `ok`.
 - **POST /opcheck** — Body: `{ name, dob?, entity_type?, requestor? }`. Validates `name` and `requestor`; returns result with keys: `Match Found`, `Risk Level`, `Confidence`, `Score`, `Top Matches`, `Check Summary`, `Is Sanctioned`, `Is PEP`, etc. Do not rename or restructure these fields.
+- **GET /mi/export.csv** — API-key-only CSV export for MI / Power BI. Returns a flat extract of stored screening records plus selected result fields. Supports optional filters: `screened_from`, `screened_to`, `review_status`, `include_cleared`.
+- **GET /admin/ai-triage/health** — Admin-only Ollama/model health and configured runtime details.
+- **GET /admin/ai-triage/runs** — Admin-only recent AI triage run history.
+- **POST /admin/ai-triage/run** — Admin-only manual AI triage trigger for outstanding sanctions matches.
+- **GET /ai-triage/tasks** — Logged-in analyst task list of pending AI recommendations.
+- **GET /ai-triage/tasks/{triage_id}** — Full detail for one AI recommendation.
+- **POST /ai-triage/tasks/{triage_id}/approve** — Human approval path. Only this can apply an AI-suggested clear in v1.
+- **POST /ai-triage/tasks/{triage_id}/reject** — Human rejection path for an AI recommendation.
 - **POST /refresh_opensanctions** — Body: `{ include_peps?: boolean, sync_postgres?: boolean }` (`sync_postgres` defaults to `true`). Returns `{ status: "ok", include_peps, postgres_synced, postgres_rows }` or 500 with `{ status: "error", message }`.
 
 ## Docker (recommended for production / DigitalOcean)
@@ -188,6 +204,16 @@ Or with Docker Compose (same thing, with a named volume):
 docker compose up -d
 # App: http://localhost:8000
 ```
+
+Docker Compose now also starts:
+- `ollama` for the local LLM runtime
+- `ollama-model-init` to pull the configured model automatically on startup
+- `ai-triage-worker` for nightly out-of-hours triage runs
+
+Notes:
+- The first `docker compose up -d` can take a while because `qwen2.5:14b-instruct` must be downloaded into the persistent `ollama-data` volume.
+- Normal screening does not depend on the model being ready; only AI triage features will show unavailable until Ollama is reachable and the model is present.
+- Admin → AI triage shows whether Ollama is reachable and whether the configured model has finished loading.
 
 After first deploy, load sanctions/PEP data with:
 

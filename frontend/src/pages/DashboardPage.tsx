@@ -82,6 +82,7 @@ export function DashboardPage() {
           <MetricCard title="Open high-risk reviews" value={summary?.risk.open_high_risk_reviews ?? 0} />
           <MetricCard title="Aged reviews (>24h)" value={summary?.risk.aged_reviews_over_24h ?? 0} />
           <MetricCard title="Aged reviews (>72h)" value={summary?.risk.aged_reviews_over_72h ?? 0} />
+          <MetricCard title="AI suggestions pending" value={summary?.ai_triage.pending_recommendations ?? 0} />
           <MetricCard
             title="Data freshness"
             value={
@@ -130,6 +131,36 @@ export function DashboardPage() {
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>AI triage</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-2 text-[13px]">
+              <p className="text-[#64748b]">
+                Pending recommendations:{' '}
+                <span className="font-bold text-[#0f2340]">{summary?.ai_triage.pending_recommendations ?? 0}</span>
+              </p>
+              <p className="text-[#64748b]">
+                Latest run:{' '}
+                <span className="font-bold text-[#0f2340]">
+                  {summary?.ai_triage.latest_run ? formatDate(summary.ai_triage.latest_run.started_at) : '—'}
+                </span>
+              </p>
+              <p className="text-[#64748b]">
+                Run status:{' '}
+                <span className="font-bold text-[#0f2340]">{summary?.ai_triage.latest_run?.status ?? '—'}</span>
+              </p>
+              <p className="text-[#64748b]">
+                Created/skipped/errors:{' '}
+                <span className="font-bold text-[#0f2340]">
+                  {summary?.ai_triage.latest_run
+                    ? `${summary.ai_triage.latest_run.created_count}/${summary.ai_triage.latest_run.skipped_count}/${summary.ai_triage.latest_run.error_count}`
+                    : '—'}
+                </span>
+              </p>
+            </CardBody>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Outcome mix (last 30 days)</CardTitle>

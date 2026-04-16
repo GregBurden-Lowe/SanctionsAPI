@@ -256,6 +256,82 @@ export interface DashboardSummaryResponse {
       failed_count: number
     } | null
   }
+  ai_triage: {
+    pending_recommendations: number
+    latest_run: AiTriageRun | null
+  }
+}
+
+export interface AiTriageHealthResponse {
+  runtime: string
+  base_url: string
+  configured_model: string
+  reachable: boolean
+  model_present: boolean
+  available_models: string[]
+  timeout_seconds: number
+  max_concurrency: number
+  error?: string
+}
+
+export interface AiTriageRun {
+  run_id: string
+  trigger_type: string
+  triggered_by: string | null
+  llm_runtime: string
+  llm_model: string
+  status: string
+  selected_count: number
+  created_count: number
+  skipped_count: number
+  superseded_count: number
+  error_count: number
+  error_message: string | null
+  started_at: string
+  finished_at: string | null
+}
+
+export interface AiTriageTask {
+  triage_id: string
+  run_id: string | null
+  entity_key: string
+  submitted_name: string
+  submitted_entity_type: string | null
+  matched_name: string | null
+  matched_entity_type: string | null
+  matched_birth_date?: string | null
+  matched_country?: string | null
+  source_label: string | null
+  screening_status: string | null
+  screening_risk_level: string | null
+  screening_score: number | null
+  raw_recommended_action: 'CLEAR' | 'INVESTIGATE' | 'UNSURE'
+  effective_recommended_action: 'CLEAR' | 'INVESTIGATE' | 'UNSURE'
+  ai_confidence_raw: number | null
+  ai_confidence_band: string | null
+  rationale_short: string | null
+  explanation_json?: {
+    reviewer_note?: string
+    key_differences?: string[]
+    same_entity_likelihood?: number
+    inferred_searched_entity_type?: string
+  } | null
+  raw_output_json?: Record<string, unknown> | null
+  result_snapshot_json?: Record<string, unknown> | null
+  guardrail_overridden: boolean
+  guardrail_reasons: string[] | null
+  status: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED' | 'ERROR'
+  human_decision: 'APPROVED' | 'REJECTED' | null
+  reviewer: string | null
+  reviewed_at: string | null
+  reviewer_notes: string | null
+  final_screening_outcome: string | null
+  agreement_indicator: 'AGREED' | 'DISAGREED' | null
+  created_at: string
+  updated_at?: string
+  business_reference?: string | null
+  reason_for_check?: string | null
+  screening_review_status?: string | null
 }
 
 export interface CompaniesHouseSearchItem {

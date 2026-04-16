@@ -69,6 +69,9 @@ export function AppShell() {
           <NavItem to="/review" icon={<BiShieldAlt2 className="h-5 w-5" />}>
             Match review
           </NavItem>
+          <NavItem to="/ai-triage" icon={<BiListUl className="h-5 w-5" />}>
+            AI suggestions
+          </NavItem>
           <NavItem to="/companies-house" icon={<BiBuildingHouse className="h-5 w-5" />}>
             Companies House
           </NavItem>

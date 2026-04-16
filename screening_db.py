@@ -31,6 +31,8 @@ _REVIEW_OUTCOME_ALLOWED = frozenset({
     "Pending External Review",
     "Cancelled / No Action Required",
 })
+_AI_TRIAGE_STATUS_ALLOWED = frozenset({"PENDING_REVIEW", "APPROVED", "REJECTED", "SUPERSEDED", "ERROR"})
+_AI_TRIAGE_ACTION_ALLOWED = frozenset({"CLEAR", "INVESTIGATE", "UNSURE"})
 
 
 def _uk_sanctions_from_result(result: Dict[str, Any]) -> bool:
@@ -171,6 +173,71 @@ async def ensure_schema(conn) -> None:
     await conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_name_norm
         ON watchlist_uk_snapshot_entries (name_norm)
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_triage_runs (
+            run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            trigger_type TEXT NOT NULL,
+            triggered_by TEXT,
+            llm_runtime TEXT NOT NULL,
+            llm_model TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            selected_count INTEGER NOT NULL DEFAULT 0,
+            created_count INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0,
+            superseded_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMPTZ
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_triage_recommendations (
+            triage_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            run_id UUID REFERENCES ai_triage_runs(run_id) ON DELETE SET NULL,
+            entity_key TEXT NOT NULL,
+            screening_state_hash TEXT NOT NULL,
+            submitted_name TEXT NOT NULL,
+            submitted_entity_type TEXT,
+            matched_name TEXT,
+            matched_entity_type TEXT,
+            matched_birth_date TEXT,
+            matched_country TEXT,
+            source_label TEXT,
+            screening_status TEXT,
+            screening_risk_level TEXT,
+            screening_score NUMERIC(5,2),
+            llm_runtime TEXT NOT NULL,
+            llm_model TEXT NOT NULL,
+            raw_recommended_action TEXT NOT NULL,
+            effective_recommended_action TEXT NOT NULL,
+            ai_confidence_raw NUMERIC(5,4),
+            ai_confidence_band TEXT,
+            rationale_short TEXT,
+            explanation_json JSONB,
+            raw_output_json JSONB,
+            result_snapshot_json JSONB NOT NULL,
+            guardrail_overridden BOOLEAN NOT NULL DEFAULT FALSE,
+            guardrail_reasons JSONB,
+            status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+            human_decision TEXT,
+            reviewer TEXT,
+            reviewed_at TIMESTAMPTZ,
+            reviewer_notes TEXT,
+            final_screening_outcome TEXT,
+            agreement_indicator TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ai_triage_recommendations_status
+        ON ai_triage_recommendations (status, created_at DESC)
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ai_triage_recommendations_entity_key
+        ON ai_triage_recommendations (entity_key, created_at DESC)
     """)
     await conn.execute("""
         ALTER TABLE screened_entities
@@ -646,6 +713,370 @@ async def get_uk_snapshot_entries(conn, refresh_run_id: str) -> List[Dict[str, s
     return [dict(r) for r in rows]
 
 
+async def create_ai_triage_run(
+    conn,
+    *,
+    trigger_type: str,
+    triggered_by: Optional[str],
+    llm_runtime: str,
+    llm_model: str,
+    selected_count: int = 0,
+) -> str:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO ai_triage_runs (
+            trigger_type, triggered_by, llm_runtime, llm_model, selected_count, status
+        )
+        VALUES ($1, $2, $3, $4, $5, 'running')
+        RETURNING run_id
+        """,
+        (trigger_type or "manual").strip() or "manual",
+        (triggered_by or "").strip() or None,
+        (llm_runtime or "ollama").strip() or "ollama",
+        (llm_model or "").strip() or "unknown",
+        max(0, int(selected_count or 0)),
+    )
+    return str(row["run_id"])
+
+
+async def update_ai_triage_run_selected(conn, run_id: str, selected_count: int) -> None:
+    await conn.execute(
+        """
+        UPDATE ai_triage_runs
+        SET selected_count = $2
+        WHERE run_id = $1::uuid
+        """,
+        run_id,
+        max(0, int(selected_count or 0)),
+    )
+
+
+async def finalize_ai_triage_run(
+    conn,
+    *,
+    run_id: str,
+    status: str,
+    created_count: int,
+    skipped_count: int,
+    superseded_count: int,
+    error_count: int,
+    error_message: Optional[str] = None,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE ai_triage_runs
+        SET status = $2,
+            created_count = $3,
+            skipped_count = $4,
+            superseded_count = $5,
+            error_count = $6,
+            error_message = $7,
+            finished_at = NOW()
+        WHERE run_id = $1::uuid
+        """,
+        run_id,
+        (status or "completed").strip() or "completed",
+        max(0, int(created_count or 0)),
+        max(0, int(skipped_count or 0)),
+        max(0, int(superseded_count or 0)),
+        max(0, int(error_count or 0)),
+        (error_message or "").strip() or None,
+    )
+
+
+async def list_ai_triage_runs(conn, *, limit: int = 20) -> List[Dict[str, Any]]:
+    limit = max(1, min(100, int(limit)))
+    rows = await conn.fetch(
+        """
+        SELECT *
+        FROM ai_triage_runs
+        ORDER BY started_at DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [_to_json_safe(dict(r)) for r in rows]
+
+
+async def get_latest_ai_triage_run(conn) -> Optional[Dict[str, Any]]:
+    row = await conn.fetchrow(
+        """
+        SELECT *
+        FROM ai_triage_runs
+        ORDER BY started_at DESC
+        LIMIT 1
+        """
+    )
+    return _to_json_safe(dict(row)) if row else None
+
+
+def _ai_triage_result_snapshot(result_json: Dict[str, Any]) -> Dict[str, Any]:
+    result = result_json if isinstance(result_json, dict) else {}
+    summary = result.get("Check Summary") if isinstance(result.get("Check Summary"), dict) else {}
+    return {
+        "Sanctions Name": result.get("Sanctions Name"),
+        "Birth Date": result.get("Birth Date"),
+        "Regime": result.get("Regime"),
+        "Score": result.get("Score"),
+        "Risk Level": result.get("Risk Level"),
+        "Confidence": result.get("Confidence"),
+        "Check Summary": {
+            "Status": summary.get("Status"),
+            "Source": summary.get("Source"),
+            "Date": summary.get("Date"),
+        },
+        "Top Matches": result.get("Top Matches") or [],
+        "Input Classification": result.get("Input Classification") or {},
+    }
+
+
+async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, Any]]:
+    limit = max(1, min(250, int(limit)))
+    rows = await conn.fetch(
+        """
+        SELECT
+            entity_key,
+            display_name,
+            entity_type,
+            date_of_birth,
+            country_input,
+            status,
+            risk_level,
+            score,
+            result_json,
+            review_status
+        FROM screened_entities
+        WHERE status NOT ILIKE 'Cleared%'
+          AND (
+            status ILIKE 'Fail Sanction%'
+            OR COALESCE((result_json->>'Is Sanctioned')::boolean, FALSE) = TRUE
+          )
+          AND COALESCE(review_status, 'UNREVIEWED') <> 'COMPLETED'
+        ORDER BY
+          CASE WHEN review_status = 'IN_REVIEW' THEN 0 ELSE 1 END,
+          last_screened_at ASC
+        LIMIT $1
+        """,
+        limit,
+    )
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        result_json = d.get("result_json")
+        if isinstance(result_json, str):
+            result_json = json.loads(result_json)
+        elif not isinstance(result_json, dict):
+            result_json = dict(result_json) if hasattr(result_json, "items") else {}
+        summary = result_json.get("Check Summary") if isinstance(result_json.get("Check Summary"), dict) else {}
+        d["result_json"] = result_json
+        d["date_of_birth"] = d["date_of_birth"].isoformat() if d.get("date_of_birth") else None
+        d["score"] = float(d.get("score") or 0)
+        d["matched_name"] = result_json.get("Sanctions Name")
+        d["matched_birth_date"] = result_json.get("Birth Date")
+        d["matched_country"] = (
+            result_json.get("Matched Country")
+            or result_json.get("Country")
+            or ((result_json.get("Matched Entity") or {}).get("country") if isinstance(result_json.get("Matched Entity"), dict) else None)
+        )
+        inferred = (result_json.get("Input Classification") or {}).get("inferred_as") if isinstance(result_json.get("Input Classification"), dict) else None
+        d["matched_entity_type"] = inferred or d.get("entity_type")
+        d["source_label"] = summary.get("Source")
+        d["result_snapshot_json"] = _ai_triage_result_snapshot(result_json)
+        out.append(_to_json_safe(d))
+    return out
+
+
+async def prepare_ai_triage_recommendation(
+    conn,
+    *,
+    entity_key: str,
+    screening_state_hash: str,
+) -> str:
+    pending_same = await conn.fetchrow(
+        """
+        SELECT triage_id
+        FROM ai_triage_recommendations
+        WHERE entity_key = $1
+          AND status = 'PENDING_REVIEW'
+          AND screening_state_hash = $2
+        LIMIT 1
+        """,
+        entity_key,
+        screening_state_hash,
+    )
+    if pending_same is not None:
+        return "skip"
+
+    result = await conn.execute(
+        """
+        UPDATE ai_triage_recommendations
+        SET status = 'SUPERSEDED',
+            updated_at = NOW()
+        WHERE entity_key = $1
+          AND status = 'PENDING_REVIEW'
+          AND screening_state_hash <> $2
+        """,
+        entity_key,
+        screening_state_hash,
+    )
+    try:
+        updated = int(result.split()[-1]) if result else 0
+    except (ValueError, IndexError):
+        updated = 0
+    return "superseded" if updated > 0 else "new"
+
+
+async def insert_ai_triage_recommendation(
+    conn,
+    *,
+    run_id: str,
+    entity_key: str,
+    screening_state_hash: str,
+    candidate: Dict[str, Any],
+    triage_result: Dict[str, Any],
+) -> str:
+    raw_action = str(triage_result.get("raw_recommended_action") or "UNSURE").strip().upper()
+    effective_action = str(triage_result.get("effective_recommended_action") or raw_action or "UNSURE").strip().upper()
+    if raw_action not in _AI_TRIAGE_ACTION_ALLOWED:
+        raw_action = "UNSURE"
+    if effective_action not in _AI_TRIAGE_ACTION_ALLOWED:
+        effective_action = "UNSURE"
+    row = await conn.fetchrow(
+        """
+        INSERT INTO ai_triage_recommendations (
+            run_id,
+            entity_key,
+            screening_state_hash,
+            submitted_name,
+            submitted_entity_type,
+            matched_name,
+            matched_entity_type,
+            matched_birth_date,
+            matched_country,
+            source_label,
+            screening_status,
+            screening_risk_level,
+            screening_score,
+            llm_runtime,
+            llm_model,
+            raw_recommended_action,
+            effective_recommended_action,
+            ai_confidence_raw,
+            ai_confidence_band,
+            rationale_short,
+            explanation_json,
+            raw_output_json,
+            result_snapshot_json,
+            guardrail_overridden,
+            guardrail_reasons,
+            status
+        )
+        VALUES (
+            $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18, $19, $20, $21::jsonb, $22::jsonb, $23::jsonb,
+            $24, $25::jsonb, 'PENDING_REVIEW'
+        )
+        RETURNING triage_id
+        """,
+        run_id,
+        entity_key,
+        screening_state_hash,
+        candidate.get("display_name") or "",
+        candidate.get("entity_type") or None,
+        candidate.get("matched_name") or None,
+        candidate.get("matched_entity_type") or None,
+        candidate.get("matched_birth_date") or None,
+        candidate.get("matched_country") or None,
+        candidate.get("source_label") or None,
+        candidate.get("status") or None,
+        candidate.get("risk_level") or None,
+        float(candidate.get("score") or 0),
+        triage_result.get("llm_runtime") or "ollama",
+        triage_result.get("llm_model") or "unknown",
+        raw_action,
+        effective_action,
+        float(triage_result.get("ai_confidence_raw") or 0),
+        triage_result.get("ai_confidence_band") or None,
+        (triage_result.get("rationale_short") or "")[:500],
+        json.dumps(triage_result.get("explanation_json") or {}),
+        json.dumps(triage_result.get("raw_output_json") or {}),
+        json.dumps(candidate.get("result_snapshot_json") or candidate.get("result_json") or {}),
+        bool(triage_result.get("guardrail_overridden")),
+        json.dumps(triage_result.get("guardrail_reasons") or []),
+    )
+    return str(row["triage_id"])
+
+
+async def insert_ai_triage_error(
+    conn,
+    *,
+    run_id: str,
+    entity_key: str,
+    screening_state_hash: str,
+    candidate: Dict[str, Any],
+    error_message: str,
+    llm_runtime: str,
+    llm_model: str,
+) -> str:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO ai_triage_recommendations (
+            run_id,
+            entity_key,
+            screening_state_hash,
+            submitted_name,
+            submitted_entity_type,
+            matched_name,
+            matched_entity_type,
+            matched_birth_date,
+            matched_country,
+            source_label,
+            screening_status,
+            screening_risk_level,
+            screening_score,
+            llm_runtime,
+            llm_model,
+            raw_recommended_action,
+            effective_recommended_action,
+            ai_confidence_raw,
+            ai_confidence_band,
+            rationale_short,
+            explanation_json,
+            raw_output_json,
+            result_snapshot_json,
+            guardrail_overridden,
+            guardrail_reasons,
+            status
+        )
+        VALUES (
+            $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, 'UNSURE', 'UNSURE', 0, '<0.70', $16, '{}'::jsonb, $17::jsonb, $18::jsonb,
+            FALSE, '[]'::jsonb, 'ERROR'
+        )
+        RETURNING triage_id
+        """,
+        run_id,
+        entity_key,
+        screening_state_hash,
+        candidate.get("display_name") or "",
+        candidate.get("entity_type") or None,
+        candidate.get("matched_name") or None,
+        candidate.get("matched_entity_type") or None,
+        candidate.get("matched_birth_date") or None,
+        candidate.get("matched_country") or None,
+        candidate.get("source_label") or None,
+        candidate.get("status") or None,
+        candidate.get("risk_level") or None,
+        float(candidate.get("score") or 0),
+        llm_runtime,
+        llm_model,
+        (error_message or "AI triage failed")[:500],
+        json.dumps({"error": error_message}),
+        json.dumps(candidate.get("result_snapshot_json") or candidate.get("result_json") or {}),
+    )
+    return str(row["triage_id"])
+
+
 async def shortlist_screened_entities_by_terms(
     conn,
     *,
@@ -799,6 +1230,21 @@ async def get_dashboard_summary(conn) -> Dict[str, Any]:
         LIMIT 1
         """
     )
+    pending_ai = await conn.fetchrow(
+        """
+        SELECT COUNT(*)::int AS n
+        FROM ai_triage_recommendations
+        WHERE status = 'PENDING_REVIEW'
+        """
+    )
+    latest_ai_run = await conn.fetchrow(
+        """
+        SELECT *
+        FROM ai_triage_runs
+        ORDER BY started_at DESC
+        LIMIT 1
+        """
+    )
 
     claimed_today = int((overview or {}).get("claimed_today") or 0)
     completed_today = int((overview or {}).get("completed_today") or 0)
@@ -830,6 +1276,10 @@ async def get_dashboard_summary(conn) -> Dict[str, Any]:
                 "last_refresh_at": last_refresh_at,
                 "hours_since_refresh": hours_since_refresh,
                 "latest_refresh": dict(latest_refresh) if latest_refresh else None,
+            },
+            "ai_triage": {
+                "pending_recommendations": int((pending_ai or {}).get("n") or 0),
+                "latest_run": dict(latest_ai_run) if latest_ai_run else None,
             },
         }
     )
@@ -905,6 +1355,133 @@ async def search_screened_entities(
             elif not isinstance(rj, dict):
                 rj = dict(rj) if hasattr(rj, "items") else rj
             d["result_json"] = _to_json_safe(rj)
+        out.append(_to_json_safe(d))
+    return out
+
+
+async def export_screened_entities_for_mi(
+    conn,
+    *,
+    screened_from: Optional[str] = None,
+    screened_to: Optional[str] = None,
+    review_status: Optional[str] = None,
+    include_cleared: bool = True,
+) -> List[Dict[str, Any]]:
+    conditions: List[str] = []
+    args: List[Any] = []
+    n = 0
+
+    if not include_cleared:
+        conditions.append("status NOT ILIKE 'Cleared%'")
+    if screened_from and screened_from.strip():
+        n += 1
+        conditions.append(f"last_screened_at >= ${n}::timestamptz")
+        args.append(screened_from.strip())
+    if screened_to and screened_to.strip():
+        n += 1
+        conditions.append(f"last_screened_at < ${n}::timestamptz")
+        args.append(screened_to.strip())
+    review_status_clean = (review_status or "").strip().upper()
+    if review_status_clean:
+        if review_status_clean == "UNREVIEWED":
+            conditions.append("review_status IS NULL")
+        elif review_status_clean in _REVIEW_STATUS_ALLOWED:
+            n += 1
+            conditions.append(f"review_status = ${n}")
+            args.append(review_status_clean)
+        else:
+            raise ValueError("review_status must be UNREVIEWED, IN_REVIEW, or COMPLETED")
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = await conn.fetch(
+        f"""
+        SELECT
+            entity_key,
+            display_name,
+            normalized_name,
+            date_of_birth,
+            country_input,
+            entity_type,
+            last_screened_at,
+            screening_valid_until,
+            status,
+            risk_level,
+            confidence,
+            score,
+            uk_sanctions_flag,
+            pep_flag,
+            last_requestor,
+            business_reference,
+            reason_for_check,
+            review_status,
+            review_claimed_by,
+            review_claimed_at,
+            review_outcome,
+            review_notes,
+            review_completed_by,
+            review_completed_at,
+            updated_at,
+            result_json->>'Sanctions Name' AS result_sanctions_name,
+            result_json->>'Birth Date' AS result_birth_date,
+            result_json->>'Regime' AS result_regime,
+            COALESCE((result_json->>'Is Sanctioned')::boolean, FALSE) AS result_is_sanctioned,
+            COALESCE((result_json->>'Is PEP')::boolean, FALSE) AS result_is_pep,
+            COALESCE((result_json->>'Match Found')::boolean, FALSE) AS result_match_found,
+            result_json->>'Risk Level' AS result_risk_level,
+            result_json->>'Confidence' AS result_confidence,
+            result_json->>'Score' AS result_score,
+            result_json->'Check Summary'->>'Status' AS result_check_status,
+            result_json->'Check Summary'->>'Source' AS result_check_source,
+            result_json->'Check Summary'->>'Date' AS result_check_date,
+            result_json->'Entity Type Checks'->'Person'->>'status' AS person_check_status,
+            COALESCE((result_json->'Entity Type Checks'->'Person'->>'is_match')::boolean, FALSE) AS person_check_is_match,
+            result_json->'Entity Type Checks'->'Person'->>'score' AS person_check_score,
+            result_json->'Entity Type Checks'->'Organization'->>'status' AS organization_check_status,
+            COALESCE((result_json->'Entity Type Checks'->'Organization'->>'is_match')::boolean, FALSE) AS organization_check_is_match,
+            result_json->'Entity Type Checks'->'Organization'->>'score' AS organization_check_score,
+            COALESCE((result_json->'PEP Check'->>'checked')::boolean, FALSE) AS pep_check_checked,
+            result_json->'PEP Check'->>'status' AS pep_check_status,
+            result_json->'PEP Check'->>'reason' AS pep_check_reason,
+            result_json->'PEP Check'->>'message' AS pep_check_message,
+            result_json->'Input Classification'->>'submitted_as' AS input_submitted_as,
+            result_json->'Input Classification'->>'inferred_as' AS input_inferred_as,
+            COALESCE((result_json->'Input Classification'->>'likely_misclassified')::boolean, FALSE) AS input_likely_misclassified,
+            result_json->'Input Classification'->>'confidence' AS input_classification_confidence,
+            result_json->'Input Classification'->'signals' AS input_classification_signals_json,
+            result_json->'Top Matches' AS top_matches_json,
+            result_json AS result_json
+        FROM screened_entities
+        {where_sql}
+        ORDER BY last_screened_at DESC
+        """,
+        *args,
+    )
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        for key in (
+            "last_screened_at",
+            "screening_valid_until",
+            "review_claimed_at",
+            "review_completed_at",
+            "updated_at",
+        ):
+            if d.get(key) is not None:
+                d[key] = d[key].isoformat()
+        if d.get("date_of_birth") is not None:
+            d["date_of_birth"] = d["date_of_birth"].isoformat()
+        if d.get("score") is not None:
+            d["score"] = float(d["score"])
+        for key in ("result_score", "person_check_score", "organization_check_score"):
+            if d.get(key) not in (None, ""):
+                try:
+                    d[key] = float(d[key])
+                except Exception:
+                    pass
+        for key in ("input_classification_signals_json", "top_matches_json", "result_json"):
+            if d.get(key) is not None:
+                d[key] = json.dumps(_to_json_safe(d[key]), ensure_ascii=True, sort_keys=True)
         out.append(_to_json_safe(d))
     return out
 
@@ -1090,6 +1667,165 @@ async def complete_review(
     return {"status": "error", "error": "not_in_review", "review_status": existing.get("review_status")}
 
 
+async def list_ai_triage_tasks(
+    conn,
+    *,
+    status: Optional[str] = "PENDING_REVIEW",
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    conditions: List[str] = []
+    args: List[Any] = []
+    n = 0
+    status_clean = (status or "").strip().upper()
+    if status_clean:
+        if status_clean not in _AI_TRIAGE_STATUS_ALLOWED:
+            raise ValueError("status must be one of PENDING_REVIEW, APPROVED, REJECTED, SUPERSEDED, or ERROR")
+        n += 1
+        conditions.append(f"r.status = ${n}")
+        args.append(status_clean)
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    args.extend([limit, offset])
+    idx_limit = len(args) - 1
+    idx_offset = len(args)
+    rows = await conn.fetch(
+        f"""
+        SELECT
+            r.triage_id,
+            r.run_id,
+            r.entity_key,
+            r.submitted_name,
+            r.submitted_entity_type,
+            r.matched_name,
+            r.matched_entity_type,
+            r.source_label,
+            r.screening_status,
+            r.screening_risk_level,
+            r.screening_score,
+            r.raw_recommended_action,
+            r.effective_recommended_action,
+            r.ai_confidence_raw,
+            r.ai_confidence_band,
+            r.rationale_short,
+            r.guardrail_overridden,
+            r.guardrail_reasons,
+            r.status,
+            r.human_decision,
+            r.reviewer,
+            r.reviewed_at,
+            r.final_screening_outcome,
+            r.agreement_indicator,
+            r.created_at,
+            se.business_reference,
+            se.reason_for_check
+        FROM ai_triage_recommendations r
+        LEFT JOIN screened_entities se
+          ON se.entity_key = r.entity_key
+        {where_sql}
+        ORDER BY r.created_at DESC
+        LIMIT ${idx_limit} OFFSET ${idx_offset}
+        """,
+        *args,
+    )
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key in ("explanation_json", "raw_output_json", "result_snapshot_json", "guardrail_reasons"):
+            if key in item:
+                item[key] = _decode_jsonish(item.get(key))
+        out.append(_to_json_safe(item))
+    return out
+
+
+async def get_ai_triage_task(conn, *, triage_id: str) -> Optional[Dict[str, Any]]:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            r.*,
+            se.business_reference,
+            se.reason_for_check,
+            se.review_status AS screening_review_status
+        FROM ai_triage_recommendations r
+        LEFT JOIN screened_entities se
+          ON se.entity_key = r.entity_key
+        WHERE r.triage_id = $1::uuid
+        LIMIT 1
+        """,
+        triage_id,
+    )
+    if row is None:
+        return None
+    item = dict(row)
+    for key in ("explanation_json", "raw_output_json", "result_snapshot_json", "guardrail_reasons"):
+        if key in item:
+            item[key] = _decode_jsonish(item.get(key))
+    return _to_json_safe(item)
+
+
+async def approve_ai_triage_task(
+    conn,
+    *,
+    triage_id: str,
+    reviewer: str,
+    reviewer_notes: Optional[str],
+    final_screening_outcome: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    row = await conn.fetchrow(
+        """
+        UPDATE ai_triage_recommendations
+        SET status = 'APPROVED',
+            human_decision = 'APPROVED',
+            reviewer = $2,
+            reviewed_at = NOW(),
+            reviewer_notes = $3,
+            final_screening_outcome = $4,
+            agreement_indicator = 'AGREED',
+            updated_at = NOW()
+        WHERE triage_id = $1::uuid
+          AND status = 'PENDING_REVIEW'
+        RETURNING *
+        """,
+        triage_id,
+        reviewer,
+        (reviewer_notes or "").strip() or None,
+        (final_screening_outcome or "").strip() or None,
+    )
+    return _to_json_safe(dict(row)) if row else None
+
+
+async def reject_ai_triage_task(
+    conn,
+    *,
+    triage_id: str,
+    reviewer: str,
+    reviewer_notes: Optional[str],
+    final_screening_outcome: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    row = await conn.fetchrow(
+        """
+        UPDATE ai_triage_recommendations
+        SET status = 'REJECTED',
+            human_decision = 'REJECTED',
+            reviewer = $2,
+            reviewed_at = NOW(),
+            reviewer_notes = $3,
+            final_screening_outcome = $4,
+            agreement_indicator = 'DISAGREED',
+            updated_at = NOW()
+        WHERE triage_id = $1::uuid
+          AND status = 'PENDING_REVIEW'
+        RETURNING *
+        """,
+        triage_id,
+        reviewer,
+        (reviewer_notes or "").strip() or None,
+        (final_screening_outcome or "").strip() or None,
+    )
+    return _to_json_safe(dict(row)) if row else None
+
+
 def _to_json_safe(obj: Any) -> Any:
     """Convert non-JSON-serializable types so FastAPI can serialize the response."""
     if obj is None:
@@ -1107,6 +1843,21 @@ def _to_json_safe(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_to_json_safe(v) for v in obj]
     return obj
+
+
+def _decode_jsonish(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return value
+    return dict(value) if hasattr(value, "items") else value
 
 
 async def purge_screened_entities_older_than(conn, months: int) -> int:

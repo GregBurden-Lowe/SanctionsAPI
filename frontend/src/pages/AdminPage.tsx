@@ -1,8 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, CardHeader, CardTitle, CardBody, SectionHeader, ErrorBox } from '@/components'
-import { clearScreeningData, getMatchingConfig, getRescreenSummary, updateMatchingConfig, type MatchingConfigResponse } from '@/api/client'
-import type { RefreshRunSummaryResponse } from '@/types/api'
+import {
+  clearScreeningData,
+  getAiTriageHealth,
+  getMatchingConfig,
+  getRescreenSummary,
+  listAiTriageRuns,
+  runAiTriage,
+  updateMatchingConfig,
+  type MatchingConfigResponse,
+} from '@/api/client'
+import type { AiTriageHealthResponse, AiTriageRun, RefreshRunSummaryResponse } from '@/types/api'
 
 export function AdminPage() {
   const navigate = useNavigate()
@@ -18,6 +27,12 @@ export function AdminPage() {
   const [matchingSaving, setMatchingSaving] = useState(false)
   const [matchingError, setMatchingError] = useState<string | null>(null)
   const [matchingSaved, setMatchingSaved] = useState<string | null>(null)
+  const [aiHealth, setAiHealth] = useState<AiTriageHealthResponse | null>(null)
+  const [aiRuns, setAiRuns] = useState<AiTriageRun[]>([])
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiRunning, setAiRunning] = useState(false)
+  const [aiError, setAiError] = useState<string | null>(null)
+  const [aiMessage, setAiMessage] = useState<string | null>(null)
 
   const loadSummary = async () => {
     setSummaryLoading(true)
@@ -70,6 +85,39 @@ export function AdminPage() {
     void loadMatchingConfig()
   }, [])
 
+  const loadAiTriage = async () => {
+    setAiLoading(true)
+    setAiError(null)
+    setAiMessage(null)
+    try {
+      const [healthRes, runsRes] = await Promise.all([getAiTriageHealth(), listAiTriageRuns(10)])
+      const healthData = await healthRes.json().catch(() => ({}))
+      const runsData = await runsRes.json().catch(() => ({}))
+      if (!healthRes.ok) {
+        setAiError((healthData as { detail?: string }).detail ?? 'Failed to load AI triage health.')
+        setAiHealth(null)
+      } else {
+        setAiHealth(healthData as AiTriageHealthResponse)
+      }
+      if (!runsRes.ok) {
+        setAiError((runsData as { detail?: string }).detail ?? 'Failed to load AI triage runs.')
+        setAiRuns([])
+      } else {
+        setAiRuns(((runsData as { items?: AiTriageRun[] }).items ?? []) as AiTriageRun[])
+      }
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'Failed to load AI triage tools.')
+      setAiHealth(null)
+      setAiRuns([])
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadAiTriage()
+  }, [])
+
   const handleSaveMatchingConfig = async () => {
     setMatchingSaving(true)
     setMatchingError(null)
@@ -116,6 +164,29 @@ export function AdminPage() {
       setClearError(err instanceof Error ? err.message : 'Network error.')
     } finally {
       setClearing(false)
+    }
+  }
+
+  const handleRunAiTriage = async () => {
+    setAiRunning(true)
+    setAiError(null)
+    setAiMessage(null)
+    try {
+      const res = await runAiTriage(25)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setAiError((data as { detail?: string }).detail ?? 'Failed to start AI triage run.')
+        return
+      }
+      const typed = data as { run_id?: string; selected?: number; created?: number; skipped?: number; errors?: number }
+      setAiMessage(
+        `AI triage run started${typed.run_id ? ` (${typed.run_id})` : ''}. Selected ${(data as { selected_count?: number }).selected_count ?? typed.selected ?? 0}, created ${(data as { created_count?: number }).created_count ?? typed.created ?? 0}, skipped ${(data as { skipped_count?: number }).skipped_count ?? typed.skipped ?? 0}, errors ${(data as { error_count?: number }).error_count ?? typed.errors ?? 0}.`,
+      )
+      await loadAiTriage()
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'Failed to start AI triage run.')
+    } finally {
+      setAiRunning(false)
     }
   }
 
@@ -236,6 +307,51 @@ export function AdminPage() {
                   </span>
                 ))}
               </div>
+            </div>
+          </CardBody>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>AI triage</CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            <p className="text-sm text-text-secondary">
+              Run local Ollama triage for outstanding sanctions matches. Recommendations stay advisory until a human approves them in the AI Suggestions queue.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="secondary" onClick={() => void loadAiTriage()} disabled={aiLoading || aiRunning}>
+                {aiLoading ? 'Refreshing…' : 'Refresh AI status'}
+              </Button>
+              <Button type="button" onClick={() => void handleRunAiTriage()} disabled={aiRunning || aiLoading}>
+                {aiRunning ? 'Running…' : 'Run AI triage now'}
+              </Button>
+            </div>
+            {aiError && <ErrorBox message={aiError} />}
+            {aiMessage && <p className="text-sm text-semantic-success">{aiMessage}</p>}
+            <div className="rounded-lg border border-border bg-app p-4 text-sm text-text-secondary">
+              <p><span className="font-semibold text-text-primary">Runtime:</span> {aiHealth?.runtime ?? '—'}</p>
+              <p><span className="font-semibold text-text-primary">Configured model:</span> {aiHealth?.configured_model ?? '—'}</p>
+              <p><span className="font-semibold text-text-primary">Reachable:</span> {aiHealth ? (aiHealth.reachable ? 'Yes' : 'No') : '—'}</p>
+              <p><span className="font-semibold text-text-primary">Model present:</span> {aiHealth ? (aiHealth.model_present ? 'Yes' : 'No') : '—'}</p>
+              <p><span className="font-semibold text-text-primary">Concurrency:</span> {aiHealth?.max_concurrency ?? '—'}</p>
+              {aiHealth?.error && <p><span className="font-semibold text-text-primary">Error:</span> {aiHealth.error}</p>}
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-medium text-text-muted">Recent runs</p>
+              {aiRuns.length === 0 ? (
+                <p className="text-sm text-text-secondary">No AI triage runs recorded yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {aiRuns.map((run) => (
+                    <div key={run.run_id} className="rounded-lg border border-border bg-white px-3 py-3 text-sm text-text-secondary">
+                      <p className="font-semibold text-text-primary">{run.trigger_type} run • {run.status}</p>
+                      <p>Started: {new Date(run.started_at).toLocaleString()}</p>
+                      <p>Model: {run.llm_model}</p>
+                      <p>Selected/created/skipped/errors: {run.selected_count}/{run.created_count}/{run.skipped_count}/{run.error_count}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </CardBody>
         </Card>
