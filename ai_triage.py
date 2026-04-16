@@ -267,10 +267,7 @@ async def run_ai_triage_batch(
         selected = len(candidates)
         await screening_db_module.update_ai_triage_run_selected(conn, run_id=run_id, selected_count=selected)
 
-        semaphore = asyncio.Semaphore(cfg["max_concurrency"])
-
-        async def _process(candidate: Dict[str, Any]) -> None:
-            nonlocal created, skipped, superseded, error_count
+        for candidate in candidates:
             screening_hash = screening_state_hash(candidate.get("result_json") or {})
             disposition = await screening_db_module.prepare_ai_triage_recommendation(
                 conn,
@@ -279,37 +276,34 @@ async def run_ai_triage_batch(
             )
             if disposition == "skip":
                 skipped += 1
-                return
+                continue
             if disposition == "superseded":
                 superseded += 1
-            async with semaphore:
-                try:
-                    triage = await triage_candidate(candidate)
-                    await screening_db_module.insert_ai_triage_recommendation(
-                        conn,
-                        run_id=run_id,
-                        entity_key=str(candidate.get("entity_key") or ""),
-                        screening_state_hash=screening_hash,
-                        candidate=candidate,
-                        triage_result=triage,
-                    )
-                    created += 1
-                except Exception as e:
-                    error_count += 1
-                    errors.append(f"{candidate.get('entity_key')}: {e}")
-                    logger.exception("AI triage failed entity_key=%s", candidate.get("entity_key"))
-                    await screening_db_module.insert_ai_triage_error(
-                        conn,
-                        run_id=run_id,
-                        entity_key=str(candidate.get("entity_key") or ""),
-                        screening_state_hash=screening_hash,
-                        candidate=candidate,
-                        error_message=str(e),
-                        llm_runtime=cfg["runtime"],
-                        llm_model=cfg["model"],
-                    )
-
-        await asyncio.gather(*[_process(candidate) for candidate in candidates])
+            try:
+                triage = await triage_candidate(candidate)
+                await screening_db_module.insert_ai_triage_recommendation(
+                    conn,
+                    run_id=run_id,
+                    entity_key=str(candidate.get("entity_key") or ""),
+                    screening_state_hash=screening_hash,
+                    candidate=candidate,
+                    triage_result=triage,
+                )
+                created += 1
+            except Exception as e:
+                error_count += 1
+                errors.append(f"{candidate.get('entity_key')}: {e}")
+                logger.exception("AI triage failed entity_key=%s", candidate.get("entity_key"))
+                await screening_db_module.insert_ai_triage_error(
+                    conn,
+                    run_id=run_id,
+                    entity_key=str(candidate.get("entity_key") or ""),
+                    screening_state_hash=screening_hash,
+                    candidate=candidate,
+                    error_message=str(e),
+                    llm_runtime=cfg["runtime"],
+                    llm_model=cfg["model"],
+                )
         await screening_db_module.finalize_ai_triage_run(
             conn,
             run_id=run_id,
