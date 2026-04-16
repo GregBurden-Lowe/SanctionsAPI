@@ -443,6 +443,7 @@ class AiTriageRunRequest(BaseModel):
 
 class AiTriageDecisionRequest(BaseModel):
     reviewer_notes: Optional[constr(strip_whitespace=True, min_length=3)] = Field(None, description="Optional reviewer note")
+    apply_clear: bool = Field(False, description="When true, approve the AI recommendation and clear the underlying screening result as a false positive")
 
 
 # Internal queue-ingestion API: request body (no screening results returned).
@@ -2560,17 +2561,26 @@ async def approve_ai_triage_task(
             raise HTTPException(status_code=409, detail="Only pending AI tasks can be approved")
         final_screening_outcome = task.get("screening_status") or task.get("final_screening_outcome")
         effective_action = str(task.get("effective_recommended_action") or "UNSURE").upper()
-        if effective_action == "CLEAR":
+        if body.apply_clear:
+            ai_rationale = str(task.get("rationale_short") or "").strip()
+            ai_note = ""
+            if isinstance(task.get("explanation_json"), dict):
+                ai_note = str((task.get("explanation_json") or {}).get("reviewer_note") or "").strip()
+            reason_parts = [
+                f"AI triage approved clear by {actor}.",
+                f"Recommendation={effective_action}; confidence={task.get('ai_confidence_band') or task.get('ai_confidence_raw')}.",
+            ]
+            if ai_rationale:
+                reason_parts.append(f"AI rationale: {ai_rationale}")
+            if ai_note:
+                reason_parts.append(f"AI note: {ai_note}")
+            if body.reviewer_notes:
+                reason_parts.append(f"Reviewer note: {body.reviewer_notes.strip()}")
             cleared = await screening_db.mark_false_positive(
                 conn,
                 entity_key=str(task.get("entity_key") or ""),
                 actor=actor,
-                reason=(
-                    f"AI triage approved by {actor}. "
-                    f"Model={task.get('llm_model')}; recommendation=CLEAR; "
-                    f"confidence={task.get('ai_confidence_band') or task.get('ai_confidence_raw')}. "
-                    f"{(body.reviewer_notes or '').strip()}".strip()
-                ),
+                reason=" ".join(part for part in reason_parts if part).strip(),
             )
             if cleared is not None:
                 summary = cleared.get("Check Summary") if isinstance(cleared.get("Check Summary"), dict) else {}
@@ -2596,6 +2606,7 @@ async def approve_ai_triage_task(
             "recommended_action": task.get("effective_recommended_action"),
             "raw_recommended_action": task.get("raw_recommended_action"),
             "guardrail_overridden": task.get("guardrail_overridden"),
+            "apply_clear": bool(body.apply_clear),
         },
     )
     return {"status": "ok", "item": approved}
@@ -2613,6 +2624,7 @@ async def reject_ai_triage_task(
     if pool is None:
         raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
     actor = str(payload.get("sub") or "").strip() or "unknown_user"
+    claim_result = None
     async with pool.acquire() as conn:
         task = await screening_db.get_ai_triage_task(conn, triage_id=triage_id)
         if task is None:
@@ -2625,6 +2637,11 @@ async def reject_ai_triage_task(
             reviewer=actor,
             reviewer_notes=body.reviewer_notes,
             final_screening_outcome=str(task.get("screening_status") or ""),
+        )
+        claim_result = await screening_db.ensure_review_claimed_by_user(
+            conn,
+            entity_key=str(task.get("entity_key") or ""),
+            claimed_by=actor,
         )
     if rejected is None:
         raise HTTPException(status_code=409, detail="Only pending AI tasks can be rejected")
@@ -2639,9 +2656,11 @@ async def reject_ai_triage_task(
             "triage_id": triage_id,
             "recommended_action": task.get("effective_recommended_action"),
             "raw_recommended_action": task.get("raw_recommended_action"),
+            "auto_claim_result": (claim_result or {}).get("status"),
+            "auto_claim_error": (claim_result or {}).get("error"),
         },
     )
-    return {"status": "ok", "item": rejected}
+    return {"status": "ok", "item": rejected, "review_claim": claim_result}
 
 
 # ---------------------------

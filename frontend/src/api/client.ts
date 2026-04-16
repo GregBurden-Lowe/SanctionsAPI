@@ -450,11 +450,15 @@ export async function getAiTriageTask(triageId: string): Promise<Response> {
   })
 }
 
-export async function approveAiTriageTask(triageId: string, reviewerNotes?: string): Promise<Response> {
+export async function approveAiTriageTask(
+  triageId: string,
+  reviewerNotes?: string,
+  applyClear = false,
+): Promise<Response> {
   return authFetch(resolve(`/ai-triage/tasks/${encodeURIComponent(triageId)}/approve`), {
     method: 'POST',
     headers: defaultHeaders(),
-    body: JSON.stringify({ reviewer_notes: reviewerNotes ?? null }),
+    body: JSON.stringify({ reviewer_notes: reviewerNotes ?? null, apply_clear: applyClear }),
   })
 }
 

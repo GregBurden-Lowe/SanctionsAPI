@@ -90,21 +90,32 @@ export function AiTriagePage() {
     }
   }
 
-  const handleAction = async (action: 'approve' | 'reject') => {
+  const handleAction = async (action: 'approve' | 'reject', applyClear = false) => {
     if (!selected) return
     setActionLoading(true)
     setActionError(null)
     try {
       const res =
         action === 'approve'
-          ? await approveAiTriageTask(selected.triage_id, reviewNotes.trim() || undefined)
+          ? await approveAiTriageTask(selected.triage_id, reviewNotes.trim() || undefined, applyClear)
           : await rejectAiTriageTask(selected.triage_id, reviewNotes.trim() || undefined)
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setActionError((data as { detail?: string }).detail ?? `Failed to ${action} AI suggestion.`)
         return
       }
-      setToast(action === 'approve' ? 'AI suggestion approved.' : 'AI suggestion rejected.')
+      setToast(
+        action === 'approve'
+          ? applyClear
+            ? 'AI suggestion approved and screening result cleared.'
+            : 'AI suggestion approved.'
+          : (() => {
+              const claim = (data as { review_claim?: { status?: string; error?: string; item?: { review_claimed_by?: string | null } } }).review_claim
+              if (claim?.status === 'ok') return 'AI suggestion rejected and moved into your Match Review queue.'
+              if (claim?.error === 'claimed_by_other') return 'AI suggestion rejected. The underlying record is already claimed by another user in Match Review.'
+              return 'AI suggestion rejected. Please review the record manually in Match Review.'
+            })(),
+      )
       setSelected(null)
       setReviewNotes('')
       await load()
@@ -242,9 +253,13 @@ export function AiTriagePage() {
                 <BiXCircle className="h-4 w-4" />
                 Reject
               </Button>
-              <Button type="button" onClick={() => void handleAction('approve')} disabled={actionLoading || detailLoading}>
+              <Button type="button" variant="secondary" onClick={() => void handleAction('approve')} disabled={actionLoading || detailLoading}>
                 <BiCheckCircle className="h-4 w-4" />
-                Approve
+                Approve only
+              </Button>
+              <Button type="button" onClick={() => void handleAction('approve', true)} disabled={actionLoading || detailLoading}>
+                <BiCheckCircle className="h-4 w-4" />
+                Approve & clear
               </Button>
             </div>
           </div>
@@ -331,8 +346,11 @@ export function AiTriagePage() {
                 value={reviewNotes}
                 onChange={(event) => setReviewNotes(event.target.value)}
                 className="min-h-[120px] w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
-                placeholder="Optional note for why you approved or rejected this AI recommendation."
+                placeholder="Optional note for why you approved, rejected, or cleared this AI recommendation."
               />
+              <p className="mt-2 text-xs text-text-secondary">
+                If you choose <span className="font-semibold">Approve & clear</span>, the AI rationale and your reviewer note will be stored against the underlying screening record as part of the false-positive clear reason.
+              </p>
             </div>
             {actionError && <ErrorBox message={actionError} />}
           </div>

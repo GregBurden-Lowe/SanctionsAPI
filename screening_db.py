@@ -1614,6 +1614,57 @@ async def claim_review(
     return {"status": "error", "error": "not_unreviewed", "review_status": existing.get("review_status")}
 
 
+async def ensure_review_claimed_by_user(
+    conn,
+    *,
+    entity_key: str,
+    claimed_by: str,
+) -> Dict[str, Any]:
+    """
+    Ensure a reviewable record is in the caller's queue.
+    - If unreviewed, claim it.
+    - If already claimed by the same user, return ok.
+    - If claimed by someone else or completed/cleared, return an error state.
+    """
+    claimed_by_clean = (claimed_by or "").strip()
+    if not claimed_by_clean:
+        raise ValueError("claimed_by is required")
+
+    claimed = await claim_review(conn, entity_key=entity_key, claimed_by=claimed_by_clean)
+    if claimed.get("status") == "ok":
+        item = claimed.get("item") or {}
+        item["claim_status"] = "claimed"
+        return {"status": "ok", "item": item}
+
+    row = await conn.fetchrow(
+        """
+        SELECT entity_key, display_name, status, business_reference, reason_for_check,
+               COALESCE(review_status, 'UNREVIEWED') AS review_status,
+               review_claimed_by, review_claimed_at
+        FROM screened_entities
+        WHERE entity_key = $1
+        LIMIT 1
+        """,
+        entity_key,
+    )
+    if row is None:
+        return {"status": "error", "error": "not_found"}
+
+    item = _to_json_safe(dict(row))
+    review_status = str(item.get("review_status") or "").upper()
+    review_claimed_by = str(item.get("review_claimed_by") or "").strip()
+    if str(item.get("status") or "").lower().startswith("cleared"):
+        return {"status": "error", "error": "not_reviewable", "item": item}
+    if review_status == "IN_REVIEW" and review_claimed_by.lower() == claimed_by_clean.lower():
+        item["claim_status"] = "already_claimed_by_user"
+        return {"status": "ok", "item": item}
+    if review_status == "COMPLETED":
+        return {"status": "error", "error": "already_completed", "item": item}
+    if review_status == "IN_REVIEW" and review_claimed_by:
+        return {"status": "error", "error": "claimed_by_other", "item": item}
+    return {"status": "error", "error": "not_claimable", "item": item}
+
+
 async def complete_review(
     conn,
     *,

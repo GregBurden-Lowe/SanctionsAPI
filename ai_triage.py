@@ -23,6 +23,18 @@ HIGH_RISK_DATASET_PATTERNS = (
     "hm treasury",
     "ofsi",
 )
+PERSON_NAME_STOPWORDS = {
+    "mr",
+    "mrs",
+    "ms",
+    "miss",
+    "master",
+    "dr",
+    "prof",
+    "sir",
+    "lord",
+    "lady",
+}
 
 
 def get_local_llm_config() -> Dict[str, Any]:
@@ -69,6 +81,67 @@ def _near_exact_match(left: str, right: str) -> bool:
     return fuzz.ratio(ln, rn) >= 95
 
 
+def _person_name_tokens(name: str) -> List[str]:
+    normalized = _normalize_text(name or "")
+    if not normalized:
+        return []
+    return [token for token in normalized.split() if token and token not in PERSON_NAME_STOPWORDS]
+
+
+def _person_surname(name: str) -> Optional[str]:
+    tokens = _person_name_tokens(name)
+    return tokens[-1] if tokens else None
+
+
+def _obvious_clear_nudge(candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    searched_name = candidate.get("display_name") or ""
+    matched_name = candidate.get("matched_name") or ""
+    searched_type = str(candidate.get("entity_type") or "").strip().lower()
+    matched_type = str(candidate.get("matched_entity_type") or "").strip().lower()
+    if searched_type != "person" and matched_type != "person":
+        return None
+
+    similarity = _normalized_similarity(searched_name, matched_name)
+    if _near_exact_match(searched_name, matched_name) or similarity >= 88:
+        return None
+
+    dob = str(candidate.get("date_of_birth") or "").strip()
+    matched_dob = str(candidate.get("matched_birth_date") or "").strip()
+    if dob and matched_dob and dob == matched_dob:
+        return None
+
+    searched_tokens = _person_name_tokens(searched_name)
+    matched_tokens = _person_name_tokens(matched_name)
+    if not searched_tokens or not matched_tokens:
+        return None
+
+    shared_tokens = sorted(set(searched_tokens) & set(matched_tokens))
+    searched_surname = _person_surname(searched_name)
+    matched_surname = _person_surname(matched_name)
+
+    if not shared_tokens and similarity <= 68:
+        return {
+            "recommended_action": "CLEAR",
+            "confidence": 0.86,
+            "reason": "No meaningful name-token overlap and low overall similarity.",
+        }
+
+    if (
+        searched_surname
+        and matched_surname
+        and searched_surname != matched_surname
+        and similarity <= 78
+        and len(shared_tokens) <= 2
+    ):
+        return {
+            "recommended_action": "CLEAR",
+            "confidence": 0.84,
+            "reason": "Core surnames differ and overlap is too weak to justify keeping the case as unsure.",
+        }
+
+    return None
+
+
 def _is_high_risk_source(source_label: str) -> bool:
     source = (source_label or "").lower()
     return any(pattern in source for pattern in HIGH_RISK_DATASET_PATTERNS)
@@ -96,8 +169,25 @@ def _build_prompt(candidate: Dict[str, Any]) -> str:
         "rules": [
             "Use common-sense entity resolution, not just token matching.",
             "Infer whether the searched entity looks more like a Person or Organization.",
+            "When the core surnames or distinctive company words differ and there is no supporting identifier match, prefer CLEAR rather than UNSURE.",
+            "Use UNSURE only when there is genuinely mixed evidence, not for obvious mismatches.",
+            "Use INVESTIGATE for strong overlaps, exact/near-exact aliases, or corroborating identifiers such as matching DOB or country.",
             "If evidence is weak or ambiguous, return UNSURE.",
             "Return only JSON.",
+        ],
+        "examples": [
+            {
+                "searched_name": "Lisa J O'Hanlon",
+                "matched_name": "Lisa J Hou",
+                "recommended_action": "CLEAR",
+                "why": "Shared first name/initial is not enough when the surname clearly differs.",
+            },
+            {
+                "searched_name": "Keir Starmer",
+                "matched_name": "Keir Starmer",
+                "recommended_action": "INVESTIGATE",
+                "why": "Exact same name should not be treated as a clear false positive.",
+            },
         ],
         "output_schema": {
             "inferred_searched_entity_type": "Person | Organization",
@@ -206,6 +296,13 @@ def triage_candidate_sync(candidate: Dict[str, Any]) -> Dict[str, Any]:
     raw_output = _call_ollama_json(prompt)
     raw_action = str(raw_output.get("recommended_action") or "UNSURE").strip().upper()
     raw_confidence = float(raw_output.get("confidence") or raw_output.get("same_entity_likelihood") or 0)
+    clear_nudge = _obvious_clear_nudge(candidate)
+    if raw_action == "UNSURE" and clear_nudge is not None:
+        raw_action = "CLEAR"
+        raw_confidence = max(raw_confidence, float(clear_nudge["confidence"]))
+        raw_output["recommended_action"] = "CLEAR"
+        raw_output["confidence"] = raw_confidence
+        raw_output["rationale_short"] = clear_nudge["reason"]
     effective_action, overridden, guardrail_reasons = apply_guardrails(candidate, raw_action)
     rationale = str(raw_output.get("rationale_short") or "").strip() or "No rationale provided."
     key_differences = raw_output.get("key_differences")

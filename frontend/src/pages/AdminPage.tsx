@@ -348,6 +348,11 @@ export function AdminPage() {
                       <p>Started: {new Date(run.started_at).toLocaleString()}</p>
                       <p>Model: {run.llm_model}</p>
                       <p>Selected/created/skipped/errors: {run.selected_count}/{run.created_count}/{run.skipped_count}/{run.error_count}</p>
+                      {run.error_message && (
+                        <div className="mt-2 rounded-lg border border-[rgba(239,68,68,0.18)] bg-[rgba(239,68,68,0.06)] px-3 py-2 text-xs text-[#b42318] whitespace-pre-wrap break-words">
+                          {run.error_message}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
