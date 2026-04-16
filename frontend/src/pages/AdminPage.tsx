@@ -316,7 +316,7 @@ export function AdminPage() {
           </CardHeader>
           <CardBody className="space-y-4">
             <p className="text-sm text-text-secondary">
-              Run local Ollama triage for outstanding sanctions matches. Recommendations stay advisory until a human approves them in the AI Suggestions queue.
+              Run local Ollama triage for outstanding sanctions and PEP matches. Recommendations stay advisory until a human approves them in the AI Suggestions queue.
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <Button type="button" variant="secondary" onClick={() => void loadAiTriage()} disabled={aiLoading || aiRunning}>

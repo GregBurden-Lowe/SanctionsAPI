@@ -438,7 +438,7 @@ class MatchingConfigUpdateRequest(BaseModel):
 
 
 class AiTriageRunRequest(BaseModel):
-    limit: int = Field(25, ge=1, le=250, description="Maximum number of outstanding sanctions matches to triage")
+    limit: int = Field(25, ge=1, le=250, description="Maximum number of outstanding sanctions or PEP matches to triage")
 
 
 class AiTriageDecisionRequest(BaseModel):

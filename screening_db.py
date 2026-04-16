@@ -849,7 +849,9 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, 
         WHERE status NOT ILIKE 'Cleared%'
           AND (
             status ILIKE 'Fail Sanction%'
+            OR status ILIKE 'Fail PEP%'
             OR COALESCE((result_json->>'Is Sanctioned')::boolean, FALSE) = TRUE
+            OR COALESCE((result_json->>'Is PEP')::boolean, FALSE) = TRUE
           )
           AND COALESCE(review_status, 'UNREVIEWED') <> 'COMPLETED'
         ORDER BY

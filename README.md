@@ -55,7 +55,7 @@ npm run dev
 | `AI_TRIAGE_ENABLED` | Enable scheduled AI triage worker loop. Default: `true`. |
 | `AI_TRIAGE_RUN_HOUR` | 24-hour local hour when the scheduled AI triage worker should run. Default: `22`. |
 | `AI_TRIAGE_POLL_SECONDS` | Sleep interval for the AI triage worker loop. Default: `300`. |
-| `AI_TRIAGE_BATCH_LIMIT` | Max outstanding sanctions matches triaged per run. Default: `25`. |
+| `AI_TRIAGE_BATCH_LIMIT` | Max outstanding sanctions or PEP matches triaged per run. Default: `25`. |
 
 **Rate limiting** (per client IP): `/auth/login` 5/min, `/auth/signup` 3/min, `POST /opcheck` 60/min, `GET /opcheck/jobs/{job_id}` 60/min, `POST /refresh_opensanctions` 2/min, `POST /internal/screening/jobs` 120/min, `POST /internal/screening/jobs/bulk` 20/min. Exceeding returns 429. The client IP is taken from the direct connection unless behind a trusted proxy (see below).
 
@@ -177,7 +177,7 @@ VITE_API_BASE_URL=https://sanctions-check.co.uk
 - **GET /mi/export.csv** — API-key-only CSV export for MI / Power BI. Returns a flat extract of stored screening records plus selected result fields. Supports optional filters: `screened_from`, `screened_to`, `review_status`, `include_cleared`.
 - **GET /admin/ai-triage/health** — Admin-only Ollama/model health and configured runtime details.
 - **GET /admin/ai-triage/runs** — Admin-only recent AI triage run history.
-- **POST /admin/ai-triage/run** — Admin-only manual AI triage trigger for outstanding sanctions matches.
+- **POST /admin/ai-triage/run** — Admin-only manual AI triage trigger for outstanding sanctions or PEP matches.
 - **GET /ai-triage/tasks** — Logged-in analyst task list of pending AI recommendations.
 - **GET /ai-triage/tasks/{triage_id}** — Full detail for one AI recommendation.
 - **POST /ai-triage/tasks/{triage_id}/approve** — Human approval path. Only this can apply an AI-suggested clear in v1.
