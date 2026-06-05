@@ -432,27 +432,37 @@ def detect_address_risk(company_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def detect_director_turnover(officers: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Detect rapid director turnover based on resignations in the last 12 months."""
+    """Detect rapid director turnover based on appointments and resignations in the last 12 months."""
     now = datetime.utcnow()
+    appointed_last_12_months = 0
     resigned_last_12_months = 0
+
+    def _is_within_last_12_months(raw_date: Any) -> bool:
+        raw = str(raw_date or "").strip()
+        if not raw:
+            return False
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            return False
+        months = max(0, (now.year - parsed.year) * 12 + (now.month - parsed.month))
+        return months <= 12
+
     for officer in officers:
         if not isinstance(officer, dict):
             continue
         if str(officer.get("officer_role") or "").strip().lower() != "director":
             continue
-        raw_resigned = str(officer.get("resigned_on") or "").strip()
-        if not raw_resigned:
-            continue
-        try:
-            resigned = datetime.strptime(raw_resigned, "%Y-%m-%d")
-        except ValueError:
-            continue
-        months = max(0, (now.year - resigned.year) * 12 + (now.month - resigned.month))
-        if months <= 12:
+        if _is_within_last_12_months(officer.get("appointed_on")):
+            appointed_last_12_months += 1
+        if _is_within_last_12_months(officer.get("resigned_on")):
             resigned_last_12_months += 1
+    director_changes_last_12_months = appointed_last_12_months + resigned_last_12_months
     return {
-        "rapid_turnover": resigned_last_12_months >= 3,
+        "rapid_turnover": director_changes_last_12_months >= 3,
+        "appointed_last_12_months": appointed_last_12_months,
         "resigned_last_12_months": resigned_last_12_months,
+        "director_changes_last_12_months": director_changes_last_12_months,
     }
 
 

@@ -314,7 +314,7 @@ export function CompaniesHousePage() {
                   <p className={riskTone(bundle.shell_risk?.risk_level)}><span className="text-text-muted">Shell risk:</span> {bundle.shell_risk?.risk_level || '—'} (score {bundle.shell_risk?.score ?? 0})</p>
                   <p className={riskTone(bundle.address_risk?.risk_level)}><span className="text-text-muted">Address risk:</span> {bundle.address_risk?.risk_level || '—'} ({bundle.address_risk?.company_count ?? 0} companies)</p>
                   <p className={riskTone(bundle.age_risk?.risk_level)}><span className="text-text-muted">Age risk:</span> {bundle.age_risk?.risk_level || '—'} ({bundle.age_risk?.age_months ?? '—'} months)</p>
-                  <p><span className="text-text-muted">Director turnover:</span> {bundle.director_turnover?.rapid_turnover ? 'Rapid' : 'Normal'} ({bundle.director_turnover?.resigned_last_12_months ?? 0} in 12 months)</p>
+                  <p><span className="text-text-muted">Director turnover:</span> {bundle.director_turnover?.rapid_turnover ? 'Rapid' : 'Normal'} ({bundle.director_turnover?.director_changes_last_12_months ?? bundle.director_turnover?.resigned_last_12_months ?? 0} changes in 12 months; {bundle.director_turnover?.appointed_last_12_months ?? 0} appointed, {bundle.director_turnover?.resigned_last_12_months ?? 0} resigned)</p>
                 </CardBody>
               </Card>
             </div>

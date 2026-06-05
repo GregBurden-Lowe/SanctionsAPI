@@ -355,7 +355,9 @@ export interface CompaniesHouseAgeRisk {
 
 export interface CompaniesHouseDirectorTurnover {
   rapid_turnover: boolean
+  appointed_last_12_months?: number
   resigned_last_12_months: number
+  director_changes_last_12_months?: number
 }
 
 export interface CompaniesHouseDirectorRisk {

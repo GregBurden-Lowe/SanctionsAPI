@@ -7,6 +7,7 @@ from services.companies_house import (
     CompaniesHouseRateLimitError,
     CompaniesHouseUpstreamError,
     get_company,
+    get_company_screening_data,
     get_officers,
     resolve_best_company_match,
     search_companies,
@@ -66,9 +67,6 @@ def companies_officers(company_number: str):
 @router.get("/{company_number}/screen")
 def companies_screen_bundle(company_number: str):
     try:
-        company = get_company(company_number)
-        officers = get_officers(company_number)
-        return {"company": company, "officers": officers}
+        return get_company_screening_data(company_number)
     except Exception as exc:
         _raise_http_error(exc)
-
