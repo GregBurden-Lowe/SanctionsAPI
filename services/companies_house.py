@@ -421,7 +421,14 @@ def detect_address_risk(company_data: Dict[str, Any]) -> Dict[str, Any]:
     if not postcode:
         return {"postcode": None, "company_count": 0, "risk_level": "LOW"}
     matches = search_companies(postcode)
-    count = len(matches)
+    normalized_postcode = re.sub(r"[^A-Z0-9]", "", postcode.upper())
+    count = sum(
+        1
+        for match in matches
+        if normalized_postcode
+        and normalized_postcode
+        in re.sub(r"[^A-Z0-9]", "", str(match.get("address_snippet") or "").upper())
+    )
     if count > 50:
         level = "HIGH"
     elif count >= 20:
