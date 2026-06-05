@@ -531,9 +531,15 @@ def _get_token_from_request(request: Request) -> str:
 
 
 def _api_key_route_allowed(path: str) -> bool:
-    """API keys may access screening routes only."""
+    """API keys may access screening and Companies House routes only."""
     p = (path or "").strip()
-    return p == "/opcheck" or p.startswith("/opcheck/") or p == "/mi/export.csv"
+    return (
+        p == "/opcheck"
+        or p.startswith("/opcheck/")
+        or p.startswith("/api/companies/")
+        or p == "/api/companies/screen"
+        or p == "/mi/export.csv"
+    )
 
 
 async def get_current_user(request: Request) -> dict:

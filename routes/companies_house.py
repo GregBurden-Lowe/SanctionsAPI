@@ -48,6 +48,17 @@ def companies_best_match(q: str = Query(..., min_length=1, description="Company 
         _raise_http_error(exc)
 
 
+@router.get("/screen")
+def companies_screen_by_name(q: str = Query(..., min_length=1, description="Company name search query")):
+    try:
+        item = resolve_best_company_match(q)
+        if not item or not item.get("company_number"):
+            raise CompaniesHouseNotFoundError("Company not found")
+        return get_company_screening_data(str(item["company_number"]))
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
 @router.get("/{company_number}")
 def companies_get(company_number: str):
     try:
