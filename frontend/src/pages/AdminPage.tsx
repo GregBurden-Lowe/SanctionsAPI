@@ -1,3 +1,5 @@
+import { RetentionPreview } from '@/components/RetentionPreview'
+import { AcceptanceExport } from '@/components/AcceptanceExport'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, CardHeader, CardTitle, CardBody, SectionHeader, ErrorBox } from '@/components'
@@ -150,7 +152,7 @@ export function AdminPage() {
     setClearError(null)
     setClearResponse(null)
     const ok = window.confirm(
-      'This will permanently delete all screened entities and queued/completed jobs. User accounts are NOT deleted. Continue?'
+      'This will permanently delete current screening state and finished jobs. Saved history remains. Unfinished requests, jobs or reviews block clearing. Continue?'
     )
     if (!ok) return
     setClearing(true)
@@ -219,6 +221,8 @@ export function AdminPage() {
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-2xl space-y-6">
         <SectionHeader title="Admin tools" />
+        <RetentionPreview />
+        <AcceptanceExport />
         <Card>
           <CardHeader>
             <CardTitle>Data refresh mode</CardTitle>
@@ -394,7 +398,7 @@ export function AdminPage() {
           </CardHeader>
           <CardBody>
             <p className="text-sm text-text-secondary mb-4">
-              Clear screening cache and queue so checks run fresh. This action does not delete users.
+              Clear current screening state and finished jobs for testing. Saved request, run and review history remains. Unfinished requests, jobs or reviews block clearing. This is not evidence-retention cleanup.
             </p>
             <Button
               type="button"

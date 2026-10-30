@@ -1,0 +1,60 @@
+{
+  "synthetic_rows": 100000,
+  "repeats": 3,
+  "concurrency": 4,
+  "production_data_used": false,
+  "postgres_version": "16.15 (Homebrew)",
+  "queries": [
+    {
+      "query": "exact",
+      "postgres": {
+        "median_ms": 340.98,
+        "max_ms": 341.15
+      },
+      "parquet_in_memory": {
+        "median_ms": 4098.17,
+        "max_ms": 4164.62
+      }
+    },
+    {
+      "query": "alias",
+      "postgres": {
+        "median_ms": 331.53,
+        "max_ms": 333.8
+      },
+      "parquet_in_memory": {
+        "median_ms": 4132.24,
+        "max_ms": 4159.29
+      }
+    },
+    {
+      "query": "no_match",
+      "postgres": {
+        "median_ms": 343.65,
+        "max_ms": 350.38
+      },
+      "parquet_in_memory": {
+        "median_ms": 4199.87,
+        "max_ms": 4322.14
+      }
+    },
+    {
+      "query": "company",
+      "postgres": {
+        "median_ms": 325.07,
+        "max_ms": 328.52
+      },
+      "parquet_in_memory": {
+        "median_ms": 4040.59,
+        "max_ms": 4069.14
+      }
+    }
+  ],
+  "concurrent_alias": {
+    "wall_seconds": 0.383,
+    "median_ms": 368.24,
+    "max_ms": 382.89
+  },
+  "status": "passed",
+  "disposable_database_removed": true
+}

@@ -34,6 +34,7 @@ CONSOLIDATED_PEPS_URL = (
 
 # We only keep these columns to reduce memory
 OSN_COLS = [
+    "id",           # Stable provider record identifier
     "schema",       # Person / Organization / Company / LegalEntity
     "name",         # display name
     "aliases",
@@ -295,7 +296,7 @@ def _empty_no_match_result(source_label: str = "OpenSanctions"):
         "Topics": [],
         "Is PEP": False,
         "Is Sanctioned": False,
-        "Confidence": "Very High",  # confidence of 'no match'
+        "Confidence": "Not assessed",  # no-match is not an identity-confidence estimate
         "Score": 0,
         "Risk Level": "Cleared",
         "Top Matches": [],
@@ -513,15 +514,23 @@ def refresh_opensanctions_data(include_peps: bool = True):
         except Exception as e:
             print(f"[OpenSanctions] PEPs download/parsing failed: {e}")
 
-    if not parts:
-        print("[OpenSanctions] No data written (nothing downloaded).")
-        return
+    loaded_sources = {str(part["source_type"].iloc[0]) for part in parts if not part.empty}
+    if "sanctions" not in loaded_sources or (include_peps and "peps" not in loaded_sources):
+        raise ScreeningUnavailableError("Refresh did not provide all required datasets; existing watchlist retained.")
 
     df = pd.concat(parts, ignore_index=True)
 
     # Write compact parquet
     table = pa.Table.from_pandas(df)
-    pq.write_table(table, OSN_PARQUET)
+    import tempfile
+    with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".parquet", delete=False) as temp:
+        temp_path = temp.name
+    try:
+        pq.write_table(table, temp_path)
+        os.replace(temp_path, OSN_PARQUET)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
     print(f"[OpenSanctions] Parquet saved -> {OSN_PARQUET}")
 
     # clear cache
@@ -558,7 +567,7 @@ async def sync_watchlist_entities_postgres(
     """
     exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
     if not exists:
-        raise ValueError("watchlist_entities table is not available")
+        raise ScreeningUnavailableError("Watchlist data is unavailable")
     has_country_col = await conn.fetchval(
         """
         SELECT EXISTS (
@@ -644,6 +653,8 @@ async def sync_watchlist_entities_postgres(
                 raw_json = json.dumps(
                     {
                         "aliases": _safe_str(row.get("aliases")),
+                        "birth_date": _safe_str(row.get("birth_date")),
+                        "positions": _safe_str(row.get("positions")),
                         "program_ids": _safe_str(row.get("program_ids")),
                         "sanctions": _safe_str(row.get("sanctions")),
                         "countries": _safe_str(row.get("countries")),
@@ -697,6 +708,8 @@ async def sync_watchlist_entities_postgres(
         await conn.execute("TRUNCATE TABLE watchlist_entities")
         sanctions_count = await _ingest_csv(sanctions_csv_path, "sanctions")
         peps_count = await _ingest_csv(peps_csv_path or "", "peps") if include_peps else 0
+        if not sanctions_count or (include_peps and not peps_count):
+            raise ScreeningUnavailableError("Refresh did not provide all required datasets; existing watchlist retained.")
 
     return {"sanctions": sanctions_count, "peps": peps_count}
 
@@ -750,35 +763,44 @@ def clear_osn_cache():
 # Matching
 # =============================================================================
 
+class ScreeningUnavailableError(RuntimeError):
+    """Required source coverage is unavailable; never interpret this as no match."""
+
+
+def screening_fingerprint(name, dob, country, entity_type, backend):
+    # Preserve all name tokens; entity keys are only legacy grouping identifiers.
+    payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),
+               "country": _normalize_country(country), "entity_type": (entity_type or "Person").lower(),
+               "backend": backend, "rules_version": "evidence-v3", "matching_config": get_matching_config()}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def stamp_screening_result(result, name, dob, country, entity_type, backend):
+    result["Screening Inputs"] = {"name": name, "dob": dob, "country": country, "entity_type": entity_type, "backend": backend}
+    result["Screening Fingerprint"] = screening_fingerprint(name, dob, country, entity_type, backend)
+    result["Matching Rules Version"] = "evidence-v3"
+    result["Matching Configuration"] = get_matching_config()
+    return result
+
+
 def _normalize_dob(dob: Optional[str]) -> Optional[str]:
+    """Accept explicit dates/year only; do not silently invent missing parts."""
     if not dob:
         return None
-    try:
-        raw = str(dob).strip()
-        if not raw:
-            return None
-
-        # Year-only support, e.g. "1984".
-        if re.fullmatch(r"\d{4}", raw):
-            return raw
-
-        # DD-MM-YYYY support (user-facing format).
-        if re.fullmatch(r"\d{2}-\d{2}-\d{4}", raw):
-            dt = datetime.strptime(raw, "%d-%m-%Y")
-            return dt.strftime("%Y-%m-%d")
-
-        # Existing canonical format.
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-            dt = datetime.strptime(raw, "%Y-%m-%d")
-            return dt.strftime("%Y-%m-%d")
-
-        # Final fallback for compatibility.
-        dt = pd.to_datetime(raw, errors="coerce", dayfirst=True)
-        if pd.isna(dt):
-            return None
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        return None
+    raw = str(dob).strip()
+    if re.fullmatch(r"\d{4}", raw):
+        return raw if 1 <= int(raw) <= date.today().year else None
+    formats = [(r"\d{2}-\d{2}-\d{4}", "%d-%m-%Y"),
+               (r"\d{2}/\d{2}/\d{4}", "%d/%m/%Y"),
+               (r"\d{4}-\d{2}-\d{2}", "%Y-%m-%d")]
+    for pattern, fmt in formats:
+        if re.fullmatch(pattern, raw):
+            try:
+                parsed = datetime.strptime(raw, fmt).date()
+                return parsed.isoformat() if parsed <= date.today() else None
+            except ValueError:
+                return None
+    return None
 
 
 def _normalize_country(country: Optional[str]) -> Optional[str]:
@@ -793,13 +815,13 @@ def _normalize_country(country: Optional[str]) -> Optional[str]:
 def _country_tokens(raw_country: Optional[str]) -> Set[str]:
     if not raw_country:
         return set()
-    value = _normalize_text(str(raw_country))
+    value = str(raw_country).strip()
     if not value:
         return set()
     parts = re.split(r"[;,|/]+", value)
     tokens: Set[str] = set()
     for part in parts:
-        p = part.strip()
+        p = _normalize_text(part)
         if not p:
             continue
         canonical = _normalize_country(p)
@@ -859,7 +881,8 @@ def _score_person_candidate(
     strict_short_queries: bool,
 ) -> Optional[int]:
     def preprocess(name):
-        name = _normalize_text(name)
+        # Hyphens separate name tokens; preserve legacy entity-key normalization.
+        name = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name))
         blacklist = {
             "the", "ltd", "llc", "inc", "co", "company", "corp", "plc", "limited",
             "real", "estate", "group", "services", "solutions", "hub", "global",
@@ -884,17 +907,32 @@ def _score_person_candidate(
     score = int(fuzz.token_set_ratio(s_clean, c_clean))
     if score < effective_threshold:
         return None
-    token_union = s_tokens | c_tokens
     overlap = len(s_tokens & c_tokens)
-    jaccard = overlap / max(1, len(token_union))
 
     if len(s_tokens) <= 2 and s_clean == c_clean:
         return score
 
-    min_overlap = min(2, len(s_tokens))
-    if overlap < min_overlap:
+    min_overlap = min(2, len(s_tokens), len(c_tokens))
+    # One-to-one token alignment permits spelling variation without letting one
+    # common token explain an otherwise different name.
+    remaining = set(c_tokens)
+    aligned = 0
+    for token in sorted(s_tokens, key=lambda t: (t not in c_tokens, -len(t), t)):
+        if not remaining:
+            break
+        best = max(sorted(remaining), key=lambda t: fuzz.ratio(token, t))
+        similarity = fuzz.ratio(token, best)
+        initial_match = min(len(token), len(best)) == 1 and token[0] == best[0]
+        if token == best or initial_match or (min(len(token), len(best)) >= 4 and similarity >= 80):
+            aligned += 1
+            remaining.remove(best)
+    if aligned < min_overlap:
         return None
-    if len(s_tokens) > 2 and jaccard < 0.4:
+    if any(len(token) == 1 for token in s_tokens | c_tokens):
+        score = min(score, 85)
+    if not overlap and fuzz.token_sort_ratio(s_clean, c_clean) < 90:
+        return None
+    if len(s_tokens) > 2 and aligned / max(1, min(len(s_tokens), len(c_tokens))) < 0.6:
         return None
     if len(s_tokens) == 1 and len(c_tokens) > 5:
         score -= 10
@@ -1089,13 +1127,9 @@ def build_input_classification(
 
 
 def _dob_matches(candidate_dob: Optional[str], query_dob: Optional[str]) -> bool:
-    if not query_dob:
-        return True
-    if not candidate_dob:
-        return False
-    if len(query_dob) == 4:
-        return candidate_dob == query_dob or candidate_dob.startswith(f"{query_dob}-")
-    return candidate_dob == query_dob
+    """Compatibility means not contradicted; it does not confirm identity."""
+    return _identity_dob_evidence(candidate_dob, query_dob) != "conflicting"
+
 
 def _top_name_suggestions(
     df_subset: pd.DataFrame,
@@ -1131,413 +1165,164 @@ def _top_name_suggestions(
             seen[display] = float(score)
     return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
-def perform_opensanctions_check(
-    name,
-    dob,
-    country: Optional[str] = None,
-    entity_type="Person",
-    parquet_path=OSN_PARQUET,
-    requestor: Optional[str] = None,
-    log_search: bool = True,
-    include_peps: bool = True,
-):
-    import math
+def _identity_dob_evidence(candidate, query):
+    """Compare known precision; unknown data is never a contradictory date."""
+    query = _normalize_dob(query)
+    if not query:
+        return "unknown"
+    values = re.split(r"[;|]", _safe_str(candidate))
+    parsed = []
+    unknown = False
+    for raw in values:
+        raw = raw.strip()
+        if re.fullmatch(r"\d{4}(?:-\d{2})?(?:-\d{2})?", raw):
+            try:
+                datetime.strptime(raw, {4: "%Y", 7: "%Y-%m", 10: "%Y-%m-%d"}[len(raw)])
+                parsed.append(raw)
+                continue
+            except ValueError:
+                pass
+        unknown = True
+    for value in parsed:
+        precision = min(len(value), len(query))
+        if value[:precision] == query[:precision]:
+            return "exact" if precision == 10 else "compatible"
+    return "unknown" if unknown or not parsed else "conflicting"
 
-    df = get_opensanctions_df(parquet_path)
-    if df.empty:
-        result = _empty_no_match_result()
-        if log_search:
-            _append_search_to_csv(name, result["Check Summary"])
-        return result
 
-    # Filter by entity type/schema
-    et = (entity_type or "Person").lower()
-    schema_col = df.get("schema")
-    if schema_col is not None:
-        schemas = schema_col.astype(str).str.lower()
-        if et == "organization":
-            df = df[schemas.isin(["organization", "legalentity", "company"])]
-        else:
-            df = df[schemas == "person"]
+def _identity_country_evidence(candidate, query):
+    if not _normalize_country(query) or not _safe_str(candidate).strip():
+        return "unknown"
+    return "compatible" if _country_matches(candidate, query) else "conflicting"
 
-    # Precompute normalized search
-    norm_name = _normalize_text(name)
-    def _norm_dob(d):
-        return _normalize_dob(d)
-    norm_dob = _norm_dob(dob)
-    norm_country = _normalize_country(country)
 
-    # Split by source type and build pool for suggestions
-    st = df.get("source_type")
-    if st is not None:
-        st_lower = st.astype(str).str.lower()
-        sanc_df = df[st_lower == "sanctions"]
-        pep_df = df[st_lower == "peps"] if include_peps else df.iloc[0:0]
-        combined_for_suggestions = pd.concat([sanc_df, pep_df], ignore_index=True)
-    else:
-        sanc_df = df
-        pep_df = df.iloc[0:0] if include_peps else df.iloc[0:0]
-        combined_for_suggestions = df
-
-    # Suggestions are based only on name similarity and do NOT affect result
-    top_suggestions = _top_name_suggestions(
-        combined_for_suggestions, norm_name, limit=5, threshold=60, entity_type=entity_type
-    )
-
-    def parse_dob(val):
-        try:
-            s = str(val)
-            if not s or s.lower() in ("nan", "none", "nat"):
-                return None
-            return _norm_dob(s)
-        except Exception:
-            return None
-
-    def as_safe_str(x):
-        if x is None:
-            return ""
-        if isinstance(x, float) and math.isnan(x):
-            return ""
-        return str(x)
-
-    def best_match_from(df_subset, top_limit=50, threshold=75):
-        """Return (row, score) using strict DOB/country rule when provided."""
-        if df_subset is None or df_subset.empty:
-            return None, None
-
-        candidates = df_subset["name"].fillna("").tolist()
-        matches = get_best_name_matches(
-            norm_name,
-            candidates,
-            limit=top_limit,
-            threshold=threshold,
-            has_dob=bool(norm_dob),
-            strict_short_queries=True,
-            entity_type=entity_type,
-        )
-        if not matches:
-            return None, None
-
-        # DOB strictness for the ACTUAL result
-        if norm_dob:
-            dob_ok_matches = []
-            for _, score, idx in matches:
-                r = df_subset.iloc[idx]
-                cand_dob = parse_dob(r.get("birth_date"))
-                if _dob_matches(cand_dob, norm_dob):
-                    dob_ok_matches.append((_, score, idx))
-            if not dob_ok_matches:
-                return None, None
-            matches = dob_ok_matches
-        if et == "organization" and norm_country:
-            country_ok_matches = []
-            for _, score, idx in matches:
-                r = df_subset.iloc[idx]
-                cand_country = as_safe_str(r.get("countries"))
-                if _country_matches(cand_country, norm_country):
-                    country_ok_matches.append((_, score, idx))
-            if not country_ok_matches:
-                return None, None
-            matches = country_ok_matches
-
-        matches_sorted = sorted(matches, key=lambda x: x[1], reverse=True)
-        _, best_score, best_idx = matches_sorted[0]
-        best_row = df_subset.iloc[best_idx]
-        return best_row, float(best_score)
-
-    # Evaluate both lists; sanctions remains the controlling outcome when both match.
-    s_row, s_score = best_match_from(sanc_df)
-    p_row, p_score = best_match_from(pep_df)
-
-    if s_row is not None:
-        dataset_label = as_safe_str(s_row.get("dataset")).strip()
-        source_label = dataset_label or "OpenSanctions – Sanctions"
-        if p_row is not None:
-            source_label = f"{source_label}; Consolidated PEP list"
-        result = {
-            "Sanctions Name": s_row.get("name"),
-            "Birth Date": parse_dob(s_row.get("birth_date")),
-            "Regime": _derive_regime_like_row(s_row),
-            "Position": s_row.get("positions"),
-            "Topics": [],
-            "Is PEP": bool(p_row is not None),
-            "Is Sanctioned": True,
-            "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
-            "Score": s_score,
-            "Risk Level": "High Risk",
-            "Top Matches": top_suggestions,  # suggestions only
-            "Match Found": True,
-            "Check Summary": {
-                "Status": "Fail Sanction",
-                "Source": source_label,
-                "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-        }
-        if log_search:
-            _append_search_to_csv(name, result["Check Summary"])
-        return result
-
-    # No sanctions hit: return PEP outcome if matched.
-    if p_row is not None:
-        result = {
-            "Sanctions Name": p_row.get("name"),
-            "Birth Date": parse_dob(p_row.get("birth_date")),
-            "Regime": _derive_regime_like_row(p_row),
-            "Position": p_row.get("positions"),
-            "Topics": [],
-            "Is PEP": True,
-            "Is Sanctioned": False,
-            "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
-            "Score": p_score,
-            "Risk Level": "Medium Risk",
-            "Top Matches": top_suggestions,  # suggestions only
-            "Match Found": True,
-            "Check Summary": {
-                "Status": "Fail PEP",
-                "Source": "Consolidated PEP list",
-                "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-        }
-        if log_search:
-            _append_search_to_csv(name, result["Check Summary"])
-        return result
-
-    # Nothing matched under strict rules -> Cleared, but STILL return suggestions
-    result = _empty_no_match_result(source_label="OpenSanctions")
-    result["Top Matches"] = top_suggestions
-    if log_search:
-        _append_search_to_csv(name, result["Check Summary"])
+def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps):
+    """One decision/evidence implementation shared by both storage backends."""
+    if not _normalize_text(name):
+        raise ScreeningUnavailableError("Enter a name containing supported letters or numbers.")
+    if dob and not _normalize_dob(dob):
+        raise ScreeningUnavailableError("Enter a valid date of birth or four-digit year.")
+    evidence = []
+    suggestions = {}
+    et = (entity_type or "Person").strip().lower()
+    for row in rows:
+        raw = row.get("raw_json") or {}
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        schema = _safe_str(row.get("entity_schema") or row.get("schema")).lower()
+        if schema and schema not in ({"organization", "company", "legalentity"} if et == "organization" else {"person"}):
+            continue
+        source_type = row.get("source_type", "sanctions")
+        if source_type == "peps" and not include_peps:
+            continue
+        display_name = _safe_str(row.get("name"))
+        aliases = _safe_str(raw.get("aliases") or row.get("aliases"))
+        names = list(dict.fromkeys([display_name] + [v.strip() for v in aliases.split(';') if v.strip()]))
+        hits = get_best_name_matches(name, names, limit=len(names), threshold=75, has_dob=bool(_normalize_dob(dob)), entity_type=entity_type)
+        suggestion_hits = get_best_name_matches(name, names, limit=1, threshold=60, strict_short_queries=False, entity_type=entity_type)
+        if suggestion_hits:
+            suggestions[display_name] = max(suggestions.get(display_name, 0), suggestion_hits[0][1])
+        if not hits:
+            continue
+        _, score, matched_index = hits[0]
+        # New imports preserve original precision/multiple DOBs. Older PostgreSQL
+        # rows contain only their stored DATE; no more precise evidence is invented.
+        candidate_dob = _safe_str(raw.get("birth_date") if "birth_date" in raw else row.get("birth_date"))
+        candidate_country = _safe_str(raw.get("countries") or row.get("countries") or row.get("country"))
+        dob_status = _identity_dob_evidence(candidate_dob, dob) if et == "person" else "not_applicable"
+        country_status = _identity_country_evidence(candidate_country, country)
+        excluded = dob_status == "conflicting"
+        reasons = ["Name similarity passed the matching threshold."]
+        if matched_index:
+            reasons.append("Matched a listed alias.")
+        if dob_status == "conflicting":
+            reasons.append("Known dates of birth conflict; excluded from the decision.")
+        elif dob_status == "unknown":
+            reasons.append("Date of birth is unavailable or not comparable; identity remains unconfirmed.")
+        elif dob_status == "compatible":
+            reasons.append("Date of birth agrees at the available precision.")
+        elif dob_status == "exact":
+            reasons.append("Full date of birth agrees.")
+        if country_status == "conflicting":
+            reasons.append("Country differs; country alone does not exclude a name match.")
+        elif country_status == "unknown":
+            reasons.append("Country evidence is unavailable or was not supplied.")
+        evidence.append({
+            "record_id": _safe_str(row.get("entity_id") or row.get("id")) or None,
+            "name": display_name, "matched_name": names[matched_index], "matched_alias": bool(matched_index),
+            "entity_type": entity_type, "source_type": source_type,
+            "dataset": _safe_str(row.get("dataset")), "regime": _safe_str(row.get("regime") or _derive_regime_like_row(row)),
+            "position": _safe_str(raw.get("positions") or row.get("positions")) or None,
+            "name_score": score, "birth_date": candidate_dob or None, "country": candidate_country or None,
+            "dob_assessment": dob_status, "country_assessment": country_status,
+            "disposition": "excluded" if excluded else "potential_match", "reasons": reasons,
+        })
+    evidence.sort(key=lambda x: (x['disposition'] != 'potential_match', x['source_type'] != 'sanctions', -x['name_score'], x['name']))
+    sanctions = [e for e in evidence if e['disposition'] == 'potential_match' and e['source_type'] == 'sanctions']
+    peps = [e for e in evidence if e['disposition'] == 'potential_match' and e['source_type'] == 'peps']
+    result = _empty_no_match_result(source_label)
+    result['Top Matches'] = sorted(suggestions.items(), key=lambda x: (-x[1], x[0]))[:5]
+    result['Candidate Evidence'] = evidence[:50]
+    result['Candidate Evidence Summary'] = {'evaluated_name_matches': len(evidence), 'potential_matches': len(sanctions) + len(peps), 'excluded': sum(e['disposition'] == 'excluded' for e in evidence), 'display_truncated': len(evidence) > 50}
+    result['PEP Check'] = {'checked': bool(include_peps), 'status': 'checked' if include_peps else 'skipped'}
+    result['Decision Explanation'] = 'No potential match identified under the current matching rules. This is not proof of identity.'
+    if sanctions or peps:
+        best = (sanctions or peps)[0]
+        score = best['name_score']
+        result.update({'Sanctions Name': best['name'], 'Birth Date': best['birth_date'], 'Regime': best['regime'],
+                       'Is Sanctioned': bool(sanctions), 'Is PEP': bool(peps), 'Match Found': True,
+                       'Position': best['position'], 'Score': score, 'Confidence': 'High' if score >= 90 else 'Medium' if score >= 80 else 'Low',
+                       'Risk Level': 'High Risk' if sanctions else 'Medium Risk'})
+        result['Check Summary'].update(Status='Fail Sanction' if sanctions else 'Fail PEP', Source='; '.join(dict.fromkeys(e['dataset'] or source_label for e in sanctions + peps)))
+        result['Decision Explanation'] = 'Potential sanctions match; analyst verification is required.' if sanctions else 'Potential PEP match; review the identity evidence and record the decision.'
     return result
 
 
-async def perform_postgres_watchlist_check(
-    conn,
-    name: str,
-    dob: Optional[str],
-    country: Optional[str] = None,
-    entity_type: str = "Person",
-    requestor: Optional[str] = None,
-    candidate_limit: int = 400,
-    log_search: bool = True,
-    include_peps: bool = True,
-) -> Dict[str, Any]:
-    """
-    Beta matcher using watchlist_entities in PostgreSQL.
-    Designed for side-by-side rollout with parquet path.
-    """
-    import math
-
-    exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
-    if not exists:
-        raise ValueError("watchlist_entities table is not available")
-    has_country_col = await conn.fetchval(
-        """
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'watchlist_entities'
-              AND column_name = 'country'
-        )
-        """
-    )
-
-    norm_name = _normalize_text(name or "")
-    norm_dob = _normalize_dob(dob)
-    norm_country = _normalize_country(country)
-    et = (entity_type or "Person").strip().lower()
-    source_filter = "person" if et != "organization" else "organization"
-
-    async def _fetch_candidates(source_type: str) -> List[dict]:
-        country_select = "country" if has_country_col else "NULLIF(raw_json->>'countries', '') AS country"
-        if has_country_col:
-            country_filter = """
-                country = $4::text
-                OR country ILIKE ('%' || $4::text || '%')
-                OR $4::text ILIKE ('%' || country || '%')
-                OR country IS NULL
-            """
-        else:
-            country_filter = "NULLIF(raw_json->>'countries', '') ILIKE ('%' || $4::text || '%') OR NULLIF(raw_json->>'countries', '') IS NULL"
-        sql = f"""
-            SELECT
-                name,
-                birth_date::text AS birth_date,
-                dataset,
-                regime,
-                {country_select},
-                entity_schema,
-                raw_json
-            FROM watchlist_entities
-            WHERE source_type = $1
-              AND (
-                name_norm % $2
-                OR name_norm ILIKE ('%' || $2 || '%')
-              )
-              AND (
-                $3::text IS NULL
-                OR birth_date::text = $3::text
-                OR (char_length($3::text) = 4 AND birth_date::text LIKE ($3::text || '-%'))
-                OR birth_date IS NULL
-              )
-              AND (
-                $4::text IS NULL
-                OR {country_filter}
-              )
-            ORDER BY similarity(name_norm, $2) DESC
-            LIMIT $5
-            """
-        rows = await conn.fetch(
-            sql,
-            source_type,
-            norm_name,
-            norm_dob,
-            norm_country if et == "organization" else None,
-            max(50, min(2000, int(candidate_limit))),
-        )
-        out: List[dict] = []
-        for r in rows:
-            d = dict(r)
-            schema = str(d.get("entity_schema") or "").lower()
-            if source_filter == "person" and schema and schema != "person":
-                continue
-            if source_filter == "organization" and schema and schema not in ("organization", "legalentity", "company"):
-                continue
-            out.append(d)
-        return out
-
-    sanc_rows = await _fetch_candidates("sanctions")
-    pep_rows = await _fetch_candidates("peps") if include_peps else []
-    combined = sanc_rows + pep_rows
-
-    if not combined:
-        result = _empty_no_match_result()
-        if log_search:
-            _append_search_to_csv(name, result["Check Summary"])
-        return result
-
-    def _parse_dob(val) -> Optional[str]:
-        try:
-            if val is None:
-                return None
-            s = str(val)
-            if not s or s.lower() in ("nan", "none", "nat"):
-                return None
-            return _normalize_dob(s)
-        except Exception:
-            return None
-
-    def _as_safe_str(x) -> str:
-        if x is None:
-            return ""
-        if isinstance(x, float) and math.isnan(x):
-            return ""
-        return str(x)
-
-    def _best_match_from_rows(rows: List[dict], threshold: int = 75):
-        if not rows:
-            return None, None
-        candidates = [_as_safe_str(r.get("name")) for r in rows]
-        matches = get_best_name_matches(
-            norm_name,
-            candidates,
-            limit=50,
-            threshold=threshold,
-            has_dob=bool(norm_dob),
-            strict_short_queries=True,
-            entity_type=entity_type,
-        )
-        if not matches:
-            return None, None
-        if norm_dob:
-            dob_ok = []
-            for _, score, idx in matches:
-                cand_dob = _parse_dob(rows[idx].get("birth_date"))
-                if _dob_matches(cand_dob, norm_dob):
-                    dob_ok.append((_, score, idx))
-            if not dob_ok:
-                return None, None
-            matches = dob_ok
-        if et == "organization" and norm_country:
-            country_ok = []
-            for _, score, idx in matches:
-                cand_country = rows[idx].get("country")
-                if _country_matches(cand_country, norm_country):
-                    country_ok.append((_, score, idx))
-            if not country_ok:
-                return None, None
-            matches = country_ok
-        _, best_score, best_idx = sorted(matches, key=lambda x: x[1], reverse=True)[0]
-        return rows[best_idx], float(best_score)
-
-    top_suggestions: List[Tuple[str, int]] = []
-    candidate_names = [_as_safe_str(r.get("name")) for r in combined if _as_safe_str(r.get("name"))]
-    if candidate_names:
-        hits = get_best_name_matches(
-            norm_name,
-            candidate_names,
-            limit=15,
-            threshold=60,
-            has_dob=False,
-            strict_short_queries=False,
-            entity_type=entity_type,
-        )
-        seen: Dict[str, float] = {}
-        for cleaned_name, score, idx in hits:
-            display = candidate_names[idx] if idx < len(candidate_names) else cleaned_name
-            if display and (display not in seen or score > seen[display]):
-                seen[display] = float(score)
-        top_suggestions = [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:5]]
-
-    s_row, s_score = _best_match_from_rows(sanc_rows)
-    p_row, p_score = _best_match_from_rows(pep_rows)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    if s_row is not None:
-        source_label = (_as_safe_str(s_row.get("dataset")).strip() or "Postgres sanctions table")
-        if p_row is not None:
-            source_label = f"{source_label}; Consolidated PEP list"
-        result = {
-            "Sanctions Name": s_row.get("name"),
-            "Birth Date": _parse_dob(s_row.get("birth_date")),
-            "Regime": s_row.get("regime") or s_row.get("dataset"),
-            "Position": ((s_row.get("raw_json") or {}).get("positions") if isinstance(s_row.get("raw_json"), dict) else None),
-            "Topics": [],
-            "Is PEP": bool(p_row is not None),
-            "Is Sanctioned": True,
-            "Confidence": "High" if s_score >= 90 else "Medium" if s_score >= 80 else "Low",
-            "Score": s_score,
-            "Risk Level": "High Risk",
-            "Top Matches": top_suggestions,
-            "Match Found": True,
-            "Check Summary": {"Status": "Fail Sanction", "Source": source_label, "Date": now_str},
-        }
-        if log_search:
-            _append_search_to_csv(name, result["Check Summary"])
-        return result
-
-    if p_row is not None:
-        result = {
-            "Sanctions Name": p_row.get("name"),
-            "Birth Date": _parse_dob(p_row.get("birth_date")),
-            "Regime": p_row.get("regime") or p_row.get("dataset"),
-            "Position": ((p_row.get("raw_json") or {}).get("positions") if isinstance(p_row.get("raw_json"), dict) else None),
-            "Topics": [],
-            "Is PEP": True,
-            "Is Sanctioned": False,
-            "Confidence": "High" if p_score >= 90 else "Medium" if p_score >= 80 else "Low",
-            "Score": p_score,
-            "Risk Level": "Medium Risk",
-            "Top Matches": top_suggestions,
-            "Match Found": True,
-            "Check Summary": {"Status": "Fail PEP", "Source": "Consolidated PEP list", "Date": now_str},
-        }
-        if log_search:
-            _append_search_to_csv(name, result["Check Summary"])
-        return result
-
-    result = _empty_no_match_result(source_label="Postgres watchlist")
-    result["Top Matches"] = top_suggestions
+def perform_opensanctions_check(name, dob, country=None, entity_type="Person", parquet_path=OSN_PARQUET,
+                               requestor=None, log_search=True, include_peps=True):
+    df = get_opensanctions_df(parquet_path)
+    sources = set(df.get("source_type", pd.Series(dtype=str)).astype(str).str.lower())
+    if df.empty or "sanctions" not in sources or (include_peps and "peps" not in sources):
+        raise ScreeningUnavailableError("Required sanctions or PEP data is unavailable.")
+    # Filter before conversion to avoid duplicating the entire watchlist in memory.
+    schemas = df['schema'].fillna('').astype(str).str.lower()
+    allowed = ['organization', 'company', 'legalentity'] if entity_type.lower() == 'organization' else ['person']
+    selected = df[schemas.isin(allowed)]
+    result = _evaluate_watchlist_rows(name, dob, country, entity_type, (dict(zip(selected.columns, values)) for values in selected.itertuples(index=False, name=None)), 'OpenSanctions', include_peps)
     if log_search:
-        _append_search_to_csv(name, result["Check Summary"])
+        _append_search_to_csv(name, result['Check Summary'])
+    return result
+
+
+async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
+                                          candidate_limit=400, log_search=True, include_peps=True):
+    if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
+        raise ScreeningUnavailableError("Watchlist data is unavailable.")
+    sources = await conn.fetch("SELECT DISTINCT source_type FROM watchlist_entities")
+    available = {r['source_type'] for r in sources}
+    if 'sanctions' not in available or (include_peps and 'peps' not in available):
+        raise ScreeningUnavailableError("Required sanctions or PEP data is unavailable.")
+    # Retrieval must not suppress missing/conflicting identity evidence. Apply type
+    # before LIMIT so unrelated schemas cannot crowd out eligible candidates.
+    limit = max(1, min(2000, int(candidate_limit)))
+    schemas = ['organization', 'company', 'legalentity'] if entity_type.lower() == 'organization' else ['person']
+    rows = []
+    for source_type in (['sanctions', 'peps'] if include_peps else ['sanctions']):
+        candidates = await conn.fetch('''
+            SELECT entity_id, name, birth_date::text AS birth_date, dataset, regime,
+                   entity_schema, raw_json, source_type
+            FROM watchlist_entities
+            WHERE source_type=$1 AND lower(entity_schema)=ANY($3::text[])
+              AND (name_norm % $2 OR strpos(name_norm, $2)>0
+                   OR EXISTS (SELECT 1 FROM unnest(string_to_array(COALESCE(raw_json->>'aliases',''), ';')) alias
+                              WHERE similarity(lower(alias), $2)>=0.3 OR strpos(lower(alias), $2)>0))
+            ORDER BY similarity(name_norm, $2) DESC, entity_id
+            LIMIT $4
+        ''', source_type, _normalize_text(name), schemas, limit + 1)
+        if len(candidates) > limit:
+            raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
+        rows.extend(dict(r) for r in candidates)
+    result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist', include_peps)
+    if log_search:
+        _append_search_to_csv(name, result['Check Summary'])
     return result

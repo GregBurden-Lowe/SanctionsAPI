@@ -1,0 +1,89 @@
+[
+  {
+    "label": "exact person",
+    "query": "Jane Smith",
+    "candidate": "Jane Smith",
+    "expected": true
+  },
+  {
+    "label": "single typo",
+    "query": "John Smith",
+    "candidate": "John Smyth",
+    "expected": true
+  },
+  {
+    "label": "transposed letters",
+    "query": "Mikhail Petrov",
+    "candidate": "Mikahil Petrov",
+    "expected": true
+  },
+  {
+    "label": "diacritics",
+    "query": "Jose Garcia",
+    "candidate": "Jos\u00e9 Garc\u00eda",
+    "expected": true
+  },
+  {
+    "label": "middle name absent",
+    "query": "Jane Smith",
+    "candidate": "Jane Elizabeth Smith",
+    "expected": true
+  },
+  {
+    "label": "word order",
+    "query": "Smith Jane",
+    "candidate": "Jane Smith",
+    "expected": true
+  },
+  {
+    "label": "different surname",
+    "query": "John Smith",
+    "candidate": "John Brown",
+    "expected": false
+  },
+  {
+    "label": "different given name",
+    "query": "Jane Smith",
+    "candidate": "Robert Smith",
+    "expected": false
+  },
+  {
+    "label": "unrelated",
+    "query": "Jane Smith",
+    "candidate": "Vladimir Petrov",
+    "expected": false
+  },
+  {
+    "label": "organisation legal suffix",
+    "query": "Hyde and Partners",
+    "candidate": "Hyde & Partners Ltd",
+    "type": "Organization",
+    "expected": true
+  },
+  {
+    "label": "generic business words",
+    "query": "BUZZ PROPERTY MANAGEMENT LTD",
+    "candidate": "PRINCE PROPERTY CAMBODIA MANAGEMENT CO. LTD.",
+    "type": "Organization",
+    "expected": false
+  },
+  {
+    "label": "generic overlap",
+    "query": "Hyde and Partners",
+    "candidate": "Siavash Nurian and Partners",
+    "type": "Organization",
+    "expected": false
+  },
+  {
+    "label": "initial with full surname",
+    "query": "J Smith",
+    "candidate": "John Smith",
+    "expected": true
+  },
+  {
+    "label": "conflicting initial",
+    "query": "R Smith",
+    "candidate": "John Smith",
+    "expected": false
+  }
+]

@@ -49,7 +49,44 @@ export interface CheckSummary {
 export type TopMatch = [string, number] | { name: string; score: number }
 
 /** OpCheck response — keys and casing are frozen. entity_key is set when DB is used. */
+export interface CandidateEvidenceItem {
+  record_id: string | null
+  name: string
+  matched_name: string
+  matched_alias: boolean
+  entity_type: string
+  source_type: string
+  dataset: string
+  name_score: number
+  birth_date: string | null
+  country: string | null
+  dob_assessment: 'exact' | 'compatible' | 'conflicting' | 'unknown' | 'not_applicable'
+  country_assessment: 'compatible' | 'conflicting' | 'unknown'
+  disposition: 'potential_match' | 'excluded'
+  reasons: string[]
+}
+
+export interface ReviewDecision {
+  decision_id: string
+  run_id: string
+  actor: string
+  outcome: string
+  notes: string
+  decided_at: string
+  decision_type: 'analyst' | 'system_no_match'
+  stale?: boolean
+}
+
 export interface OpCheckResponse {
+  'Engine Result'?: OpCheckResponse;
+  'Review Decision'?: ReviewDecision;
+  'Candidate Evidence'?: CandidateEvidenceItem[];
+  'Candidate Evidence Summary'?: { evaluated_name_matches: number; potential_matches: number; excluded: number; display_truncated: boolean };
+  'Decision Explanation'?: string;
+  request_id?: string;
+  run_id?: string;
+  screened_at?: string;
+  reused?: boolean;
   'Sanctions Name': string | null;
   'Birth Date': string | null;
   Regime: string | null;
@@ -114,6 +151,7 @@ export interface ScreenedEntity {
 }
 
 export interface ReviewQueueItem {
+  run_id?: string
   entity_name: string
   entity_key: string
   entity_type: string

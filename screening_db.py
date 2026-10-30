@@ -10,6 +10,9 @@ from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal
 from typing import Optional, Any, Dict, List
 from uuid import UUID
+from pathlib import Path
+import screening_history
+from review_decisions import ReviewConflict, project_result, write_decision
 
 logger = logging.getLogger(__name__)
 
@@ -336,17 +339,25 @@ async def ensure_schema(conn) -> None:
         ON screening_jobs (refresh_run_id)
     """)
 
+    async with conn.transaction():
+        await conn.execute((Path(__file__).parent / "migrations/001_screening_history.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/002_review_decisions.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/003_job_recovery.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/004_request_recovery.sql").read_text())
 
-async def get_valid_screening(conn, entity_key: str) -> Optional[Dict[str, Any]]:
+
+async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     If a row exists and screening_valid_until > now(), return result_json.
     Does NOT extend validity; read-only.
     """
     row = await conn.fetchrow(
         """
-        SELECT result_json, screening_valid_until, manual_override_stale
+        SELECT result_json, screening_valid_until, manual_override_stale, current_run_id, last_screened_at, review_decision
         FROM screened_entities
         WHERE entity_key = $1 AND screening_valid_until > NOW()
+          AND screened_against_refresh_run_id IS NOT DISTINCT FROM
+            (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1)
         """,
         entity_key,
     )
@@ -355,11 +366,13 @@ async def get_valid_screening(conn, entity_key: str) -> Optional[Dict[str, Any]]
     if bool(row["manual_override_stale"]):
         return None
     rj = row["result_json"]
-    if isinstance(rj, str):
-        return json.loads(rj)
-    if isinstance(rj, dict):
-        return rj
-    return dict(rj) if hasattr(rj, "items") else rj
+    result = json.loads(rj) if isinstance(rj, str) else dict(rj)
+    # Legacy results are retained as evidence, but cannot prove input compatibility.
+    if not fingerprint or result.get("Screening Fingerprint") != fingerprint:
+        return None
+    result = project_result(result, row['review_decision'], stale=row['manual_override_stale'])
+    result.update(run_id=str(row["current_run_id"]), screened_at=row["last_screened_at"].isoformat(), reused=True)
+    return result
 
 
 async def get_screened_entity_identity(conn, entity_key: str) -> Optional[Dict[str, Any]]:
@@ -413,66 +426,77 @@ async def upsert_screening(
     if date_of_birth:
         try:
             from datetime import date
-            dob_date = date.fromisoformat(date_of_birth.strip()[:10])
+            from utils import _normalize_dob
+            normalized_dob = _normalize_dob(date_of_birth)
+            dob_date = date.fromisoformat(normalized_dob) if normalized_dob and len(normalized_dob) == 10 else None
         except Exception:
             pass
 
-    await conn.execute(
-        """
-        INSERT INTO screened_entities (
-            entity_key, display_name, normalized_name, date_of_birth, country_input, entity_type,
-            last_screened_at, screening_valid_until,
-            status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
-            result_json, last_requestor, business_reference, reason_for_check, updated_at,
-            screened_against_uk_hash, screened_against_refresh_run_id,
-            manual_override_uk_hash, manual_override_stale
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::uuid, NULL, FALSE)
-        ON CONFLICT (entity_key) DO UPDATE SET
-            display_name = EXCLUDED.display_name,
-            normalized_name = EXCLUDED.normalized_name,
-            date_of_birth = EXCLUDED.date_of_birth,
-            country_input = EXCLUDED.country_input,
-            entity_type = EXCLUDED.entity_type,
-            last_screened_at = EXCLUDED.last_screened_at,
-            screening_valid_until = EXCLUDED.screening_valid_until,
-            status = EXCLUDED.status,
-            risk_level = EXCLUDED.risk_level,
-            confidence = EXCLUDED.confidence,
-            score = EXCLUDED.score,
-            uk_sanctions_flag = EXCLUDED.uk_sanctions_flag,
-            pep_flag = EXCLUDED.pep_flag,
-            result_json = EXCLUDED.result_json,
-            last_requestor = EXCLUDED.last_requestor,
-            business_reference = EXCLUDED.business_reference,
-            reason_for_check = EXCLUDED.reason_for_check,
-            updated_at = EXCLUDED.updated_at,
-            screened_against_uk_hash = EXCLUDED.screened_against_uk_hash,
-            screened_against_refresh_run_id = EXCLUDED.screened_against_refresh_run_id,
-            manual_override_uk_hash = NULL,
-            manual_override_stale = FALSE
-        """,
-        entity_key,
-        display_name,
-        normalized_name,
-        dob_date,
-        country_input_clean,
-        entity_type or "Person",
-        now,
-        valid_until,
-        status,
-        risk_level,
-        confidence,
-        score,
-        uk_flag,
-        pep_flag,
-        json.dumps(result),
-        requestor,
-        business_reference_clean,
-        reason_for_check_clean,
-        now,
-        screened_against_uk_hash,
-        screened_against_refresh_run_id,
-    )
+    async with conn.transaction():
+        await screening_history.lock_active(conn)
+        await conn.execute(
+            """
+            INSERT INTO screened_entities (
+                entity_key, display_name, normalized_name, date_of_birth, country_input, entity_type,
+                last_screened_at, screening_valid_until,
+                status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
+                result_json, last_requestor, business_reference, reason_for_check, updated_at,
+                screened_against_uk_hash, screened_against_refresh_run_id,
+                manual_override_uk_hash, manual_override_stale
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::uuid, NULL, FALSE)
+            ON CONFLICT (entity_key) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                normalized_name = EXCLUDED.normalized_name,
+                date_of_birth = EXCLUDED.date_of_birth,
+                country_input = EXCLUDED.country_input,
+                entity_type = EXCLUDED.entity_type,
+                last_screened_at = EXCLUDED.last_screened_at,
+                screening_valid_until = EXCLUDED.screening_valid_until,
+                status = EXCLUDED.status,
+                risk_level = EXCLUDED.risk_level,
+                confidence = EXCLUDED.confidence,
+                score = EXCLUDED.score,
+                uk_sanctions_flag = EXCLUDED.uk_sanctions_flag,
+                pep_flag = EXCLUDED.pep_flag,
+                result_json = EXCLUDED.result_json,
+                last_requestor = EXCLUDED.last_requestor,
+                business_reference = EXCLUDED.business_reference,
+                reason_for_check = EXCLUDED.reason_for_check,
+                updated_at = EXCLUDED.updated_at,
+                screened_against_uk_hash = EXCLUDED.screened_against_uk_hash,
+                screened_against_refresh_run_id = EXCLUDED.screened_against_refresh_run_id,
+                manual_override_uk_hash = NULL,
+                manual_override_stale = FALSE
+            """,
+            entity_key,
+            display_name,
+            normalized_name,
+            dob_date,
+            country_input_clean,
+            entity_type or "Person",
+            now,
+            valid_until,
+            status,
+            risk_level,
+            confidence,
+            score,
+            uk_flag,
+            pep_flag,
+            json.dumps(result),
+            requestor,
+            business_reference_clean,
+            reason_for_check_clean,
+            now,
+            screened_against_uk_hash,
+            screened_against_refresh_run_id,
+        )
+        row = await conn.fetchrow("SELECT current_run_id, last_screened_at FROM screened_entities WHERE entity_key=$1", entity_key)
+        result.update(run_id=str(row["current_run_id"]), screened_at=row["last_screened_at"].isoformat(), reused=False)
+        request_id=screening_history.active_request.get()
+        if request_id:
+            # Publish the run and its request response atomically, eliminating the crash gap.
+            await screening_history.finish(conn,request_id,dict(result,entity_key=entity_key,entity_id=entity_key,request_id=request_id))
+
 
 
 async def update_cached_screening_metadata(
@@ -552,27 +576,30 @@ async def enqueue_job(
         raise ValueError("business_reference is required")
     if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
         raise ValueError("reason_for_check is required and must be a valid enum value")
-    row = await conn.fetchrow(
-        """
-        INSERT INTO screening_jobs (
-            entity_key, name, date_of_birth, country, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen, status
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            INSERT INTO screening_jobs (
+                entity_key, name, date_of_birth, country, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen, status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::uuid, $11, 'pending')
+            RETURNING job_id
+            """,
+            entity_key,
+            name,
+            date_of_birth,
+            (country or "").strip() or None,
+            entity_type or "Person",
+            requestor,
+            business_reference_clean,
+            reason_for_check_clean,
+            reason or "manual",
+            refresh_run_id,
+            bool(force_rescreen),
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::uuid, $11, 'pending')
-        RETURNING job_id
-        """,
-        entity_key,
-        name,
-        date_of_birth,
-        (country or "").strip() or None,
-        entity_type or "Person",
-        requestor,
-        business_reference_clean,
-        reason_for_check_clean,
-        reason or "manual",
-        refresh_run_id,
-        bool(force_rescreen),
-    )
+        await screening_history.attach_job(conn, str(row["job_id"]), dict(name=name, dob=date_of_birth, country=country, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check))
     return str(row["job_id"])
+
 
 
 async def get_latest_refresh_run(conn) -> Optional[Dict[str, Any]]:
@@ -822,6 +849,7 @@ def _ai_triage_result_snapshot(result_json: Dict[str, Any]) -> Dict[str, Any]:
     result = result_json if isinstance(result_json, dict) else {}
     summary = result.get("Check Summary") if isinstance(result.get("Check Summary"), dict) else {}
     return {
+        "run_id": result.get("run_id"),
         "Sanctions Name": result.get("Sanctions Name"),
         "Birth Date": result.get("Birth Date"),
         "Regime": result.get("Regime"),
@@ -851,7 +879,7 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, 
             status,
             risk_level,
             score,
-            result_json,
+            result_json, current_run_id,
             review_status
         FROM screened_entities
         WHERE status NOT ILIKE 'Cleared%'
@@ -878,6 +906,7 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, 
         elif not isinstance(result_json, dict):
             result_json = dict(result_json) if hasattr(result_json, "items") else {}
         summary = result_json.get("Check Summary") if isinstance(result_json.get("Check Summary"), dict) else {}
+        result_json["run_id"] = str(d["current_run_id"])
         d["result_json"] = result_json
         d["date_of_birth"] = d["date_of_birth"].isoformat() if d.get("date_of_birth") else None
         d["score"] = float(d.get("score") or 0)
@@ -1119,8 +1148,14 @@ async def mark_manual_overrides_stale(conn, *, latest_uk_hash: str) -> int:
         """
         UPDATE screened_entities
         SET manual_override_stale = TRUE,
+            status = CASE WHEN review_decision IS NOT NULL THEN COALESCE(result_json->'Check Summary'->>'Status', status) ELSE status END,
+            risk_level = CASE WHEN review_decision IS NOT NULL THEN COALESCE(result_json->>'Risk Level', risk_level) ELSE risk_level END,
+            uk_sanctions_flag = CASE WHEN review_decision IS NOT NULL THEN COALESCE((result_json->>'Is Sanctioned')::boolean, false) ELSE uk_sanctions_flag END,
+            pep_flag = CASE WHEN review_decision IS NOT NULL THEN COALESCE((result_json->>'Is PEP')::boolean, false) ELSE pep_flag END,
+            review_status = NULL,
+            review_claimed_by = NULL, review_claimed_at = NULL, review_claimed_run_id = NULL,
             updated_at = NOW()
-        WHERE manual_override_uk_hash IS NOT NULL
+        WHERE (manual_override_uk_hash IS NOT NULL OR review_decision->>'outcome' LIKE 'False Positive%')
           AND COALESCE(manual_override_uk_hash, '') <> COALESCE($1, '')
           AND manual_override_stale = FALSE
         """,
@@ -1322,7 +1357,7 @@ async def search_screened_entities(
         args.append(pattern)
     if business_reference and business_reference.strip():
         n += 1
-        conditions.append(f"business_reference = ${n}")
+        conditions.append(f"(business_reference = ${n} OR entity_key IN (SELECT r.entity_key FROM screening_requests q JOIN screening_runs r USING(run_id) WHERE q.business_reference = ${n}))")
         args.append(business_reference.strip())
     if not conditions:
         return []
@@ -1334,7 +1369,7 @@ async def search_screened_entities(
         SELECT entity_key, display_name, normalized_name, date_of_birth, entity_type,
                last_screened_at, screening_valid_until, status, risk_level, confidence, score,
                uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check, country_input,
-               review_status, review_claimed_by, review_claimed_at, review_outcome, review_notes, review_completed_by, review_completed_at,
+               review_status, review_claimed_by, review_claimed_at, review_outcome, review_notes, review_completed_by, review_completed_at, current_run_id, review_decision, manual_override_stale,
                updated_at
         FROM screened_entities
         WHERE {where_sql}
@@ -1364,7 +1399,8 @@ async def search_screened_entities(
                 rj = json.loads(rj)
             elif not isinstance(rj, dict):
                 rj = dict(rj) if hasattr(rj, "items") else rj
-            d["result_json"] = _to_json_safe(rj)
+            d["result_json"] = _to_json_safe(project_result(rj, d.get('review_decision'), stale=d.get('manual_override_stale', False)))
+            d["result_json"]["run_id"] = str(d['current_run_id'])
         out.append(_to_json_safe(d))
     return out
 
@@ -1552,6 +1588,7 @@ async def list_review_queue(
             date_of_birth,
             country_input,
             status AS decision,
+            current_run_id::text AS run_id,
             business_reference,
             reason_for_check,
             last_requestor AS screening_user,
@@ -1590,6 +1627,7 @@ async def claim_review(
         """
         UPDATE screened_entities
         SET review_status = 'IN_REVIEW',
+            review_claimed_run_id = current_run_id,
             review_claimed_by = $2,
             review_claimed_at = NOW(),
             updated_at = NOW()
@@ -1673,59 +1711,38 @@ async def ensure_review_claimed_by_user(
     return {"status": "error", "error": "not_claimable", "item": item}
 
 
-async def complete_review(
-    conn,
-    *,
-    entity_key: str,
-    completed_by: str,
-    review_outcome: str,
-    review_notes: str,
-) -> Dict[str, Any]:
-    """
-    Complete an in-review match.
-    Only rows with review_status='IN_REVIEW' can be completed.
-    """
-    review_outcome_clean = (review_outcome or "").strip()
-    review_notes_clean = (review_notes or "").strip()
-    if review_outcome_clean not in _REVIEW_OUTCOME_ALLOWED:
+async def complete_review(conn, *, entity_key, completed_by, review_outcome, review_notes, expected_run_id=None):
+    outcome = (review_outcome or '').strip()
+    notes = (review_notes or '').strip()
+    if outcome not in _REVIEW_OUTCOME_ALLOWED:
         raise ValueError("review_outcome must be a valid enum value")
-    if len(review_notes_clean) < 10:
+    if len(notes) < 10:
         raise ValueError("review_notes must be at least 10 characters")
-    row = await conn.fetchrow(
-        """
-        UPDATE screened_entities
-        SET review_status = 'COMPLETED',
-            review_outcome = $3,
-            review_notes = $4,
-            review_completed_by = $2,
-            review_completed_at = NOW(),
-            updated_at = NOW()
-        WHERE entity_key = $1
-          AND review_status = 'IN_REVIEW'
-        RETURNING entity_key, display_name, status, business_reference, reason_for_check,
-                  review_status, review_outcome, review_notes, review_completed_by, review_completed_at
-        """,
-        entity_key,
-        completed_by,
-        review_outcome_clean,
-        review_notes_clean,
-    )
-    if row is not None:
-        d = dict(row)
-        if d.get("review_completed_at") is not None:
-            d["review_completed_at"] = d["review_completed_at"].isoformat()
-        return {"status": "ok", "item": _to_json_safe(d)}
-    existing = await conn.fetchrow(
-        """
-        SELECT entity_key, review_status, business_reference, reason_for_check
-        FROM screened_entities
-        WHERE entity_key = $1
-        """,
-        entity_key,
-    )
-    if existing is None:
-        return {"status": "error", "error": "not_found"}
-    return {"status": "error", "error": "not_in_review", "review_status": existing.get("review_status")}
+    async with conn.transaction():
+        row = await conn.fetchrow("SELECT * FROM screened_entities WHERE entity_key=$1 FOR UPDATE", entity_key)
+        if row is None:
+            return {'status': 'error', 'error': 'not_found'}
+        if row['review_status'] != 'IN_REVIEW':
+            return {'status': 'error', 'error': 'not_in_review'}
+        if (row['review_claimed_by'] or '').lower() != completed_by.lower():
+            return {'status': 'error', 'error': 'claimed_by_other'}
+        if row['manual_override_stale'] or row['review_claimed_run_id'] != row['current_run_id'] or (expected_run_id and str(row['current_run_id']) != str(expected_run_id)):
+            return {'status': 'error', 'error': 'stale_run'}
+        result = await write_decision(conn, row, completed_by, outcome, notes)
+        item = dict(await conn.fetchrow("SELECT entity_key, display_name, status, business_reference, reason_for_check, review_status, review_outcome, review_notes, review_completed_by, review_completed_at FROM screened_entities WHERE entity_key=$1", entity_key))
+        return {'status': 'ok', 'item': _to_json_safe(item), 'result': result}
+
+
+async def complete_clear_rerun(conn, *, entity_key, actor, expected_run_id):
+    """A new no-match run resolves work without inventing an analyst false positive."""
+    async with conn.transaction():
+        row = await conn.fetchrow("SELECT * FROM screened_entities WHERE entity_key=$1 FOR UPDATE", entity_key)
+        if not row or str(row['current_run_id']) != str(expected_run_id) or not row['status'].startswith('Cleared'):
+            return {'status': 'error', 'error': 'stale_run'}
+        if row['review_decision']:
+            return {'status': 'error', 'error': 'already_completed'}
+        await write_decision(conn, row, actor, 'No Match - Re-screened', 'A new screening run found no potential match.', 'system_no_match')
+        return {'status': 'ok', 'item': {'entity_key': entity_key, 'review_status': 'COMPLETED', 'review_outcome': 'No Match - Re-screened'}}
 
 
 async def list_ai_triage_tasks(
@@ -1945,15 +1962,16 @@ async def purge_screened_entities_older_than(conn, months: int) -> int:
 async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
     """
     Return { status, entity_key?, result?, error_message? }.
-    If status is 'completed', result is loaded from screened_entities.
+    If status is 'completed', result is loaded from the immutable run.
     """
     row = await conn.fetchrow(
-        "SELECT status, entity_key, error_message, reason, previous_status, result_status, transition FROM screening_jobs WHERE job_id = $1",
+        "SELECT status, entity_key, error_message, reason, previous_status, result_status, transition, run_id, response_json, attempt_count FROM screening_jobs WHERE job_id = $1",
         job_id,
     )
     if row is None:
         return None
     out = {"status": row["status"], "job_id": job_id, "entity_key": row["entity_key"]}
+    out["attempt_count"] = row["attempt_count"]
     out["reason"] = row["reason"]
     out["previous_status"] = row["previous_status"]
     out["result_status"] = row["result_status"]
@@ -1962,8 +1980,8 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
         out["error_message"] = row["error_message"]
     if row["status"] == "completed":
         entity_row = await conn.fetchrow(
-            "SELECT result_json FROM screened_entities WHERE entity_key = $1",
-            row["entity_key"],
+            "SELECT result_json FROM screening_runs WHERE run_id = $1",
+            row["run_id"],
         )
         if entity_row:
             rj = entity_row["result_json"]
@@ -1973,114 +1991,38 @@ async def get_job_status(conn, job_id: str) -> Optional[Dict[str, Any]]:
                 out["result"] = rj
             else:
                 out["result"] = dict(rj) if hasattr(rj, "items") else rj
+            out["result"].update(run_id=str(row["run_id"]), entity_key=row["entity_key"])
+        else:
+            out["result_unavailable"] = True
+            out["message"] = "This legacy job has no preserved execution snapshot. Its original result cannot be reconstructed."
+    if row['status'] == 'completed' and row['response_json']:
+        out['result'] = _decode_jsonish(row['response_json'])
     return out
 
 
-async def mark_false_positive(
-    conn,
-    *,
-    entity_key: str,
-    actor: str,
-    reason: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Mark an existing screening record as manually cleared (false positive).
-    Keeps an audit trail inside result_json["Manual Override"].
-    """
-    row = await conn.fetchrow(
-        """
-        SELECT result_json
-        FROM screened_entities
-        WHERE entity_key = $1
-        """,
-        entity_key,
-    )
-    if row is None:
-        return None
-
-    rj = row["result_json"]
-    if isinstance(rj, str):
-        result = json.loads(rj)
-    elif isinstance(rj, dict):
-        result = dict(rj)
-    else:
-        result = dict(rj) if hasattr(rj, "items") else {}
-
-    previous_summary = dict(result.get("Check Summary") or {})
-    latest_run = await conn.fetchrow(
-        """
-        SELECT refresh_run_id, uk_hash
-        FROM watchlist_refresh_runs
-        ORDER BY ran_at DESC
-        LIMIT 1
-        """
-    )
-    latest_hash = (latest_run["uk_hash"] if latest_run else None) or None
-    latest_run_id = str(latest_run["refresh_run_id"]) if latest_run else None
-    now = datetime.now(timezone.utc)
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    valid_until = now + timedelta(days=365)
-
-    result["Manual Override"] = {
-        "type": "false_positive_clear",
-        "actor": actor,
-        "reason": (reason or "").strip() or None,
-        "overridden_at": now.isoformat(),
-        "previous_status": previous_summary.get("Status"),
-        "previous_risk_level": result.get("Risk Level"),
-        "previous_score": result.get("Score"),
-        "previous_sanctions_name": result.get("Sanctions Name"),
-    }
-    result["Sanctions Name"] = None
-    result["Birth Date"] = None
-    result["Regime"] = None
-    result["Is Sanctioned"] = False
-    result["Is PEP"] = False
-    result["Match Found"] = False
-    result["Risk Level"] = "Cleared"
-    result["Confidence"] = "Manual Review"
-    result["Score"] = 0
-    result["Check Summary"] = {
-        "Status": "Cleared - False Positive",
-        "Source": f"{previous_summary.get('Source') or 'Manual Review'}; Manual override",
-        "Date": now_str,
-    }
-
-    await conn.execute(
-        """
-        UPDATE screened_entities
-        SET status = $2,
-            risk_level = $3,
-            confidence = $4,
-            score = $5,
-            uk_sanctions_flag = $6,
-            pep_flag = $7,
-            result_json = $8::jsonb,
-            last_requestor = $9,
-            last_screened_at = $10,
-            screening_valid_until = $11,
-            updated_at = $10,
-            screened_against_uk_hash = $12,
-            screened_against_refresh_run_id = $13::uuid,
-            manual_override_uk_hash = $12,
-            manual_override_stale = FALSE
-        WHERE entity_key = $1
-        """,
-        entity_key,
-        "Cleared - False Positive",
-        "Cleared",
-        "Manual Review",
-        0.0,
-        False,
-        False,
-        json.dumps(result),
-        actor,
-        now,
-        valid_until,
-        latest_hash,
-        latest_run_id,
-    )
-    return result
+async def mark_false_positive(conn, *, entity_key, actor, reason=None, expected_run_id=None):
+    """Save an admin/AI-assisted disposition without changing engine evidence or validity."""
+    notes = (reason or '').strip()
+    if not notes:
+        raise ValueError('A reason is required')
+    if not expected_run_id:
+        raise ReviewConflict('Reload the screening and supply its run ID before resolving it.')
+    async with conn.transaction():
+        row = await conn.fetchrow("SELECT * FROM screened_entities WHERE entity_key=$1 FOR UPDATE", entity_key)
+        if row is None:
+            return None
+        if str(row['current_run_id']) != str(expected_run_id):
+            raise ReviewConflict('This screening has changed. Reload and review the new result.')
+        if row['manual_override_stale']:
+            raise ReviewConflict('Run a fresh screening before resolving this stale result.')
+        if row['review_decision']:
+            raise ReviewConflict('This run already has a recorded decision.')
+        engine = row['result_json']
+        if isinstance(engine, str):
+            engine = json.loads(engine)
+        if not (engine.get('Is Sanctioned') or engine.get('Is PEP')):
+            raise ReviewConflict('This run has no potential match to resolve.')
+        return await write_decision(conn, row, actor, 'False Positive - Proceeded', notes)
 
 
 async def list_screening_jobs(

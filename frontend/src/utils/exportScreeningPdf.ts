@@ -29,8 +29,8 @@ function parseSources(source: string | undefined): {
   const hasUK = items.some(isUKSource)
   const otherCount = items.filter((i) => !isUKSource(i)).length
   const summaryLines: string[] = []
-  summaryLines.push(hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No')
-  if (otherCount > 0) summaryLines.push(`Other sanctions lists: ${otherCount}`)
+  summaryLines.push(hasUK ? 'UK-labelled result source' : 'No UK-labelled result source')
+  if (otherCount > 0) summaryLines.push(`Other source labels: ${otherCount}`)
   return { list: items, hasUK, otherCount, summaryLines }
 }
 
@@ -52,19 +52,7 @@ function sourceBadgeMeta(item: string): { label: string; cls: string; mark: stri
 }
 
 function expandSourceBadgesForDisplay(sourceList: string[]): string[] {
-  const cleaned = sourceList.map((s) => s.trim()).filter(Boolean)
-  if (cleaned.length === 0) return []
-  const defaults = ['United Nations', 'EU Council', 'OFAC', 'HM Treasury']
-  const isGeneric = (v: string): boolean =>
-    v === 'opensanctions' || v.includes('open sanctions') || v.includes('postgres watchlist')
-
-  const normalized = cleaned.map((s) => s.toLowerCase())
-  const hasGeneric = normalized.some(isGeneric)
-  if (!hasGeneric) return cleaned
-
-  const withoutGeneric = cleaned.filter((s) => !isGeneric(s.toLowerCase()))
-  const merged = [...defaults, ...withoutGeneric]
-  return [...new Set(merged)]
+  return [...new Set(sourceList.map(source => source.trim()).filter(Boolean))]
 }
 
 function formatTopMatch(m: TopMatch): { name: string; score: number } {
@@ -89,13 +77,14 @@ function formatEntityTypeLabel(entityType: string): string {
 }
 
 function getGuidanceText(result: OpCheckResponse): string {
+  if (result['Check Summary']?.Status?.includes('False Positive')) return 'Manually resolved as a false positive. Candidate evidence preserves the original engine findings.'
   if (result['Is Sanctioned']) {
     return 'Potential sanctions match. Stop and escalate for enhanced review before proceeding.'
   }
   if (result['Is PEP']) {
     return 'PEP indicator found. Continue with enhanced due diligence and record rationale.'
   }
-  return 'No sanctions or PEP match found under current rules.'
+  return result['PEP Check']?.checked === false ? 'No potential sanctions match identified. PEP screening was not performed.' : 'No potential sanctions or PEP match identified under current rules. This is not proof of identity.'
 }
 
 function statusTone(result: OpCheckResponse): string {
@@ -119,7 +108,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch).slice(0, 5)
   const tone = statusTone(result)
   const checkedAt = summary?.Date || '—'
-  const sourceSummary = `${hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No'}${otherCount > 0 ? ` · Other lists: ${otherCount}` : ''}`
+  const sourceSummary = `${hasUK ? 'UK-labelled result source' : 'No UK-labelled result source'}${otherCount > 0 ? ` · Other source labels: ${otherCount}` : ''}`
   const matchedName = result['Sanctions Name'] || '—'
   const matchedDob = result['Birth Date'] || '—'
   const matchedRegime = result.Regime || '—'
@@ -128,10 +117,10 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
   const personTypeBadge = result['Entity Type Checks']?.Person?.is_match === true ? 'Match' : result['Entity Type Checks']?.Person?.is_match === false ? 'Clear' : 'Unknown'
   const orgTypeBadge = result['Entity Type Checks']?.Organization?.is_match === true ? 'Match' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Clear' : 'Unknown'
   const pepProcess = result['PEP Check']?.checked === false
-    ? `Skipped · ${result['PEP Check']?.message || 'Company-like name detected'}`
+    ? `Skipped · ${result['PEP Check']?.message || 'PEP screening was not performed'}`
     : 'Checked'
   const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'
-  const hasMatchedSubject = Boolean(result['Match Found'] && (result['Sanctions Name'] || result.Regime || result['Birth Date']))
+  const hasMatchedSubject = Boolean((result['Match Found'] || result['Engine Result']?.['Match Found']) && (result['Sanctions Name'] || result.Regime || result['Birth Date']))
 
   const docIdSeed = [
     result.entity_key || '',
@@ -178,7 +167,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
     <section class="summary-band">
       <div class="summary-cell status" style="--tone:${tone}">
         <span class="label">Status</span>
-        <strong>${escapeHtml(summary?.Status || 'Unknown')}</strong>
+        <strong>${escapeHtml(summary?.Status?.includes('False Positive') ? 'Manually resolved' : result['Is Sanctioned'] ? 'Potential sanctions match' : result['Is PEP'] ? 'Potential PEP match' : 'No potential match identified')}</strong>
         <div class="outcome">${escapeHtml(getGuidanceText(result))}</div>
       </div>
       <div class="summary-cell">
@@ -186,7 +175,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         <strong>${escapeHtml(result['Risk Level'] || '—')}</strong>
       </div>
       <div class="summary-cell">
-        <span class="label">Confidence</span>
+        <span class="label">Name similarity band</span>
         <strong>${escapeHtml(result.Confidence || '—')}</strong>
       </div>
       <div class="summary-cell">
@@ -216,14 +205,14 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
           <tr><th>Person Check</th><td>${escapeHtml(personTypeBadge)} · ${escapeHtml(personTypeStatus)}</td></tr>
           <tr><th>Organisation Check</th><td>${escapeHtml(orgTypeBadge)} · ${escapeHtml(orgTypeStatus)}</td></tr>
           <tr><th>PEP Processing</th><td>${escapeHtml(pepProcess)}</td></tr>
-          <tr><th>Sanctions Match</th><td>${result['Is Sanctioned'] ? 'Yes' : 'No'}</td></tr>
-          <tr><th>PEP Indicator</th><td>${result['Is PEP'] ? 'Yes' : 'No'}</td></tr>
+          <tr><th>Potential Sanctions Match</th><td>${result['Is Sanctioned'] ? 'Yes' : result['Engine Result']?.['Is Sanctioned'] ? 'Engine match resolved by analyst' : 'No'}</td></tr>
+          <tr><th>PEP Indicator</th><td>${result['Is PEP'] ? 'Yes' : result['Engine Result']?.['Is PEP'] ? 'Engine indicator resolved by analyst' : 'No'}</td></tr>
           <tr><th>Source Summary</th><td>${escapeHtml(sourceSummary || '—')}</td></tr>
         </table>
       </section>
 
       <section class="panel">
-        <h2>Matched Subject</h2>
+        <h2>Potential Matched Subject</h2>
         ${
           hasMatchedSubject
             ? `<table class="kv-table">
@@ -236,7 +225,7 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
       </section>
 
       <section class="panel">
-        <h2>Sources Reviewed</h2>
+        <h2>Reported Source Labels</h2>
         <div class="source-badges">${sourceBadges}</div>
       </section>
 
@@ -248,15 +237,30 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         </table>
       </section>
 
+      ${result['Candidate Evidence'] ? `<section class="panel span2">
+        <h2>Candidate Evidence</h2>
+        <div class="muted compact">Similarity scores do not confirm identity. Missing details do not establish a mismatch. Showing ${Math.min(result['Candidate Evidence'].length, 8)} of ${result['Candidate Evidence Summary']?.evaluated_name_matches ?? result['Candidate Evidence'].length} evaluated name matches; open the saved record for more detail.</div>
+        <table class="data-table"><thead><tr><th>Candidate / source</th><th>Name score</th><th>DOB evidence</th><th>Country evidence</th><th>Disposition</th></tr></thead><tbody>
+        ${result['Candidate Evidence'].slice(0, 8).map(c => `<tr><td>${escapeHtml(c.name)}<br>${escapeHtml(c.dataset)}</td><td>${c.name_score}/100</td><td>${escapeHtml(c.birth_date || 'Unavailable')} · ${escapeHtml(c.dob_assessment)}</td><td>${escapeHtml(c.country || 'Unavailable')} · ${escapeHtml(c.country_assessment)}</td><td>${escapeHtml(c.disposition)}</td></tr>`).join('')}
+        </tbody></table>
+      </section>` : ''}
+      ${result['Review Decision'] ? `<section class="panel span2"><h2>Analyst Decision — Separate From Engine Findings</h2>
+        <table class="kv-table"><tr><th>Outcome</th><td>${escapeHtml(result['Review Decision'].outcome)}</td></tr>
+        <tr><th>Reviewer / Reviewed at</th><td>${escapeHtml(result['Review Decision'].actor)} · ${escapeHtml(result['Review Decision'].decided_at)}</td></tr>
+        <tr><th>Rationale</th><td>${escapeHtml(result['Review Decision'].notes)}</td></tr>
+        <tr><th>Original engine outcome</th><td>${escapeHtml(result['Engine Result']?.['Check Summary']?.Status || 'Not available')}</td></tr></table>
+        <div class="muted compact">Screening date and validity are unchanged.${result['Review Decision'].stale ? ' This decision requires reassessment.' : ''}</div></section>` : ''}
       <section class="panel span2">
         <h2>Audit Metadata</h2>
         <table class="kv-table audit">
+          <tr><th>Request ID</th><td>${escapeHtml(result.request_id || 'Legacy / unavailable')}</td></tr>
+          <tr><th>Run ID</th><td>${escapeHtml(result.run_id || 'Legacy / unavailable')}</td></tr>
           <tr><th>Document ID</th><td>${escapeHtml(docId)}</td></tr>
           <tr><th>Verification Fingerprint</th><td>${escapeHtml(docFingerprint)}</td></tr>
           <tr><th>Entity Key Reference</th><td>${escapeHtml(result.entity_key || 'Not available')}</td></tr>
           <tr><th>Search Backend</th><td>${escapeHtml(backendLabel)}</td></tr>
           <tr><th>Generated (UTC)</th><td>${escapeHtml(generatedUtc)}</td></tr>
-          <tr><th>Coverage Notes</th><td>${escapeHtml(summaryLines.join(' · '))}</td></tr>
+          <tr><th>Source Notes</th><td>${escapeHtml(summaryLines.join(' · '))}</td></tr>
         </table>
       </section>
     </main>

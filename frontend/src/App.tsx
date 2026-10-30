@@ -1,3 +1,4 @@
+import { ScreeningHistoryPage, ScreeningRequestPage } from '@/pages/ScreeningHistoryPage'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from '@/context/AuthContext'
 import { AppShell } from '@/layouts/AppShell'
@@ -63,6 +64,8 @@ export default function App() {
             <Route index element={<ScreeningPage />} />
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="results" element={<ScreeningResultPage />} />
+            <Route path="history" element={<ScreeningHistoryPage />} />
+            <Route path="history/:requestId" element={<ScreeningRequestPage />} />
             <Route path="search" element={<SearchDatabasePage />} />
             <Route path="review" element={<MatchReviewPage />} />
             <Route path="ai-triage" element={<AiTriagePage />} />

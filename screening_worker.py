@@ -8,7 +8,11 @@ import os
 import sys
 import json
 import logging
+from review_decisions import project_result
+from screening_policy import run_parquet_check
 import time
+from uuid import uuid4
+from job_recovery import Heartbeat, claim_lease, recover_expired, lock_owned_job, LostJobLease
 from datetime import datetime, timezone, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -25,7 +29,7 @@ REASON_FOR_CHECK_ALLOWED = frozenset({
 def main():
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    from utils import perform_opensanctions_check, _normalize_text
+    from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result
 
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
@@ -39,12 +43,20 @@ def main():
     logger.info("Starting worker (poll every %s s, job retention %s days, screened_entities retention %s months, cleanup every %s loops)",
                 poll_interval, retention_days, screened_retention_months or "off", cleanup_every_n)
 
+    lease_seconds = max(15, int(os.environ.get("SCREENING_JOB_LEASE_SECONDS", "60")))
+    max_runtime = max(lease_seconds, int(os.environ.get("SCREENING_JOB_MAX_RUNTIME_SECONDS", "600")))
+    max_attempts = max(1, int(os.environ.get("SCREENING_JOB_MAX_ATTEMPTS", "3")))
     loop_count = 0
     while True:
         try:
             conn = psycopg2.connect(url)
             conn.autocommit = False
+            job_id = None
+            token = None
+            heartbeat = None
             try:
+                recover_expired(conn, max_attempts)
+                conn.commit()
                 # Claim one pending job
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
@@ -92,13 +104,11 @@ def main():
                     logger.warning("Job %s failed validation: %s", job_id, validation_error)
                     continue
 
-                # Mark running
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE screening_jobs SET status = 'running', started_at = NOW() WHERE job_id = %s",
-                        (job_id,),
-                    )
+                token = str(uuid4())
+                claim_lease(conn, job_id, token, lease_seconds)
                 conn.commit()
+                heartbeat = Heartbeat(url, job_id, token, lease_seconds, max_runtime)
+                heartbeat.start()
 
                 # Previous result status for transition tracking
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -112,8 +122,12 @@ def main():
                 # Idempotent reuse for non-forced jobs
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
-                        "SELECT result_json FROM screened_entities WHERE entity_key = %s AND screening_valid_until > NOW()",
-                        (entity_key,),
+                        """SELECT result_json, current_run_id, review_decision FROM screened_entities WHERE entity_key = %s
+                        AND screening_valid_until > NOW() AND manual_override_stale = FALSE
+                        AND result_json->>'Screening Fingerprint' = %s
+                        AND screened_against_refresh_run_id IS NOT DISTINCT FROM
+                            (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1)""",
+                        (entity_key, screening_fingerprint(name, dob, country, entity_type, 'worker-original')),
                     )
                     existing_valid = cur.fetchone()
                 if existing_valid and not force_rescreen:
@@ -123,6 +137,8 @@ def main():
                             existing_result = json.loads(existing_result)
                         except Exception:
                             existing_result = {}
+                    existing_result = project_result(existing_result, existing_valid.get('review_decision'))
+                    existing_result.update(run_id=str(existing_valid['current_run_id']), entity_key=entity_key, reused=True)
                     result_status = ((existing_result or {}).get("Check Summary") or {}).get("Status") if isinstance(existing_result, dict) else None
                     transition = "unchanged"
                     if previous_status and result_status and previous_status != result_status:
@@ -134,30 +150,22 @@ def main():
                             transition = "fail_to_cleared"
                         else:
                             transition = "changed"
+                    lock_owned_job(conn, job_id, token)
                     with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            UPDATE screened_entities
-                            SET last_requestor = %s,
-                                business_reference = %s,
-                                reason_for_check = %s,
-                                country_input = %s,
-                                updated_at = NOW()
-                            WHERE entity_key = %s
-                            """,
-                            (requestor, business_reference, reason_for_check, country, entity_key),
-                        )
+                        cur.execute("UPDATE screening_requests SET reused=true WHERE job_id=%s", (job_id,))
                         cur.execute(
                             """
                             UPDATE screening_jobs
                             SET status = 'completed',
+                                run_id = %s,
+                                response_json = %s::jsonb,
                                 finished_at = NOW(),
                                 previous_status = %s,
                                 result_status = %s,
                                 transition = %s
                             WHERE job_id = %s
                             """,
-                            (previous_status, result_status, transition, job_id),
+                            (existing_valid["current_run_id"], json.dumps(existing_result), previous_status, result_status, transition, job_id),
                         )
                     conn.commit()
                     logger.info("Job %s: reused existing valid screening", job_id)
@@ -165,13 +173,16 @@ def main():
 
                 # Run screening (sync)
                 logger.info("Job %s: running check for %s", job_id, name[:50])
-                result = perform_opensanctions_check(
+                result = run_parquet_check(
                     name=name,
                     dob=dob,
                     country=country,
                     entity_type=entity_type,
                     requestor=requestor,
+                    log_search=False,
                 )
+
+                stamp_screening_result(result, name, dob, country, entity_type, 'worker-original')
 
                 # Derive UK flag from result
                 src = (result.get("Check Summary") or {}).get("Source") or ""
@@ -206,7 +217,8 @@ def main():
                 if dob:
                     try:
                         from datetime import date
-                        dob_date = date.fromisoformat(str(dob).strip()[:10])
+                        normalized_dob = _normalize_dob(dob)
+                        dob_date = date.fromisoformat(normalized_dob) if normalized_dob and len(normalized_dob) == 10 else None
                     except Exception:
                         pass
 
@@ -236,6 +248,7 @@ def main():
                     screened_against_refresh_run_id = str(refresh_run_id) if refresh_run_id else None
 
                 # Upsert screened_entities
+                lock_owned_job(conn, job_id, token)
                 with conn.cursor() as cur:
                     cur.execute(
                         """
@@ -299,21 +312,32 @@ def main():
                         """
                         UPDATE screening_jobs
                         SET status = 'completed',
+                            run_id = (SELECT current_run_id FROM screened_entities WHERE entity_key = %s),
                             finished_at = NOW(),
                             previous_status = %s,
                             result_status = %s,
                             transition = %s
                         WHERE job_id = %s
                         """,
-                        (previous_status, result_status, transition, job_id),
+                        (entity_key, previous_status, result_status, transition, job_id),
                     )
                 conn.commit()
+                # Compatibility CSV is written only after fenced database publication.
+                try:
+                    from utils import _append_search_to_csv
+                    _append_search_to_csv(name, result['Check Summary'])
+                except Exception:
+                    logger.warning("Job %s: compatibility CSV append failed after completion", job_id)
                 logger.info("Job %s: completed reason=%s transition=%s", job_id, reason, transition)
 
+            except LostJobLease:
+                conn.rollback()
+                logger.warning("Job %s: expired ownership; result discarded", job_id)
             except Exception as e:
                 conn.rollback()
                 if "job_id" in dir() and job_id:
                     try:
+                        lock_owned_job(conn, job_id, token)
                         with conn.cursor() as cur:
                             cur.execute(
                                 "UPDATE screening_jobs SET status = 'failed', finished_at = NOW(), error_message = %s WHERE job_id = %s",
@@ -326,6 +350,8 @@ def main():
                 else:
                     logger.exception("Worker error")
             finally:
+                if heartbeat is not None:
+                    heartbeat.stop()
                 conn.close()
 
             # Optional cleanup: delete old completed/failed jobs every N loops (non-blocking, conservative).

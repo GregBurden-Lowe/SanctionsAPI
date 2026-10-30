@@ -62,12 +62,13 @@ export interface OpCheckParams {
   requestor?: string | null
   search_backend?: 'original' | 'postgres_beta'
   rerun_entity_key?: string | null
+  retry_of?: string | null
 }
 
-export async function opcheck(params: OpCheckParams): Promise<Response> {
+export async function opcheck(params: OpCheckParams, idempotencyKey?: string): Promise<Response> {
   return authFetch(resolve('/opcheck'), {
     method: 'POST',
-    headers: defaultHeaders(),
+    headers: { ...defaultHeaders(), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     body: JSON.stringify({
       name: params.name,
       dob: params.dob ?? null,
@@ -78,6 +79,7 @@ export async function opcheck(params: OpCheckParams): Promise<Response> {
       requestor: params.requestor ?? null,
       search_backend: params.search_backend ?? 'postgres_beta',
       rerun_entity_key: params.rerun_entity_key ?? null,
+      retry_of: params.retry_of ?? null,
     }),
   })
 }
@@ -138,11 +140,11 @@ export async function listScreeningJobs(params: ListScreeningJobsParams = {}): P
   })
 }
 
-export async function markFalsePositive(entity_key: string, reason: string): Promise<Response> {
+export async function markFalsePositive(entity_key: string, reason: string, expected_run_id?: string): Promise<Response> {
   return authFetch(resolve('/admin/screening/false-positive'), {
     method: 'POST',
     headers: defaultHeaders(),
-    body: JSON.stringify({ entity_key, reason }),
+    body: JSON.stringify({ entity_key, reason, expected_run_id }),
   })
 }
 
@@ -396,12 +398,13 @@ export async function claimReview(entityKey: string): Promise<Response> {
 
 export async function completeReview(
   entityKey: string,
-  params: { review_outcome: ReviewOutcome; review_notes: string },
+  params: { review_outcome: ReviewOutcome; review_notes: string; expected_run_id?: string },
 ): Promise<Response> {
   return authFetch(resolve(`/review/${encodeURIComponent(entityKey)}/complete`), {
     method: 'POST',
     headers: defaultHeaders(),
     body: JSON.stringify({
+      expected_run_id: params.expected_run_id,
       review_outcome: params.review_outcome,
       review_notes: params.review_notes,
     }),
@@ -479,3 +482,23 @@ export async function rejectAiTriageTask(triageId: string, reviewerNotes?: strin
 
 export type { AiTriageHealthResponse, AiTriageRun, AiTriageTask }
 export type { ReviewQueueItem }
+
+export async function screeningHistory(reference: string, offset = 0): Promise<Response> {
+  const query = new URLSearchParams({ offset: String(offset), limit: '25' })
+  if (reference.trim()) query.set('business_reference', reference.trim())
+  return authFetch(resolve(`/opcheck/history?${query}`), { headers: defaultHeaders() })
+}
+
+export async function screeningRequest(requestId: string): Promise<Response> {
+  return authFetch(resolve(`/opcheck/history/${encodeURIComponent(requestId)}`), { headers: defaultHeaders() })
+}
+
+export async function retentionPreview(before?: string): Promise<Response> {
+  const query = before ? `?before=${encodeURIComponent(before)}` : ''
+  return authFetch(resolve(`/admin/screening/retention-preview${query}`), { headers: defaultHeaders() })
+}
+
+export async function exportAcceptanceCases(reviewedLimit: number, clearedLimit: number): Promise<Response> {
+  const query = new URLSearchParams({ reviewed_limit: String(reviewedLimit), cleared_limit: String(clearedLimit) })
+  return authFetch(resolve(`/admin/screening/acceptance-export?${query}`), { headers: defaultHeaders() })
+}

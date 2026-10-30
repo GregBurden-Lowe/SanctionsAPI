@@ -100,7 +100,7 @@ export function SearchDatabasePage() {
     setOverrideError(null)
     setOverrideSuccess(null)
     try {
-      const res = await markFalsePositive(detailRow.entity_key, reason)
+      const res = await markFalsePositive(detailRow.entity_key, reason, detailRow.result_json?.run_id)
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setOverrideError((data as { detail?: string }).detail ?? 'Failed to clear false positive.')
@@ -114,8 +114,8 @@ export function SearchDatabasePage() {
                 ...prev,
                 status: 'Cleared - False Positive',
                 risk_level: 'Cleared',
-                confidence: 'Manual Review',
-                score: 0,
+                confidence: updatedResult.Confidence,
+                score: updatedResult.Score,
                 result_json: updatedResult,
               }
             : prev,
@@ -127,8 +127,8 @@ export function SearchDatabasePage() {
                   ...it,
                   status: 'Cleared - False Positive',
                   risk_level: 'Cleared',
-                  confidence: 'Manual Review',
-                  score: 0,
+                  confidence: updatedResult.Confidence,
+                  score: updatedResult.Score,
                   result_json: updatedResult,
                 }
               : it,

@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { ReviewDecisionCard } from '@/components/ReviewDecisionCard'
+import { CandidateEvidence } from '@/components/CandidateEvidence'
+import { useEffect, useState, useRef } from 'react'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import type { IconType } from 'react-icons'
 import { BiCheckCircle, BiQuestionMark, BiXCircle } from 'react-icons/bi'
 import {
@@ -14,7 +16,7 @@ import {
   Modal,
   Skeleton,
 } from '@/components'
-import { opcheck } from '@/api/client'
+import { opcheck, type OpCheckParams } from '@/api/client'
 import { useAuth } from '@/context/AuthContext'
 import type { OpCheckResponse, ApiErrorResponse } from '@/types/api'
 import type { TopMatch } from '@/types/api'
@@ -24,11 +26,11 @@ import type { SearchDetails } from '@/utils/exportScreeningPdf'
 function getStatusDisplay(summary: OpCheckResponse['Check Summary']) {
   const status = summary?.Status ?? 'Unknown'
   const risk = (status + (summary?.Source ?? '')).toLowerCase()
-  if (risk.includes('cleared')) return { label: status, semantic: 'success' as const }
+  if (risk.includes('cleared')) return { label: status.includes('False Positive') ? 'Manually resolved — false positive' : 'No potential match identified', semantic: 'success' as const }
   if (risk.includes('fail sanction') || risk.includes('high risk'))
-    return { label: status, semantic: 'error' as const }
+    return { label: 'Potential sanctions match — review required', semantic: 'error' as const }
   if (risk.includes('fail pep') || risk.includes('medium'))
-    return { label: status, semantic: 'warning' as const }
+    return { label: 'Potential PEP match — review required', semantic: 'warning' as const }
   return { label: status, semantic: 'info' as const }
 }
 
@@ -56,12 +58,15 @@ type ReasonForCheck = (typeof REASON_FOR_CHECK_OPTIONS)[number]
 export function ScreeningPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
-  const [name, setName] = useState('')
-  const [dob, setDob] = useState('')
-  const [country, setCountry] = useState('')
-  const [entityType, setEntityType] = useState<'Person' | 'Organization'>('Person')
-  const [businessReference, setBusinessReference] = useState('')
-  const [reasonForCheck, setReasonForCheck] = useState<ReasonForCheck>('Client Onboarding')
+  const location = useLocation()
+  const retry = (location.state as { retry?: { request_id: string; inputs: OpCheckParams } } | null)?.retry
+  const inFlight = useRef(false)
+  const [name, setName] = useState(retry?.inputs.name || '')
+  const [dob, setDob] = useState(retry?.inputs.dob || '')
+  const [country, setCountry] = useState(retry?.inputs.country || '')
+  const [entityType, setEntityType] = useState<'Person' | 'Organization'>(retry?.inputs.entity_type === 'Organization' ? 'Organization' : 'Person')
+  const [businessReference, setBusinessReference] = useState(retry?.inputs.business_reference || '')
+  const [reasonForCheck, setReasonForCheck] = useState<ReasonForCheck>(retry?.inputs.reason_for_check || 'Client Onboarding')
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -75,6 +80,7 @@ export function ScreeningPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (inFlight.current) return
     setError(null)
     const nameTrim = name.trim()
     const dobTrim = dob.trim()
@@ -93,9 +99,10 @@ export function ScreeningPage() {
       setError("Please provide 'business_reference' (business reference) to run a check.")
       return
     }
+    inFlight.current = true
     setLoading(true)
     try {
-      const res = await opcheck({
+      const params: OpCheckParams = {
         name: nameTrim,
         dob: dobTrim || null,
         country: countryTrim || null,
@@ -103,12 +110,26 @@ export function ScreeningPage() {
         business_reference: businessReferenceTrim,
         reason_for_check: reasonForCheck,
         requestor: requestorTrim,
-        search_backend: 'postgres_beta',
-      })
+        search_backend: retry?.inputs.search_backend || 'postgres_beta',
+        rerun_entity_key: retry?.inputs.rerun_entity_key,
+        retry_of: retry?.request_id,
+      }
+      const signature = JSON.stringify({ user: user?.email || user?.username, params })
+      let pending: { signature: string; key: string } | null = null
+      try { pending = JSON.parse(sessionStorage.getItem('screening_pending_submission') || 'null') } catch { /* discard invalid local state */ }
+      if (pending?.signature !== signature) pending = { signature, key: crypto.randomUUID() }
+      sessionStorage.setItem('screening_pending_submission', JSON.stringify(pending))
+      const res = await opcheck(params, pending!.key)
       const data = await res.json()
+      if (data.request_id || res.status === 409) sessionStorage.removeItem('screening_pending_submission')
       if (!res.ok) {
+        if (data.request_id) { navigate(`/history/${data.request_id}`); return }
         const err = data as ApiErrorResponse
         setError(err.message ?? err.error ?? 'Check failed.')
+        return
+      }
+      if ((data.status === 'queued' || data.status === 'requested') && data.request_id) {
+        navigate(`/history/${data.request_id}`)
         return
       }
       const payload: ScreeningResultState = {
@@ -129,6 +150,7 @@ export function ScreeningPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Network error.')
     } finally {
+      inFlight.current = false
       setLoading(false)
     }
   }
@@ -141,6 +163,7 @@ export function ScreeningPage() {
           <Card>
             <CardBody className="max-w-[920px]">
               <form onSubmit={handleSubmit} className="space-y-4">
+                {retry && <p className="text-sm">Retrying a failed screening. Review the inputs before submitting; the original record will be preserved. <Link className="underline" to={`/history/${retry.request_id}`}>View original request</Link></p>}
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="md:col-span-2">
                     <Input
@@ -399,6 +422,7 @@ export function ScreeningResultPage() {
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-[1600px] space-y-6">
         <SectionHeader title="Screening result" />
+        {result.request_id && <p className="text-sm"><Link className="underline" to={`/history/${result.request_id}`}>Open permanent screening record</Link> · {result.reused ? 'Previous result reused' : 'New screening'}</p>}
         <div className="flex justify-end">
           <Button type="button" variant="ghost" onClick={() => navigate('/')}>
             Run another check
@@ -480,31 +504,34 @@ function parseSourceList(source: string | undefined): {
   const hasUK = items.some(isUKSource)
   const otherCount = items.filter((i) => !isUKSource(i)).length
   const summaryLines: string[] = []
-  summaryLines.push(hasUK ? 'UK sanctions: Yes' : 'UK sanctions: No')
+  summaryLines.push(hasUK ? 'UK-labelled result source' : 'No UK-labelled result source')
   if (otherCount > 0) {
-    summaryLines.push(otherCount === 1 ? 'Other sanctions lists: 1' : `Other sanctions lists: ${otherCount}`)
+    summaryLines.push(otherCount === 1 ? 'Other source labels: 1' : `Other source labels: ${otherCount}`)
   }
   return { list: items, hasUK, otherCount, summaryLines }
 }
 
 function getResultGuidance(result: OpCheckResponse): { heading: string; body: string; className: string } {
+  if (result['Check Summary']?.Status?.includes('False Positive')) {
+    return { heading: 'What this means', body: 'An analyst resolved this result as a false positive. Candidate evidence below records the original engine findings.', className: 'text-sm text-text-secondary leading-relaxed' }
+  }
   if (result['Is Sanctioned']) {
     return {
       heading: 'What this means',
-      body: 'This result indicates a sanctions match. Further verification is required before proceeding.',
+      body: 'A potential sanctions match was found. Review the candidate evidence and verify identity before recording a decision.',
       className: 'text-sm text-text-primary font-medium leading-relaxed',
     }
   }
   if (result['Is PEP']) {
     return {
       heading: 'What this means',
-      body: 'This individual is identified as a Politically Exposed Person. This does not prevent proceeding, but should be recorded for audit purposes.',
+      body: 'A potential PEP match was found. Verify identity, review the evidence and record the decision.',
       className: 'text-sm text-text-secondary leading-relaxed',
     }
   }
   return {
     heading: 'What this means',
-    body: 'No match was found against sanctions or PEP lists. No further action required.',
+    body: result['PEP Check']?.checked === false ? 'No potential sanctions match identified under the current rules. PEP screening was not performed.' : 'No potential sanctions or PEP match identified under the current rules. This is not proof of identity.',
     className: 'text-sm text-text-secondary leading-relaxed',
   }
 }
@@ -600,7 +627,7 @@ export function ResultCard({
       subtitle:
         result['PEP Check']?.message
           ? result['PEP Check']?.message
-          : 'PEP screening executed.',
+          : result['PEP Check']?.checked === false ? 'PEP screening was not performed.' : 'PEP screening executed.',
       badge:
         result['PEP Check']?.checked === false
           ? 'Skipped'
@@ -635,28 +662,28 @@ export function ResultCard({
     },
     {
       title: 'Sanctions status',
-      subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : 'No sanctions match detected',
+      subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : result['Engine Result']?.['Is Sanctioned'] ? 'Engine match resolved by analyst' : 'No sanctions match detected',
       badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',
       icon: result['Is Sanctioned'] ? BiXCircle : BiCheckCircle,
       tone: result['Is Sanctioned'] ? 'warn' : 'ok',
     },
     {
       title: 'PEP status',
-      subtitle: result['Is PEP'] ? 'Politically Exposed Person indicator found' : 'No PEP indicator found',
-      badge: result['Is PEP'] ? 'Monitor' : 'Clear',
+      subtitle: result['PEP Check']?.checked === false ? 'PEP screening was not performed' : result['Is PEP'] ? 'Potential PEP indicator found' : result['Engine Result']?.['Is PEP'] ? 'Engine indicator resolved by analyst' : 'No PEP indicator found',
+      badge: result['PEP Check']?.checked === false ? 'Not checked' : result['Is PEP'] ? 'Review required' : result['Engine Result']?.['Is PEP'] ? 'Resolved' : 'No match',
       icon: result['Is PEP'] ? BiQuestionMark : BiCheckCircle,
       tone: result['Is PEP'] ? 'warn' : 'ok',
     },
     {
-      title: 'Confidence',
-      subtitle: `Engine confidence: ${result.Confidence}`,
+      title: 'Name similarity',
+      subtitle: 'Matching score; identity is not confirmed',
       badge: String(result.Score),
       icon: BiQuestionMark,
       tone: 'neutral',
     },
     {
-      title: 'Source coverage',
-      subtitle: sourceSummaryLines.join(' · '),
+      title: 'Reported sources',
+      subtitle: 'Result source labels; not proof of complete list coverage',
       badge: sourceList.length > 0 ? `${sourceList.length} source${sourceList.length > 1 ? 's' : ''}` : 'No sources',
       icon: BiQuestionMark,
       tone: 'neutral',
@@ -697,7 +724,7 @@ export function ResultCard({
                 {result['Risk Level']}
               </span>
               <span className="inline-flex items-center rounded-lg border border-border bg-app px-3 py-1 text-xs font-medium text-text-secondary">
-                Confidence {result.Confidence}
+                {(result['Match Found'] || result['Engine Result']?.['Match Found']) ? `Name similarity ${result.Score}/100` : 'Identity confidence not assessed'}
               </span>
               <span className="inline-flex items-center rounded-lg border border-border bg-app px-3 py-1 text-xs font-medium text-text-secondary">
                 Score {result.Score}
@@ -707,6 +734,9 @@ export function ResultCard({
         </CardBody>
       </Card>
 
+      {result['Review Decision'] && <ReviewDecisionCard decision={result['Review Decision']} />}
+      {result['Engine Result'] && <p className="text-sm text-text-secondary">Original engine outcome: {result['Engine Result']['Check Summary']?.Status}. The candidate evidence and similarity scores below are unchanged.</p>}
+      <CandidateEvidence result={result} search={searchDetails} />
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         <div className="xl:col-span-5 space-y-6">
           <Card>
@@ -720,7 +750,7 @@ export function ResultCard({
                   <dd className="text-text-primary font-medium">{result['Risk Level']}</dd>
                 </div>
                 <div className="flex justify-between gap-4 border-b border-border pb-2">
-                  <dt className="text-text-muted">Confidence</dt>
+                  <dt className="text-text-muted">Name similarity band</dt>
                   <dd className="text-text-primary">{result.Confidence}</dd>
                 </div>
                 <div className="flex justify-between gap-4 border-b border-border pb-2">
@@ -760,7 +790,7 @@ export function ResultCard({
           {result['Match Found'] && (
             <Card>
               <CardHeader>
-                <CardTitle>Matched subject</CardTitle>
+                <CardTitle>Potential matched subject</CardTitle>
               </CardHeader>
               <CardBody>
                 <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">

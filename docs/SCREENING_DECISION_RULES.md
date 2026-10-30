@@ -1,150 +1,70 @@
-# Screening Decision Rules
+# Screening decision rules — evidence-v3
 
-This document defines the current screening decision rules used by the app for sanctions and PEP checks.
+This is the locally implemented matching stage following the history foundation. Production activation is a separate release step.
 
-It is intended to support audit/compliance traceability for wording such as:
-"No sanctions or PEP match found under current rules."
+## Inputs and compatibility
 
-## 1. Data Scope
+Names are Unicode folded, punctuation normalised and whitespace collapsed. Person matching retains the existing fuzzy thresholds (75 base; stricter short-name thresholds without DOB), but uses one-to-one token alignment so an anchored spelling variation or initial can be considered. Hyphens in person names are treated as token boundaries, without changing legacy entity-key normalization. Initial-based scores are capped at 85. Organisation generic-word controls remain in place.
 
-- Sanctions data is limited to allowlisted datasets:
-- `United Nations`
-- `OFAC`
-- `HM Treasury` / `HMT` / `UK Financial`
-- `EU Council` / `EU Financial Sanctions`
-- PEP data is included from the consolidated OpenSanctions PEP dataset.
-- Search can run against either:
-- Parquet-backed matcher (`perform_opensanctions_check`)
-- PostgreSQL-backed matcher (`perform_postgres_watchlist_check`)
+DOB input supports YYYY, DD-MM-YYYY, DD/MM/YYYY and YYYY-MM-DD. Invalid/future values and incomplete dates other than year-only are rejected instead of being silently omitted or assigned invented date parts.
 
-Business outcome rules are intentionally aligned across both backends.
+The `evidence-v3` fingerprint invalidates cached results from previous matching rules. Existing historical runs remain unchanged.
 
-## 2. Input Normalization Rules
+## Shared execution policy
 
-- Name is normalized before matching:
-- Unicode folded to ASCII
-- punctuation removed
-- lowercased
-- extra whitespace collapsed
-- Date of birth (`dob`) normalization:
-- `YYYY` is accepted (year-only)
-- `DD-MM-YYYY` is accepted and converted to `YYYY-MM-DD`
-- `YYYY-MM-DD` is accepted
-- fallback parser is used for compatible date-like strings
-- if parsing fails, DOB is treated as not provided
+Interactive PostgreSQL, interactive Parquet and background worker checks now use `screening_policy.py`. Each performs person and organisation sanctions checks. PEP checking is enabled only for a submitted Person whose name does not look company-like. The supplied DOB applies to the person check; country evidence is retained for both types. The submitted entity type remains unchanged and the result explains possible misclassification.
 
-## 3. Matching Rules
+Worker and interactive backend fingerprints remain separate conservatively; `evidence-v3` invalidates old cached decisions because worker coverage and hyphen handling have changed. Release API and worker together. The existing CSV compatibility log is appended once per successful execution; durable request/run history remains the audit record.
 
-## 3.1 Candidate filtering
+## Shared evaluator
 
-- Entity type filter:
-- `Person` searches only person-like records
-- `Organization` searches organization/legal entity/company-like records
-- Matching is performed separately against:
-- sanctions records
-- PEP records
+PostgreSQL and Parquet use the same candidate evaluator, including listed aliases. Each candidate records:
 
-## 3.2 Name similarity
+- provider record ID where available, listed name, matched name/alias, entity type and source;
+- name similarity score, original source DOB/country and evidence assessments;
+- potential-match or excluded disposition and plain-language reasons.
 
-- Core similarity uses fuzzy token-set matching (`rapidfuzz`).
-- Organization matching applies additional organization-specific heuristics:
-- generic legal and business/domain words (for example `ltd`, `limited`, `company`, `partners`, `property`, `management`, `services`) are discounted
-- strong organization matches normally require at least one shared distinctive token after generic-word cleanup
-- token order and extra distinctive unmatched tokens can reduce organization scores
-- Thresholds:
-- Decision matching threshold: `75`
-- Suggestions threshold (non-decision): `60`
+New PostgreSQL imports preserve raw DOB strings, including multiple values and partial precision. Existing rows cannot recover precision already discarded; refresh the watchlist before evaluating precision parity with Parquet. Provider IDs are retained in newly refreshed Parquet files.
 
-## 3.3 DOB constraint for decision matches
+## DOB policy
 
-- If user did not provide DOB:
-- Name threshold rules alone can produce a match.
-- If user provided DOB:
-- A candidate must satisfy DOB compatibility, otherwise it is rejected even if name score is high.
-- DOB compatibility:
-- exact `YYYY-MM-DD` match, or
-- if query is year-only (`YYYY`), candidate year must match
+| Evidence | Behaviour |
+| --- | --- |
+| Exact full-date agreement | Retain potential match; label exact. |
+| Agreement at available year/month precision | Retain potential match; label compatible. |
+| Missing/unparseable DOB, or DOB not supplied | Retain potential match; label unknown. |
+| All known comparable DOBs conflict, with no unknown alternative | Exclude from decision; retain explanation in candidate evidence. |
 
-## 3.4 Top Matches behavior
+An exact DOB supports review; it is not identity proof. Unknown information is not a mismatch. Candidate year/month precision is preserved rather than converted to an invented day.
 
-- `Top Matches` are suggestions only.
-- They do not change risk level or final decision.
-- They ignore strict DOB rejection used in the final decision path.
-- For organization-style names, suggestions still rank down candidates that only overlap on generic business/domain words.
+## Country policy
 
-## 3.5 Input classification
+Country is supporting evidence. Compatibility, conflict and unknown values are displayed. A differing country alone **does not clear a name match** because it is not a unique identity identifier. Semicolon/comma-separated country values are compared separately.
 
-- The app evaluates whether an input looks more like a `Person` or an `Organization`, even if the submitted `entity_type` says `Person`.
-- Classification is advisory only and does not by itself block screening.
-- Optional response metadata may include:
-- `submitted_as`
-- `inferred_as`
-- `likely_misclassified`
-- `confidence`
-- `signals`
-- Example signals include:
-- organization markers in the query
-- organization result materially stronger than person result
-- PEP skipped because the input looked company-like
+These conservative changes can increase the review queue and require analyst acceptance before deployment.
 
-## 4. Decision Precedence and Outcomes
+## Retrieval and result limits
 
-Both sanctions and PEP checks run, but sanctions drives the primary decision when both match.
+PostgreSQL filters entity schema before the candidate limit and does not prefilter DOB or country. Listed aliases participate in candidate retrieval. More than the configured candidate limit produces an incomplete response asking for a more specific name, rather than treating a truncated search as a clearance.
 
-## 4.1 Sanctions match found
+All retrieved name matches are assessed before selecting outcomes. At most 50 evidence records are displayed/persisted in the evidence array; counts and a truncation flag disclose this. Potential matches sort before excluded candidates. Name-only suggestions remain advisory.
 
-- `Is Sanctioned = true`
-- `Risk Level = High Risk`
-- `Check Summary.Status = Fail Sanction`
-- `Match Found = true`
-- `Confidence` derived from score:
-- `High` if score >= 90
-- `Medium` if score >= 80
-- `Low` otherwise
-- If PEP also matches, `Is PEP = true` is set in addition to sanctions failure.
+PostgreSQL uses trigram candidate retrieval; Parquet scans the relevant schema. A shared evaluator does not guarantee identical retrieval for every spelling/transliteration. The local 100,000-row synthetic benchmark is recorded in [validation results](SCREENING_VALIDATION.md); representative production-volume testing remains necessary.
 
-## 4.2 No sanctions match, but PEP match found
+## API and presentation
 
-- `Is Sanctioned = false`
-- `Is PEP = true`
-- `Risk Level = Medium Risk`
-- `Check Summary.Status = Fail PEP`
-- `Match Found = true`
-- `Confidence` uses the same score bands as above.
+Legacy status/boolean fields remain for integrations: `Fail Sanction`, `Fail PEP`, `Cleared`, `Is Sanctioned`, `Is PEP`. These flags represent engine candidates, not confirmed identities. Sanctions takes primary precedence, while a PEP candidate found in another type check remains flagged.
 
-## 4.3 No sanctions match and no PEP match
+New additive fields: `Candidate Evidence`, `Candidate Evidence Summary`, `Decision Explanation`. No-match confidence is `Not assessed`. Match confidence bands retain legacy values but are labelled as name similarity in the UI/PDF.
 
-- `Is Sanctioned = false`
-- `Is PEP = false`
-- `Risk Level = Cleared`
-- `Check Summary.Status = Cleared`
-- `Confidence = Very High`
-- `Score = 0`
-- `Match Found = false`
+The UI says potential match/review required, distinguishes skipped PEP checks, and separates missing from conflicting identity evidence. Manual false-positive decisions retain original candidate evidence with an explanatory label. Reported source labels are not proof of full source coverage; generic backend labels are no longer expanded into assumed list badges.
 
-This is what "under current rules" refers to.
+## Availability and refresh
 
-## 5. Source Summary Behavior
+Screening requires populated required source datasets. Refreshing an empty PostgreSQL watchlist is allowed. A refresh lacking required sanctions/PEP records rolls back PostgreSQL replacement, while incomplete downloads do not replace the Parquet file. Parquet replacement is atomic.
 
-- Source summary is derived from matched dataset labels and/or backend source labels.
-- For cleared results, source labels may be generic (`OpenSanctions` or `Postgres watchlist`) even when underlying datasets include UN/EU/OFAC/HMT.
+## Verification and limits
 
-## 6. Known Limitations
+`tests/fixtures/matching_cases.json` is a small labelled synthetic regression corpus covering spelling variation, diacritics, missing middle names, initials, word order and generic organisation false positives. Other tests cover identity precision, aliases, exclusion evidence, candidate caps, cross-backend evidence and refresh recovery.
 
-- Name-based fuzzy matching can produce duplicate logical searches for variants/typos unless a separate dedupe policy is applied at persistence level.
-- If DOB is omitted, more false positives are possible; if DOB is provided, matches become stricter.
-- Decision logic is deterministic but not identity-proofing; analyst review remains required for adverse outcomes.
-- Review-stage reruns can permanently correct the stored entity type on the same screening record; this preserves the original search record while updating the canonical review-time type used for future display and follow-up.
-
-## 7. Code References
-
-- `/Volumes/HD2/Code/Sanctions/SanctionsAPI/utils.py`
-- `_normalize_text`
-- `_normalize_dob`
-- `get_best_name_matches`
-- `_dob_matches`
-- `perform_opensanctions_check`
-- `perform_postgres_watchlist_check`
-- `_empty_no_match_result`
-
-Last reviewed: 2026-02-20
+The additional `policy_cases.json` corpus checks 28 scenarios through real PostgreSQL retrieval and the Parquet evaluator; a real worker test verifies the same cross-type outcome. These passing tests are not a measured real-world recall/precision claim. A larger reviewed operational corpus, production-volume performance testing and complete source-version publication remain release follow-ups. No model/AI component makes these matching decisions.

@@ -1,3 +1,4 @@
+from screening_policy import run_parquet_check, run_postgres_check, _merge_dual_type_results
 # api_server.py
 
 from contextlib import asynccontextmanager
@@ -10,10 +11,12 @@ import secrets
 import json
 import csv
 import io
+import asyncio
+from contextlib import suppress
 
 import jwt
 
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, Depends, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -93,6 +96,10 @@ class SPAStaticFiles(StaticFiles):
 
 from utils import (
     perform_opensanctions_check,
+    _normalize_dob,
+    screening_fingerprint,
+    stamp_screening_result,
+    ScreeningUnavailableError,
     perform_postgres_watchlist_check,
     refresh_opensanctions_data,
     sync_watchlist_entities_postgres,
@@ -101,8 +108,6 @@ from utils import (
     derive_entity_key,
     derive_entity_key_variants,
     _normalize_text,
-    detect_company_likeness,
-    build_input_classification,
     get_matching_config,
     save_matching_config,
     get_effective_org_generic_tokens,
@@ -111,6 +116,8 @@ from utils import (
 )
 from ai_triage import get_local_llm_config, ollama_health, run_ai_triage_batch
 import screening_db
+import screening_history
+from review_decisions import ReviewConflict
 import auth_db
 from routes.companies_house import router as companies_house_router
 
@@ -225,10 +232,21 @@ def _decode_token(token: str) -> Optional[dict]:
         return None
 
 
+async def _recover_abandoned_requests(pool):
+    while True:
+        try:
+            async with pool.acquire() as conn:
+                await screening_history.recover_expired(conn)
+        except Exception:
+            logger.exception("Abandoned screening request recovery failed")
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create DB pool and ensure schema when DATABASE_URL is set."""
     pool = await screening_db.get_pool()
+    recovery_task = None
     if pool is not None:
         _validate_jwt_secret()
         try:
@@ -240,11 +258,18 @@ async def lifespan(app: FastAPI):
                 else:
                     logger.info("auth_db: default admin seeding skipped (set SEED_DEFAULT_ADMIN=true to enable)")
             logger.info("screening_db + auth_db: schema ensured")
+            recovery_task=asyncio.create_task(_recover_abandoned_requests(pool))
         except Exception as e:
             import traceback
             logger.warning("schema ensure failed: %s\n%s", e, traceback.format_exc())
-    yield
-    await screening_db.close_pool()
+    try:
+        yield
+    finally:
+        if recovery_task:
+            recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await recovery_task
+        await screening_db.close_pool()
 
 
 app = FastAPI(
@@ -299,6 +324,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": detail})
 
 
+@app.exception_handler(ReviewConflict)
+async def review_conflict_handler(request: Request, exc: ReviewConflict):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """Log full exception and return generic 500 to the client."""
@@ -349,6 +379,7 @@ class OpCheckRequest(BaseModel):
     ] = Field(..., description="Reason for check (required enum)")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
     search_backend: Optional[str] = Field("postgres_beta", description="'postgres_beta' (default) or 'original' (parquet)")
+    retry_of: Optional[constr(pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")] = None
     rerun_entity_key: Optional[str] = Field(
         None,
         description="Optional: rerun using this existing entity_key so the stored record is updated in-place",
@@ -409,6 +440,7 @@ class ApiKeyUpdateRequest(BaseModel):
 
 
 class FalsePositiveRequest(BaseModel):
+    expected_run_id: Optional[str] = None
     entity_key: str = Field(..., description="Entity key to clear as false positive")
     reason: constr(strip_whitespace=True, min_length=1) = Field(..., description="Analyst/admin reason (required)")
 
@@ -423,6 +455,7 @@ class ReviewOutcome(str, Enum):
 
 
 class ReviewCompleteRequest(BaseModel):
+    expected_run_id: Optional[str] = None
     review_outcome: ReviewOutcome = Field(..., description="Mandatory structured review outcome")
     review_notes: constr(strip_whitespace=True, min_length=10) = Field(..., description="Mandatory review notes (min 10 chars)")
 
@@ -1057,6 +1090,49 @@ async def auth_delete_api_key(
     return {"status": "ok", "id": api_key_id}
 
 
+@app.get("/admin/screening/acceptance-export", dependencies=[Depends(require_admin)])
+async def admin_acceptance_export(
+    reviewed_limit: int = Query(50, ge=1, le=250),
+    cleared_limit: int = Query(25, ge=0, le=250),
+):
+    from acceptance_export import collect, build_archive
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, "Acceptance export is unavailable.")
+    try:
+        async with pool.acquire() as conn:
+            cases, counts = await collect(conn, reviewed_limit, cleared_limit)
+        if not cases:
+            raise HTTPException(404, "No eligible cases were found for the selected sample sizes.")
+        archive = build_archive(cases, counts)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Acceptance export failed")
+        raise HTTPException(503, "Acceptance export could not complete. No screening records were changed.") from exc
+    return Response(archive, media_type="application/zip", headers={
+        "Content-Disposition": 'attachment; filename="screening-acceptance-candidates.zip"',
+        "Cache-Control": "no-store",
+    })
+
+
+@app.get("/admin/screening/retention-preview", dependencies=[Depends(require_admin)])
+async def admin_retention_preview(before: Optional[datetime] = None):
+    from retention_report import preview
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, "Retention preview is unavailable.")
+    try:
+        async with pool.acquire() as conn:
+            report = await preview(conn, before)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Retention preview failed")
+        raise HTTPException(503, "Retention preview could not complete. No records were changed.") from exc
+    return screening_db._to_json_safe(report)
+
+
 @app.post("/admin/testing/clear-screening-data", dependencies=[Depends(require_admin)])
 async def admin_clear_screening_data(request: Request, payload: dict = Depends(require_admin)):
     """
@@ -1067,9 +1143,25 @@ async def admin_clear_screening_data(request: Request, payload: dict = Depends(r
     if pool is None:
         raise HTTPException(status_code=503, detail="Unavailable")
     async with pool.acquire() as conn:
-        entities_before = await conn.fetchval("SELECT COUNT(*)::int FROM screened_entities")
-        jobs_before = await conn.fetchval("SELECT COUNT(*)::int FROM screening_jobs")
-        await conn.execute("TRUNCATE TABLE screening_jobs, screened_entities")
+        async with conn.transaction():
+            # Keep the eligibility check and clear atomic against new submissions,
+            # worker publication and review claims. Fail promptly if work holds locks.
+            from asyncpg import LockNotAvailableError
+            try:
+                await conn.execute("LOCK TABLE screening_requests, screening_jobs, screened_entities IN ACCESS EXCLUSIVE MODE NOWAIT")
+            except LockNotAvailableError as exc:
+                raise HTTPException(409, "Screening data is in use. No records were cleared.") from exc
+            active = await conn.fetchval("""SELECT
+                EXISTS(SELECT 1 FROM screening_requests WHERE status IN ('requested','queued'))
+                OR EXISTS(SELECT 1 FROM screening_jobs WHERE status IN ('pending','running'))
+                OR EXISTS(SELECT 1 FROM screened_entities WHERE review_status='IN_REVIEW'
+                    OR review_outcome='Pending External Review'
+                    OR (review_status IS NULL AND status NOT ILIKE 'Cleared%'))""")
+            if active:
+                raise HTTPException(409, "Screening data cannot be cleared while requests, jobs or reviews are unfinished.")
+            entities_before = await conn.fetchval("SELECT COUNT(*)::int FROM screened_entities")
+            jobs_before = await conn.fetchval("SELECT COUNT(*)::int FROM screening_jobs")
+            await conn.execute("TRUNCATE TABLE screening_jobs, screened_entities")
     audit_log(
         "admin",
         action="clear_screening_data",
@@ -1101,7 +1193,7 @@ async def admin_screening_jobs_bulk(request: Request, body: InternalScreeningBul
     results = []
     async with pool.acquire() as conn:
         for item in body.requests:
-            outcome = await _internal_screening_outcome(conn, item)
+            outcome = await _internal_screening_outcome(conn, item, actor=payload.get("sub"), source="admin_bulk")
             results.append(outcome)
     counts = {"reused": 0, "already_pending": 0, "queued": 0, "error": 0}
     for r in results:
@@ -1182,6 +1274,7 @@ async def admin_mark_false_positive(
             entity_key=entity_key,
             actor=payload.get("sub") or "admin",
             reason=reason,
+            expected_run_id=body.expected_run_id,
         )
     if result is None:
         raise HTTPException(status_code=404, detail="Screening record not found")
@@ -1423,46 +1516,8 @@ async def cors_preflight():
     return {}
 
 def _run_check_sync(data: OpCheckRequest):
-    """Run screening synchronously (used when DB is disabled)."""
-    name = data.name.strip()
-    dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob)
-    country = (data.country.strip() if isinstance(data.country, str) else data.country)
-    entity_type_norm = (data.entity_type or "Person").strip().lower()
-    pep_enabled = entity_type_norm == "person" and not _looks_like_company_name(name)
-    pep_skip_reason = None
-    if not pep_enabled:
-        pep_skip_reason = "entity_type_organization" if entity_type_norm == "organization" else "company_name_detected"
-    person_result = perform_opensanctions_check(
-        name=name,
-        dob=dob,
-        country=None,
-        entity_type="Person",
-        requestor=data.requestor.strip(),
-        log_search=False,
-        include_peps=pep_enabled,
-    )
-    organization_result = perform_opensanctions_check(
-        name=name,
-        dob=None,
-        country=country,
-        entity_type="Organization",
-        requestor=data.requestor.strip(),
-        log_search=False,
-        include_peps=False,
-    )
-    merged = _merge_dual_type_results(
-        person_result,
-        organization_result,
-        name=name,
-        submitted_entity_type=entity_type,
-        pep_checked=pep_enabled,
-        pep_skip_reason=pep_skip_reason,
-    )
-    summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
-    if summary:
-        from utils import _append_search_to_csv
-        _append_search_to_csv(name, summary)
-    return merged
+    return run_parquet_check(name=data.name.strip(), dob=data.dob, country=data.country,
+        entity_type=data.entity_type, requestor=data.requestor, matcher=perform_opensanctions_check, log_search=True)
 
 
 def _opcheck_queue_threshold() -> int:
@@ -1485,135 +1540,74 @@ def _attach_entity_id(result: dict, entity_key: str) -> dict:
     return out
 
 
-def _result_priority(result: dict) -> int:
-    if bool(result.get("Is Sanctioned")):
-        return 3
-    if bool(result.get("Is PEP")):
-        return 2
-    return 1
 
 
-def _status_for_type_check(result: dict) -> str:
-    summary = result.get("Check Summary") if isinstance(result.get("Check Summary"), dict) else {}
-    status = str(summary.get("Status") or "").strip()
-    if status:
-        return status
-    if bool(result.get("Is Sanctioned")):
-        return "Fail Sanction"
-    if bool(result.get("Is PEP")):
-        return "Fail PEP"
-    return "Cleared"
+async def _run_postgres_dual_check(conn, *, name, dob, country, entity_type, requestor):
+    return await run_postgres_check(conn, name=name, dob=dob, country=country,
+        entity_type=entity_type, requestor=requestor, matcher=perform_postgres_watchlist_check, log_search=True)
 
 
-def _looks_like_company_name(name: str) -> bool:
-    return bool(detect_company_likeness(name).get("looks_like_company"))
+
+def _saved_submission_response(record):
+    request_id=str(record['request_id'])
+    if record['status'] in ('requested','queued'):
+        return JSONResponse(status_code=202,content={"status":record['status'],"request_id":request_id,
+            "job_id":str(record['job_id']) if record.get('job_id') else None,
+            "message":"This submission is already in progress. Open its saved request for the outcome."},
+            headers={"Location":f"/opcheck/history/{request_id}"})
+    body=dict(record.get('response_json') or {"error":"screening_failed"}, request_id=request_id)
+    return JSONResponse(status_code=record.get('response_status') or (503 if record['status']=='failed' else 200),
+        content=screening_db._to_json_safe(body))
 
 
-def _merge_dual_type_results(
-    person_result: dict,
-    organization_result: dict,
-    *,
-    name: str,
-    submitted_entity_type: str,
-    pep_checked: bool,
-    pep_skip_reason: Optional[str] = None,
-) -> dict:
-    primary = person_result
-    if _result_priority(organization_result) > _result_priority(person_result):
-        primary = organization_result
-    elif _result_priority(organization_result) == _result_priority(person_result):
-        if float(organization_result.get("Score") or 0) > float(person_result.get("Score") or 0):
-            primary = organization_result
-
-    person_status = _status_for_type_check(person_result)
-    org_status = _status_for_type_check(organization_result)
-    merged = dict(primary)
-    merged["Entity Type Checks"] = {
-        "Person": {
-            "status": person_status,
-            "is_match": not person_status.lower().startswith("cleared"),
-            "score": float(person_result.get("Score") or 0),
-        },
-        "Organization": {
-            "status": org_status,
-            "is_match": not org_status.lower().startswith("cleared"),
-            "score": float(organization_result.get("Score") or 0),
-        },
-    }
-    merged["PEP Check"] = {
-        "checked": bool(pep_checked),
-        "status": "checked" if pep_checked else "skipped",
-        "reason": pep_skip_reason,
-        "message": (
-            (
-                "PEP screening skipped for Organization checks."
-                if pep_skip_reason == "entity_type_organization"
-                else "PEP screening skipped because the query appears to be a company name."
-            )
-            if not pep_checked
-            else "PEP screening executed."
-        ),
-    }
-    merged["Input Classification"] = build_input_classification(
-        name=name,
-        submitted_as=submitted_entity_type,
-        person_result=person_result,
-        organization_result=organization_result,
-        pep_checked=pep_checked,
-    )
-    return merged
+async def _check_opensanctions_impl(data: OpCheckRequest, actor=None, source="screening", idempotency_key=None):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        return JSONResponse(status_code=503, content={"error": "recording_unavailable", "message": "Screening cannot proceed because its record cannot be saved."})
+    try:
+        async with pool.acquire() as conn:
+            request_id, previous = await screening_history.begin_submission(conn, data.model_dump(), actor, source, idempotency_key, data.retry_of)
+        if previous:
+            return _saved_submission_response(previous)
+    except screening_history.RequestConflict as exc:
+        return JSONResponse(status_code=409,content={"error":"submission_conflict","message":str(exc)})
+    except Exception:
+        logger.exception("Unable to create screening request record")
+        return JSONResponse(status_code=503, content={"error": "recording_unavailable", "message": "Screening cannot proceed because its request cannot be recorded."})
+    token = screening_history.active_request.set(request_id)
+    try:
+        out = await _execute_screening(data)
+        body = json.loads(out.body) if isinstance(out, JSONResponse) else out
+        failed = isinstance(out, JSONResponse) and out.status_code >= 400
+        body = dict(body, request_id=request_id)
+        if body.get("status") != "queued":
+            async with pool.acquire() as conn:
+                previous=await screening_history.finish(conn, request_id, body, failed=failed,
+                    response_status=out.status_code if isinstance(out,JSONResponse) else 200)
+                if previous and previous['status']=='failed':
+                    return _saved_submission_response(previous)
+        if isinstance(out, JSONResponse):
+            return JSONResponse(status_code=out.status_code, content=body,
+                                headers={"Location": out.headers["location"]} if "location" in out.headers else None)
+        return body
+    except Exception as exc:
+        logger.exception("Screening request %s did not complete", request_id)
+        body = {"error": "screening_incomplete", "message": (str(exc) if isinstance(exc, ScreeningUnavailableError) else "Screening could not be completed and recorded. No clearance has been issued."), "request_id": request_id}
+        try:
+            async with pool.acquire() as conn:
+                await screening_history.recover_expired(conn)
+                previous=await screening_history.finish(conn, request_id, body, failed=True)
+                if previous:
+                    return _saved_submission_response(previous)
+        except Exception:
+            logger.exception("Unable to record failure for request %s", request_id)
+        return JSONResponse(status_code=503, content=body)
+    finally:
+        screening_history.active_request.reset(token)
 
 
-async def _run_postgres_dual_check(
-    conn,
-    *,
-    name: str,
-    dob: Optional[str],
-    country: Optional[str],
-    entity_type: str,
-    requestor: Optional[str],
-) -> dict:
-    entity_type_norm = (entity_type or "Person").strip().lower()
-    pep_enabled = entity_type_norm == "person" and not _looks_like_company_name(name)
-    pep_skip_reason = None
-    if not pep_enabled:
-        pep_skip_reason = "entity_type_organization" if entity_type_norm == "organization" else "company_name_detected"
-    person_result = await perform_postgres_watchlist_check(
-        conn,
-        name=name,
-        dob=dob,
-        country=None,
-        entity_type="Person",
-        requestor=requestor,
-        log_search=False,
-        include_peps=pep_enabled,
-    )
-    organization_result = await perform_postgres_watchlist_check(
-        conn,
-        name=name,
-        dob=None,
-        country=country,
-        entity_type="Organization",
-        requestor=requestor,
-        log_search=False,
-        include_peps=False,
-    )
-    merged = _merge_dual_type_results(
-        person_result,
-        organization_result,
-        name=name,
-        submitted_entity_type=entity_type,
-        pep_checked=pep_enabled,
-        pep_skip_reason=pep_skip_reason,
-    )
-    summary = merged.get("Check Summary") if isinstance(merged.get("Check Summary"), dict) else None
-    if summary:
-        from utils import _append_search_to_csv
-        _append_search_to_csv(name, summary)
-    return merged
+async def _execute_screening(data: OpCheckRequest):
 
-
-async def _check_opensanctions_impl(data: OpCheckRequest):
     if not data.requestor or not data.requestor.strip():
         return JSONResponse(
             status_code=400,
@@ -1622,7 +1616,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                 "message": "Please provide 'requestor' (your name) to run a check."
             },
         )
-    if not data.name or not data.name.strip():
+    if not data.name or not _normalize_text(data.name):
         return JSONResponse(
             status_code=400,
             content={"error": "missing_name", "message": "Please provide 'name' to run a check."},
@@ -1633,6 +1627,10 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
     country = (data.country.strip() if isinstance(data.country, str) else data.country) or None
     entity_type = (data.entity_type or "Person")
     entity_type_norm = entity_type.strip().lower()
+    if entity_type_norm not in ("person", "organization"):
+        return JSONResponse(status_code=400, content={"error": "invalid_entity_type", "message": "Choose Person or Organization."})
+    if dob and _normalize_dob(dob) is None:
+        return JSONResponse(status_code=400, content={"error": "invalid_dob", "message": "Enter a valid date of birth or four-digit year."})
     requestor = data.requestor.strip()
     business_reference = data.business_reference.strip()
     reason_for_check = data.reason_for_check
@@ -1696,22 +1694,11 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                 cached = None
                 cached_key = entity_key
                 for key_candidate in entity_key_candidates:
-                    cached = await screening_db.get_valid_screening(conn, key_candidate)
+                    cached = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, search_backend))
                     if cached is not None:
                         cached_key = key_candidate
                         break
                 if cached is not None:
-                    try:
-                        await screening_db.update_cached_screening_metadata(
-                            conn,
-                            entity_key=cached_key,
-                            requestor=requestor,
-                            business_reference=business_reference,
-                            reason_for_check=reason_for_check,
-                            country_input=country,
-                        )
-                    except Exception as e:
-                        logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
                     logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
                     return _attach_entity_id(cached, cached_key)
 
@@ -1723,6 +1710,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                 entity_type=entity_type,
                 requestor=requestor,
             )
+            stamp_screening_result(results, name, dob, country, entity_type, search_backend)
             # Persist beta checks so Search database can find them by returned entity_key.
             try:
                 latest_meta = await screening_db.get_latest_uk_hash(conn)
@@ -1742,7 +1730,7 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
                     screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
                 )
             except Exception as e:
-                logger.warning("postgres_beta upsert failed entity_key=%s: %s", entity_key[:16], e)
+                raise RuntimeError("Screening result could not be saved") from e
         return _attach_entity_id(results, entity_key)
 
     entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
@@ -1758,22 +1746,11 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
             cached = None
             cached_key = entity_key
             for key_candidate in entity_key_candidates:
-                cached = await screening_db.get_valid_screening(conn, key_candidate)
+                cached = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, search_backend))
                 if cached is not None:
                     cached_key = key_candidate
                     break
             if cached is not None:
-                try:
-                    await screening_db.update_cached_screening_metadata(
-                        conn,
-                        entity_key=cached_key,
-                        requestor=requestor,
-                        business_reference=business_reference,
-                        reason_for_check=reason_for_check,
-                        country_input=country,
-                    )
-                except Exception as e:
-                    logger.warning("cached metadata update failed entity_key=%s: %s", cached_key[:16], e)
                 # Reuse always first, regardless of load
                 logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
                 return _attach_entity_id(cached, cached_key)
@@ -1804,28 +1781,9 @@ async def _check_opensanctions_impl(data: OpCheckRequest):
 
     # Under threshold: run screening synchronously, then upsert
     logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
-    pep_enabled = entity_type_norm == "person" and not _looks_like_company_name(name)
-    pep_skip_reason = None
-    if not pep_enabled:
-        pep_skip_reason = "entity_type_organization" if entity_type_norm == "organization" else "company_name_detected"
-    person_result = perform_opensanctions_check(
-        name=name, dob=dob, country=None, entity_type="Person", requestor=requestor, log_search=False, include_peps=pep_enabled,
-    )
-    organization_result = perform_opensanctions_check(
-        name=name, dob=None, country=country, entity_type="Organization", requestor=requestor, log_search=False, include_peps=False,
-    )
-    results = _merge_dual_type_results(
-        person_result,
-        organization_result,
-        name=name,
-        submitted_entity_type=entity_type,
-        pep_checked=pep_enabled,
-        pep_skip_reason=pep_skip_reason,
-    )
-    summary = results.get("Check Summary") if isinstance(results.get("Check Summary"), dict) else None
-    if summary:
-        from utils import _append_search_to_csv
-        _append_search_to_csv(name, summary)
+    results = await asyncio.to_thread(run_parquet_check, name=name, dob=dob, country=country, entity_type=entity_type,
+        requestor=requestor, matcher=perform_opensanctions_check, log_search=True)
+    stamp_screening_result(results, name, dob, country, entity_type, search_backend)
     async with pool.acquire() as conn:
         latest_meta = await screening_db.get_latest_uk_hash(conn)
         await screening_db.upsert_screening(
@@ -1843,6 +1801,7 @@ async def _auto_complete_review_after_rerun_if_cleared(
     actor: str,
     entity_type: str,
     ip: Optional[str],
+    expected_run_id: Optional[str] = None,
 ) -> bool:
     """
     Apply the same auto-complete behavior used by review reruns when a re-screen clears.
@@ -1860,12 +1819,8 @@ async def _auto_complete_review_after_rerun_if_cleared(
         if not rows:
             return False
         row = rows[0]
-        completed = await screening_db.complete_review(
-            conn,
-            entity_key=key,
-            completed_by=(actor or "unknown_user"),
-            review_outcome=ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
-            review_notes=f"Auto-resolved after re-run with additional {('DOB' if (entity_type or '').strip().lower() == 'person' else 'country')} information.",
+        completed = await screening_db.complete_clear_rerun(
+            conn, entity_key=key, actor=actor or "unknown_user", expected_run_id=expected_run_id,
         )
     if completed.get("status") != "ok":
         return False
@@ -1907,7 +1862,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest, payload: d
         extra={"business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
     )
     try:
-        out = await _check_opensanctions_impl(data)
+        out = await _check_opensanctions_impl(data, actor=actor, source=request.url.path, idempotency_key=request.headers.get("Idempotency-Key"))
         status_code = 200
         decision = "Unknown"
         entity_key = None
@@ -1939,6 +1894,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest, payload: d
                     actor=str(actor or "unknown_user"),
                     entity_type=str(data.entity_type or "Person"),
                     ip=_client_ip(request),
+                    expected_run_id=payload.get("run_id"),
                 )
         audit_log(
             "screening",
@@ -1988,7 +1944,7 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
         extra={"business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
     )
     try:
-        out = await _check_opensanctions_impl(data)
+        out = await _check_opensanctions_impl(data, actor=actor, source=request.url.path, idempotency_key=request.headers.get("Idempotency-Key"))
         status_code = 200
         decision = "Unknown"
         entity_key = None
@@ -2020,6 +1976,7 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
                     actor=str(actor or "unknown_user"),
                     entity_type=str(data.entity_type or "Person"),
                     ip=_client_ip(request),
+                    expected_run_id=payload.get("run_id"),
                 )
         audit_log(
             "screening",
@@ -2049,6 +2006,33 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
             extra={"decision": "Unhandled exception", "business_reference": data.business_reference, "reason_for_check": data.reason_for_check},
         )
         raise
+
+
+@app.get("/opcheck/history", dependencies=[Depends(get_current_user)])
+async def screening_request_history(business_reference: Optional[str] = None, limit: int = 50, offset: int = 0):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, "Screening history is unavailable")
+    async with pool.acquire() as conn:
+        result = await screening_history.list_requests(conn, business_reference, max(1, min(limit, 100)), max(0, offset))
+    return screening_db._to_json_safe(result)
+
+
+@app.get("/opcheck/history/{request_id}", dependencies=[Depends(get_current_user)])
+async def screening_request_detail(request_id: str):
+    from uuid import UUID
+    try:
+        UUID(request_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid request ID")
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, "Screening history is unavailable")
+    async with pool.acquire() as conn:
+        result = await screening_history.get_request(conn, request_id)
+    if result is None:
+        raise HTTPException(404, "Screening request not found")
+    return screening_db._to_json_safe(result)
 
 
 @app.get("/opcheck/jobs/{job_id}", dependencies=[Depends(get_current_user)])
@@ -2348,6 +2332,7 @@ async def complete_review(
                 completed_by=str(actor or "").strip() or "unknown_user",
                 review_outcome=body.review_outcome.value,
                 review_notes=body.review_notes,
+                expected_run_id=body.expected_run_id,
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2355,7 +2340,9 @@ async def complete_review(
         err = out.get("error")
         if err == "not_found":
             raise HTTPException(status_code=404, detail="Entity not found")
-        raise HTTPException(status_code=409, detail="Only IN_REVIEW matches can be completed")
+        if err == 'claimed_by_other':
+            raise HTTPException(status_code=403, detail="Only the claiming reviewer can complete this review")
+        raise HTTPException(status_code=409, detail="The review or screening has changed. Reload and claim the current result before completing it.")
     item = out.get("item") or {}
     audit_log(
         "review",
@@ -2444,7 +2431,7 @@ async def rerun_review(
         search_backend="postgres_beta",
         rerun_entity_key=key,
     )
-    out = await _check_opensanctions_impl(op_req)
+    out = await _check_opensanctions_impl(op_req, actor=actor, source="review_rerun")
     rerun_payload: dict = out if isinstance(out, dict) else {}
     if isinstance(out, JSONResponse):
         if out.status_code >= 400:
@@ -2465,15 +2452,8 @@ async def rerun_review(
     completed_item = None
     if cleared:
         async with pool.acquire() as conn:
-            completed = await screening_db.complete_review(
-                conn,
-                entity_key=key,
-                completed_by=actor,
-                review_outcome=ReviewOutcome.FALSE_POSITIVE_PROCEEDED.value,
-                review_notes=(
-                    f"Auto-resolved after re-run with additional {('DOB' if type_norm == 'person' else 'country')} "
-                    f"information{' and entity type correction' if entity_type != original_entity_type else ''}."
-                ),
+            completed = await screening_db.complete_clear_rerun(
+                conn, entity_key=key, actor=actor, expected_run_id=rerun_payload.get('run_id'),
             )
         if completed.get("status") == "ok":
             auto_completed = True
@@ -2607,6 +2587,7 @@ async def approve_ai_triage_task(
                 entity_key=str(task.get("entity_key") or ""),
                 actor=actor,
                 reason=" ".join(part for part in reason_parts if part).strip(),
+                expected_run_id=(task.get('result_snapshot_json') or {}).get('run_id'),
             )
             if cleared is not None:
                 summary = cleared.get("Check Summary") if isinstance(cleared.get("Check Summary"), dict) else {}
@@ -2694,7 +2675,25 @@ async def reject_ai_triage_task(
 # Protected by INTERNAL_SCREENING_API_KEY and/or INTERNAL_SCREENING_IP_ALLOWLIST.
 # ---------------------------
 
-async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> dict:
+async def _internal_screening_outcome(conn, item: InternalScreeningRequest, actor=None, source="internal") -> dict:
+    request_id = await screening_history.start(conn, item.model_dump(), actor, source)
+    token = screening_history.active_request.set(request_id)
+    try:
+        result = await _internal_screening_execute(conn, item)
+        result["request_id"] = request_id
+        if result.get("status") not in ("queued", "already_pending"):
+            await screening_history.finish(conn, request_id, result, failed=result.get("status") == "error")
+        if result.get("status") == "reused":
+            return {"status": "reused", "request_id": request_id, "run_id": result.get("run_id")}
+        return result
+    except Exception:
+        await screening_history.finish(conn, request_id, {"error": "screening_failed"}, failed=True)
+        raise
+    finally:
+        screening_history.active_request.reset(token)
+
+
+async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> dict:
     """
     One entity: validate, then reused | already_pending | queued.
     Returns { status, job_id? }. Does NOT run screening; does NOT return results.
@@ -2703,7 +2702,7 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
     """
     name = (item.name or "").strip()
     requestor = (item.requestor or "").strip()
-    if not name:
+    if not _normalize_text(name):
         return {"status": "error", "error": "missing_name"}
     if not requestor:
         return {"status": "error", "error": "missing_requestor"}
@@ -2714,19 +2713,31 @@ async def _internal_screening_outcome(conn, item: InternalScreeningRequest) -> d
     country = (item.country.strip() if isinstance(item.country, str) else item.country) or None
     entity_type = (item.entity_type or "Person")
 
+    if dob and _normalize_dob(dob) is None:
+        return {"status": "error", "error": "invalid_dob"}
+    if entity_type.strip().lower() not in ("person", "organization"):
+        return {"status": "error", "error": "invalid_entity_type"}
+
     entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
     entity_key = entity_key_candidates[0]
 
     valid = None
     for key_candidate in entity_key_candidates:
-        valid = await screening_db.get_valid_screening(conn, key_candidate)
+        valid = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, "worker-original"))
         if valid is not None:
             break
     if valid is not None:
-        return {"status": "reused"}
+        return {**valid, "status": "reused", "entity_key": key_candidate}
 
-    if any([await screening_db.has_pending_or_running_job(conn, key_candidate) for key_candidate in entity_key_candidates]):
-        return {"status": "already_pending"}
+    for key_candidate in entity_key_candidates:
+        job = await conn.fetchrow("SELECT job_id, name, date_of_birth, country, entity_type FROM screening_jobs WHERE entity_key=$1 AND status IN ('pending', 'running') ORDER BY created_at LIMIT 1", key_candidate)
+        if job and screening_fingerprint(job['name'], job['date_of_birth'], job['country'], job['entity_type'], 'worker-original') == screening_fingerprint(name, dob, country, entity_type, 'worker-original'):
+            # Lock prevents completion racing the attachment of this new request.
+            async with conn.transaction():
+                pending = await conn.fetchrow("SELECT job_id FROM screening_jobs WHERE job_id=$1 AND status IN ('pending','running') FOR UPDATE", job['job_id'])
+                if pending:
+                    await screening_history.attach_job(conn, str(job['job_id']), item.model_dump())
+                    return {"status": "already_pending", "job_id": str(job['job_id'])}
 
     job_id = await screening_db.enqueue_job(
         conn, entity_key=entity_key, name=name, date_of_birth=dob,

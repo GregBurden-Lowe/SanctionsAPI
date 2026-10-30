@@ -1,0 +1,29 @@
+{
+  "synthetic_rows": 100000,
+  "production_data_used": false,
+  "checks": [
+    "transaction rollback leaves no partial history schema",
+    "all legacy rows backfilled exactly once",
+    "all original current-state fields preserved",
+    "snapshot JSON and screening timestamps preserved",
+    "existing claims pinned to preserved runs",
+    "no invented actors or analyst decisions",
+    "startup reentry does not duplicate history"
+  ],
+  "postgres_version": "16.15 (Homebrew)",
+  "database_bytes_before": 153607191,
+  "migration_seconds": 6.234,
+  "reentry_seconds": 0.57,
+  "reference_lookup_ms": 0.796,
+  "database_bytes_after": 448725519,
+  "counts": {
+    "screened_entities": 100000,
+    "screening_subjects": 100000,
+    "screening_runs": 100000,
+    "screening_requests": 100000,
+    "screening_review_events": 0,
+    "screening_review_decisions": 0
+  },
+  "status": "passed",
+  "disposable_database_removed": true
+}

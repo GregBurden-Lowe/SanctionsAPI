@@ -168,6 +168,7 @@ export function MatchReviewPage() {
     setActionError(null)
     try {
       const res = await completeReview(selected.entity_key, {
+        expected_run_id: selected.run_id,
         review_outcome: reviewOutcome,
         review_notes: notes,
       })

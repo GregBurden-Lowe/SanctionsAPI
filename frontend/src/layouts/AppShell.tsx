@@ -66,6 +66,7 @@ export function AppShell() {
           <NavItem to="/search" icon={<BiSearch className="h-5 w-5" />}>
             Search database
           </NavItem>
+          <NavItem to="/history" icon={<BiListUl className="h-5 w-5" />}>Screening history</NavItem>
           <NavItem to="/review" icon={<BiShieldAlt2 className="h-5 w-5" />}>
             Match review
           </NavItem>
