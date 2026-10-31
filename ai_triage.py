@@ -178,6 +178,7 @@ def _build_prompt(candidate: Dict[str, Any]) -> str:
             "Use INVESTIGATE for strong overlaps, exact/near-exact aliases, or corroborating identifiers such as matching DOB or country.",
             "If evidence is weak or ambiguous, return UNSURE.",
             "Return only JSON.",
+            "Keep rationale_short and reviewer_note to one short sentence each; provide at most two short key_differences.",
         ],
         "examples": [
             {
@@ -249,15 +250,28 @@ def _call_ollama_json(prompt: str) -> Dict[str, Any]:
             "prompt": prompt,
             "stream": False,
             "format": "json",
+            "options": {"num_predict": 384, "temperature": 0},
         },
         timeout=cfg["timeout_seconds"],
     )
     response.raise_for_status()
     payload = response.json()
+    if payload.get("done") is not True or payload.get("done_reason") == "length":
+        raise ValueError("AI response was incomplete; no recommendation was produced.")
     raw_response = payload.get("response") or "{}"
     data = json.loads(raw_response)
     if not isinstance(data, dict):
         raise ValueError("LLM returned non-object JSON")
+    confidence = data.get("confidence")
+    if (
+        data.get("recommended_action") not in {"CLEAR", "INVESTIGATE", "UNSURE"}
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0 <= confidence <= 1
+        or not isinstance(data.get("rationale_short"), str)
+        or not data["rationale_short"].strip()
+    ):
+        raise ValueError("AI response lacked a valid action, confidence or rationale; no recommendation was produced.")
     return data
 
 

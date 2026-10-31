@@ -19,6 +19,29 @@ def recommendation(action='INVESTIGATE'):
 
 
 class GuardrailTests(unittest.TestCase):
+    def test_generation_is_bounded_and_complete_response_is_accepted(self):
+        answer = {'recommended_action': 'CLEAR', 'confidence': .85, 'rationale_short': 'Names differ.'}
+        with patch('ai_triage.requests.post') as post:
+            post.return_value.json.return_value = {'done': True, 'done_reason': 'stop', 'response': json.dumps(answer)}
+            self.assertEqual(ai_triage._call_ollama_json('test'), answer)
+            self.assertEqual(post.call_args.kwargs['json']['options']['num_predict'], 384)
+
+    def test_truncated_or_invalid_response_cannot_produce_clearance(self):
+        clear = {'recommended_action': 'CLEAR', 'confidence': .85, 'rationale_short': 'Names differ.'}
+        payloads = [
+            {'done': True, 'done_reason': 'length', 'response': json.dumps(clear)},
+            {'done': False, 'response': json.dumps(clear)},
+            {'done': True, 'response': '{}'},
+            {'done': True, 'response': json.dumps({**clear, 'confidence': float('nan')})},
+            {'done': True, 'response': json.dumps({**clear, 'confidence': True})},
+            {'done': True, 'response': json.dumps({**clear, 'rationale_short': ''})},
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload), patch('ai_triage.requests.post') as post:
+                post.return_value.json.return_value = payload
+                with self.assertRaises(ValueError):
+                    ai_triage._call_ollama_json('test')
+
     def test_secondary_candidate_and_truncation_prevent_clear(self):
         candidate={'display_name':'Alice Smith','matched_name':'Bob Jones','source_label':'PEP','score':60,
             'result_json':{'Candidate Evidence':[{'name':'Alice Smith','matched_name':'Alice Smith',

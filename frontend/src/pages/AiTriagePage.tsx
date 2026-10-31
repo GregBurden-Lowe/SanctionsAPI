@@ -157,9 +157,9 @@ export function AiTriagePage() {
 
   const counters = useMemo(
     () => ({
-      clear: items.filter((item) => item.effective_recommended_action === 'CLEAR').length,
-      investigate: items.filter((item) => item.effective_recommended_action === 'INVESTIGATE').length,
-      unsure: items.filter((item) => item.effective_recommended_action === 'UNSURE').length,
+      clear: items.filter((item) => item.status !== 'ERROR' && item.effective_recommended_action === 'CLEAR').length,
+      investigate: items.filter((item) => item.status !== 'ERROR' && item.effective_recommended_action === 'INVESTIGATE').length,
+      unsure: items.filter((item) => item.status !== 'ERROR' && item.effective_recommended_action === 'UNSURE').length,
     }),
     [items],
   )
@@ -226,7 +226,7 @@ export function AiTriagePage() {
                         </td>
                         <td className="px-3 py-3">
                           <div className="flex flex-col gap-2">
-                            <RecommendationBadge value={item.effective_recommended_action} />
+                            <RecommendationBadge value={item.status === 'ERROR' ? 'AI FAILED' : item.effective_recommended_action} />
                             {item.human_decision === 'AUTO_APPROVED' && <span className="text-xs text-semantic-success">Automatically approved and cleared</span>}
                             {item.guardrail_overridden && (
                               <span className="text-xs text-[#dc2626]">Guardrail override applied</span>
@@ -234,10 +234,12 @@ export function AiTriagePage() {
                           </div>
                         </td>
                         <td className="px-3 py-3 text-text-secondary">
-                          <div>{formatConfidenceBandPercent(item.ai_confidence_band)}</div>
-                          <div className="text-xs">{formatConfidencePercent(item.ai_confidence_raw)}</div>
+                          {item.status === 'ERROR' ? <div>Not assessed</div> : <>
+                            <div>{formatConfidenceBandPercent(item.ai_confidence_band)}</div>
+                            <div className="text-xs">{formatConfidencePercent(item.ai_confidence_raw)}</div>
+                          </>}
                         </td>
-                        <td className="px-3 py-3 text-text-secondary max-w-[320px]">{item.rationale_short ?? '—'}</td>
+                        <td className="px-3 py-3 text-text-secondary max-w-[320px]">{item.status === 'ERROR' ? 'No recommendation produced. Open details for the failure reason.' : item.rationale_short ?? '—'}</td>
                         <td className="px-3 py-3 text-text-secondary">{formatDate(item.created_at)}</td>
                         <td className="px-3 py-3">
                           <Button type="button" variant="secondary" onClick={() => void openDetail(item)}>
@@ -330,9 +332,9 @@ export function AiTriagePage() {
               </CardHeader>
               <CardBody className="space-y-3 text-sm text-text-secondary">
                 <div className="flex flex-wrap items-center gap-2">
-                  <RecommendationBadge value={selected.effective_recommended_action} />
+                  <RecommendationBadge value={selected.status === 'ERROR' ? 'AI FAILED' : selected.effective_recommended_action} />
                   <span className="rounded-full border border-border bg-white px-3 py-1 text-xs">
-                    Confidence {formatConfidenceBandPercent(selected.ai_confidence_band)}
+                    {selected.status === 'ERROR' ? 'Not assessed' : `Confidence ${formatConfidenceBandPercent(selected.ai_confidence_band)}`}
                   </span>
                   {selected.guardrail_overridden && (
                     <span className="rounded-full border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-3 py-1 text-xs text-[#dc2626]">
@@ -340,7 +342,7 @@ export function AiTriagePage() {
                     </span>
                   )}
                 </div>
-                <p><span className="font-semibold text-text-primary">Rationale:</span> {selected.rationale_short ?? '—'}</p>
+                <p><span className="font-semibold text-text-primary">{selected.status === 'ERROR' ? 'Failure reason:' : 'Rationale:'}</span> {selected.rationale_short ?? '—'}</p>
                 <p><span className="font-semibold text-text-primary">Reviewer note:</span> {selected.explanation_json?.reviewer_note ?? '—'}</p>
                 <div>
                   <p className="font-semibold text-text-primary">Key differences</p>

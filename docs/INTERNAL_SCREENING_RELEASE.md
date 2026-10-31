@@ -40,7 +40,7 @@ Use these commands only if the existing production services are the repository's
 
    The installer applies all required migrations, including 005 and 006, and records the schema contract. Do not run `docker compose down`, remove volumes, or restart an old image against the changed schema if installation/startup fails.
 
-5. Keep general screening traffic paused while an administrator signs in and runs **Admin → Refresh**, including PEP data and PostgreSQL synchronization. Alternatively use the existing authenticated `POST /refresh_opensanctions` with `{"include_peps":true,"sync_postgres":true}`. Confirm refresh success and current source coverage for both PostgreSQL and Parquet. Old unversioned source snapshots intentionally fail the new coverage checks; `/health` alone does not validate them.
+5. Keep general screening traffic paused and call the authenticated `POST /refresh_opensanctions` with `{"include_peps":true,"sync_postgres":true}`. The Admin page displays API/cron guidance; it does not have a refresh button. Authenticate using the configured `REFRESH_OPENSANCTIONS_API_KEY` in the `X-Refresh-Opensanctions-Key` header, or an admin JWT. Confirm refresh success and current source coverage for both PostgreSQL and Parquet. Old unversioned source snapshots intentionally fail the new coverage checks; `/health` alone does not validate them.
 6. Start the workers, verify readiness and inspect logs:
 
    ```bash
