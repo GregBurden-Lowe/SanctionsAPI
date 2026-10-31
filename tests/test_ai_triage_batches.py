@@ -25,6 +25,7 @@ class GuardrailTests(unittest.TestCase):
             post.return_value.json.return_value = {'done': True, 'done_reason': 'stop', 'response': json.dumps(answer)}
             self.assertEqual(ai_triage._call_ollama_json('test'), answer)
             self.assertEqual(post.call_args.kwargs['json']['options']['num_predict'], 384)
+            self.assertEqual(post.call_args.kwargs['json']['options']['num_thread'], 2)
 
     def test_truncated_or_invalid_response_cannot_produce_clearance(self):
         clear = {'recommended_action': 'CLEAR', 'confidence': .85, 'rationale_short': 'Names differ.'}

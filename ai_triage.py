@@ -250,7 +250,8 @@ def _call_ollama_json(prompt: str) -> Dict[str, Any]:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"num_predict": 384, "temperature": 0},
+            # Leave CPU capacity for screening on the four-core production host.
+            "options": {"num_predict": 384, "temperature": 0, "num_thread": 2},
         },
         timeout=cfg["timeout_seconds"],
     )
