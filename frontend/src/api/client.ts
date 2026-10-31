@@ -502,3 +502,12 @@ export async function exportAcceptanceCases(reviewedLimit: number, clearedLimit:
   const query = new URLSearchParams({ reviewed_limit: String(reviewedLimit), cleared_limit: String(clearedLimit) })
   return authFetch(resolve(`/admin/screening/acceptance-export?${query}`), { headers: defaultHeaders() })
 }
+
+export const getScreeningAssurance = () => authFetch(resolve('/screening/assurance'), { headers: defaultHeaders() })
+export const reconcileScreening = () => authFetch(resolve('/admin/screening/reconcile'), { method: 'POST', headers: defaultHeaders() })
+export const investigateCompany = (number: string, business_reference: string, reason_for_check: string) => authFetch(resolve(`/api/companies/${encodeURIComponent(number)}/investigations`), {
+  method: 'POST', headers: defaultHeaders(), body: JSON.stringify({ business_reference, reason_for_check }),
+})
+
+export const listCompanyInvestigations = (number: string) => authFetch(resolve(`/api/companies/${encodeURIComponent(number)}/investigations`), { headers: defaultHeaders() })
+export const getCompanyInvestigation = (id: string) => authFetch(resolve(`/api/company-investigations/${encodeURIComponent(id)}`), { headers: defaultHeaders() })

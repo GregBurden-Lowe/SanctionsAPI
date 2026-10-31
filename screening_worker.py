@@ -26,7 +26,9 @@ REASON_FOR_CHECK_ALLOWED = frozenset({
     "Ad-Hoc Compliance Review",
 })
 
-def main():
+def main(stop_event=None):
+    import threading
+    stop_event = stop_event or threading.Event()
     import psycopg2
     from psycopg2.extras import RealDictCursor
     from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result
@@ -35,6 +37,25 @@ def main():
     if not url:
         logger.error("DATABASE_URL not set")
         sys.exit(1)
+
+    if os.environ.get('SANCTIONS_SCHEMA_MODE') == 'verify':
+        import asyncio
+        import asyncpg
+        from pathlib import Path
+        from deployment_runtime import verify_schema
+        Path('/tmp/screening-worker-ready').unlink(missing_ok=True)
+        async def verify():
+            connection = await asyncpg.connect(url, timeout=5)
+            try:
+                await verify_schema(connection)
+            finally:
+                await connection.close()
+        asyncio.run(verify())
+        from utils import get_opensanctions_df
+        data = get_opensanctions_df()
+        if data.empty or not {'sanctions', 'peps'}.issubset(set(data['source_type'])):
+            raise RuntimeError('Worker requires populated sanctions and PEP Parquet data')
+        Path('/tmp/screening-worker-ready').write_text(os.environ.get('RELEASE_ID', ''))
 
     poll_interval = max(2, int(os.environ.get("SCREENING_WORKER_POLL_SECONDS", "5")))
     retention_days = max(1, int(os.environ.get("SCREENING_JOBS_RETENTION_DAYS", "7")))
@@ -46,8 +67,10 @@ def main():
     lease_seconds = max(15, int(os.environ.get("SCREENING_JOB_LEASE_SECONDS", "60")))
     max_runtime = max(lease_seconds, int(os.environ.get("SCREENING_JOB_MAX_RUNTIME_SECONDS", "600")))
     max_attempts = max(1, int(os.environ.get("SCREENING_JOB_MAX_ATTEMPTS", "3")))
+    from screening_monitoring import start_background
+    start_background(stop_event)
     loop_count = 0
-    while True:
+    while not stop_event.is_set():
         try:
             conn = psycopg2.connect(url)
             conn.autocommit = False
@@ -113,7 +136,7 @@ def main():
                 # Previous result status for transition tracking
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
-                        "SELECT status, result_json FROM screened_entities WHERE entity_key = %s",
+                        "SELECT status, result_json, current_run_id FROM screened_entities WHERE entity_key = %s",
                         (entity_key,),
                     )
                     existing_any = cur.fetchone()
@@ -125,11 +148,17 @@ def main():
                         """SELECT result_json, current_run_id, review_decision FROM screened_entities WHERE entity_key = %s
                         AND screening_valid_until > NOW() AND manual_override_stale = FALSE
                         AND result_json->>'Screening Fingerprint' = %s
-                        AND screened_against_refresh_run_id IS NOT DISTINCT FROM
-                            (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1)""",
+                        AND (result_json ? 'Source Coverage' OR screened_against_refresh_run_id IS NOT DISTINCT FROM
+                            (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1))""",
                         (entity_key, screening_fingerprint(name, dob, country, entity_type, 'worker-original')),
                     )
                     existing_valid = cur.fetchone()
+                if existing_valid:
+                    from source_assurance import parquet_manifest, assess, decode
+                    cached_engine = decode(existing_valid['result_json'])
+                    coverage = assess(parquet_manifest(), cached_engine.get('PEP Check', {}).get('checked', True))
+                    if coverage['status'] != 'current' or coverage.get('version') != cached_engine.get('Source Coverage', {}).get('version'):
+                        existing_valid = None
                 if existing_valid and not force_rescreen:
                     existing_result = existing_valid.get("result_json") or {}
                     if isinstance(existing_result, str):
@@ -180,9 +209,14 @@ def main():
                     entity_type=entity_type,
                     requestor=requestor,
                     log_search=False,
+                    require_assurance=True,
                 )
 
                 stamp_screening_result(result, name, dob, country, entity_type, 'worker-original')
+                result['Review Business Reference'] = business_reference
+                if reason in ('all_sources_reconciliation', 'uk_delta_rescreen'):
+                    from screening_guidance import describe_change
+                    describe_change(result, (existing_any or {}).get('result_json'), (existing_any or {}).get('current_run_id'))
 
                 # Derive UK flag from result
                 src = (result.get("Check Summary") or {}).get("Source") or ""
@@ -222,30 +256,10 @@ def main():
                     except Exception:
                         pass
 
+                # Exact provenance lives in the manifest embedded in the loaded file.
+                # A queued refresh ID describes a trigger, not necessarily the file used.
                 screened_against_uk_hash = None
                 screened_against_refresh_run_id = None
-                try:
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        if refresh_run_id:
-                            cur.execute(
-                                "SELECT refresh_run_id, uk_hash FROM watchlist_refresh_runs WHERE refresh_run_id = %s::uuid",
-                                (str(refresh_run_id),),
-                            )
-                        else:
-                            cur.execute(
-                                """
-                                SELECT refresh_run_id, uk_hash
-                                FROM watchlist_refresh_runs
-                                ORDER BY ran_at DESC
-                                LIMIT 1
-                                """
-                            )
-                        run_row = cur.fetchone()
-                    if run_row:
-                        screened_against_refresh_run_id = str(run_row.get("refresh_run_id"))
-                        screened_against_uk_hash = run_row.get("uk_hash")
-                except Exception:
-                    screened_against_refresh_run_id = str(refresh_run_id) if refresh_run_id else None
 
                 # Upsert screened_entities
                 lock_owned_job(conn, job_id, token)
@@ -308,6 +322,13 @@ def main():
                             screened_against_refresh_run_id,
                         ),
                     )
+                    cur.execute('SELECT reuse_candidate_decisions(%s)', (entity_key,))
+                    decision = cur.fetchone()[0]
+                    effective = project_result(result, decision)
+                    cur.execute('SELECT current_run_id FROM screened_entities WHERE entity_key=%s', (entity_key,))
+                    effective.update(run_id=str(cur.fetchone()[0]), entity_key=entity_key, reused=False, screened_at=now.isoformat())
+                    cur.execute('UPDATE screening_jobs SET response_json=%s::jsonb WHERE job_id=%s', (json.dumps(effective), job_id))
+                    result_status = effective['Check Summary']['Status']
                     cur.execute(
                         """
                         UPDATE screening_jobs
@@ -368,6 +389,7 @@ def main():
                             WHERE status IN ('completed', 'failed')
                               AND finished_at IS NOT NULL
                               AND finished_at < NOW() - (%s::text || ' days')::interval
+                              AND NOT EXISTS (SELECT 1 FROM screening_monitoring_items i JOIN screening_monitoring_cycles c USING(cycle_id) WHERE i.job_id=screening_jobs.job_id AND c.status='running')
                             """,
                             (retention_days,),
                         )
@@ -395,4 +417,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import signal
+    import threading
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+    signal.signal(signal.SIGINT, lambda *_: stopping.set())
+    main(stopping)

@@ -247,19 +247,32 @@ async def lifespan(app: FastAPI):
     """Create DB pool and ensure schema when DATABASE_URL is set."""
     pool = await screening_db.get_pool()
     recovery_task = None
+    app.state.schema_ready = False
+    schema_mode = os.environ.get('SANCTIONS_SCHEMA_MODE', 'auto')
+    if schema_mode not in ('auto', 'verify'):
+        raise RuntimeError('SANCTIONS_SCHEMA_MODE must be auto or verify')
+    if schema_mode == 'verify' and pool is None:
+        raise RuntimeError('Rolling releases require DATABASE_URL')
     if pool is not None:
         _validate_jwt_secret()
         try:
             async with pool.acquire() as conn:
-                await screening_db.ensure_schema(conn)
-                await auth_db.ensure_auth_schema(conn)
+                if schema_mode == 'verify':
+                    from deployment_runtime import verify_schema
+                    await verify_schema(conn)
+                else:
+                    await screening_db.ensure_schema(conn)
+                    await auth_db.ensure_auth_schema(conn)
                 if os.environ.get("SEED_DEFAULT_ADMIN", "").strip().lower() in ("1", "true", "yes"):
                     await auth_db.seed_default_user(conn)
                 else:
                     logger.info("auth_db: default admin seeding skipped (set SEED_DEFAULT_ADMIN=true to enable)")
             logger.info("screening_db + auth_db: schema ensured")
+            app.state.schema_ready = True
             recovery_task=asyncio.create_task(_recover_abandoned_requests(pool))
         except Exception as e:
+            if schema_mode == 'verify':
+                raise
             import traceback
             logger.warning("schema ensure failed: %s\n%s", e, traceback.format_exc())
     try:
@@ -675,6 +688,32 @@ async def require_refresh_opensanctions_auth(request: Request) -> None:
 @app.get("/health", response_class=PlainTextResponse)
 async def health():
     return "ok"
+
+
+@app.get('/ready')
+async def readiness():
+    from deployment_runtime import PROTOCOL, schema_contract, verify_schema
+    if not getattr(app.state, 'schema_ready', False):
+        raise HTTPException(503, 'Schema is not ready')
+    pool = await screening_db.get_pool()
+    try:
+        if pool is None:
+            raise RuntimeError('Database unavailable')
+        async with asyncio.timeout(5):
+            async with pool.acquire() as conn:
+                await verify_schema(conn)
+                coverage = await conn.fetchval("""SELECT
+                    EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='sanctions')
+                    AND EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='peps')""")
+                if not coverage:
+                    raise RuntimeError('Required watchlist coverage missing')
+                from source_assurance import require_current, postgres_manifest
+                require_current(await postgres_manifest(conn))
+    except Exception:
+        raise HTTPException(503, 'Screening dependencies are not ready')
+    return JSONResponse({'status': 'ready', 'protocol': PROTOCOL,
+        'schema_contract': schema_contract(), 'release': os.environ.get('RELEASE_ID', ''),
+        'schema_mode': os.environ.get('SANCTIONS_SCHEMA_MODE', 'auto')}, headers={'Cache-Control':'no-store'})
 
 
 @app.get("/auth/config")
@@ -1517,7 +1556,7 @@ async def cors_preflight():
 
 def _run_check_sync(data: OpCheckRequest):
     return run_parquet_check(name=data.name.strip(), dob=data.dob, country=data.country,
-        entity_type=data.entity_type, requestor=data.requestor, matcher=perform_opensanctions_check, log_search=True)
+        entity_type=data.entity_type, requestor=data.requestor, matcher=perform_opensanctions_check, log_search=True, require_assurance=True)
 
 
 def _opcheck_queue_threshold() -> int:
@@ -1544,7 +1583,7 @@ def _attach_entity_id(result: dict, entity_key: str) -> dict:
 
 async def _run_postgres_dual_check(conn, *, name, dob, country, entity_type, requestor):
     return await run_postgres_check(conn, name=name, dob=dob, country=country,
-        entity_type=entity_type, requestor=requestor, matcher=perform_postgres_watchlist_check, log_search=True)
+        entity_type=entity_type, requestor=requestor, matcher=perform_postgres_watchlist_check, log_search=True, require_assurance=True)
 
 
 
@@ -1782,7 +1821,7 @@ async def _execute_screening(data: OpCheckRequest):
     # Under threshold: run screening synchronously, then upsert
     logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
     results = await asyncio.to_thread(run_parquet_check, name=name, dob=dob, country=country, entity_type=entity_type,
-        requestor=requestor, matcher=perform_opensanctions_check, log_search=True)
+        requestor=requestor, matcher=perform_opensanctions_check, log_search=True, require_assurance=True)
     stamp_screening_result(results, name, dob, country, entity_type, search_backend)
     async with pool.acquire() as conn:
         latest_meta = await screening_db.get_latest_uk_hash(conn)
@@ -2560,45 +2599,47 @@ async def approve_ai_triage_task(
         raise HTTPException(status_code=503, detail="AI triage unavailable (configure DATABASE_URL)")
     actor = str(payload.get("sub") or "").strip() or "unknown_user"
     async with pool.acquire() as conn:
-        task = await screening_db.get_ai_triage_task(conn, triage_id=triage_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail="AI triage task not found")
-        if str(task.get("status") or "").upper() != "PENDING_REVIEW":
-            raise HTTPException(status_code=409, detail="Only pending AI tasks can be approved")
-        final_screening_outcome = task.get("screening_status") or task.get("final_screening_outcome")
-        effective_action = str(task.get("effective_recommended_action") or "UNSURE").upper()
-        if body.apply_clear:
-            ai_rationale = str(task.get("rationale_short") or "").strip()
-            ai_note = ""
-            if isinstance(task.get("explanation_json"), dict):
-                ai_note = str((task.get("explanation_json") or {}).get("reviewer_note") or "").strip()
-            reason_parts = [
-                f"AI triage approved clear by {actor}.",
-                f"Recommendation={effective_action}; confidence={task.get('ai_confidence_band') or task.get('ai_confidence_raw')}.",
-            ]
-            if ai_rationale:
-                reason_parts.append(f"AI rationale: {ai_rationale}")
-            if ai_note:
-                reason_parts.append(f"AI note: {ai_note}")
-            if body.reviewer_notes:
-                reason_parts.append(f"Reviewer note: {body.reviewer_notes.strip()}")
-            cleared = await screening_db.mark_false_positive(
+        async with conn.transaction():
+            await conn.fetchval('SELECT triage_id FROM ai_triage_recommendations WHERE triage_id=$1::uuid FOR UPDATE',triage_id)
+            task = await screening_db.get_ai_triage_task(conn, triage_id=triage_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail="AI triage task not found")
+            if str(task.get("status") or "").upper() != "PENDING_REVIEW":
+                raise HTTPException(status_code=409, detail="Only pending AI tasks can be approved")
+            final_screening_outcome = task.get("screening_status") or task.get("final_screening_outcome")
+            effective_action = str(task.get("effective_recommended_action") or "UNSURE").upper()
+            if body.apply_clear:
+                ai_rationale = str(task.get("rationale_short") or "").strip()
+                ai_note = ""
+                if isinstance(task.get("explanation_json"), dict):
+                    ai_note = str((task.get("explanation_json") or {}).get("reviewer_note") or "").strip()
+                reason_parts = [
+                    f"AI triage approved clear by {actor}.",
+                    f"Recommendation={effective_action}; confidence={task.get('ai_confidence_band') or task.get('ai_confidence_raw')}.",
+                ]
+                if ai_rationale:
+                    reason_parts.append(f"AI rationale: {ai_rationale}")
+                if ai_note:
+                    reason_parts.append(f"AI note: {ai_note}")
+                if body.reviewer_notes:
+                    reason_parts.append(f"Reviewer note: {body.reviewer_notes.strip()}")
+                cleared = await screening_db.mark_false_positive(
+                    conn,
+                    entity_key=str(task.get("entity_key") or ""),
+                    actor=actor,
+                    reason=" ".join(part for part in reason_parts if part).strip(),
+                    expected_run_id=(task.get('result_snapshot_json') or {}).get('run_id'),
+                )
+                if cleared is not None:
+                    summary = cleared.get("Check Summary") if isinstance(cleared.get("Check Summary"), dict) else {}
+                    final_screening_outcome = summary.get("Status") or "Cleared - False Positive"
+            approved = await screening_db.approve_ai_triage_task(
                 conn,
-                entity_key=str(task.get("entity_key") or ""),
-                actor=actor,
-                reason=" ".join(part for part in reason_parts if part).strip(),
-                expected_run_id=(task.get('result_snapshot_json') or {}).get('run_id'),
+                triage_id=triage_id,
+                reviewer=actor,
+                reviewer_notes=body.reviewer_notes,
+                final_screening_outcome=str(final_screening_outcome or ""),
             )
-            if cleared is not None:
-                summary = cleared.get("Check Summary") if isinstance(cleared.get("Check Summary"), dict) else {}
-                final_screening_outcome = summary.get("Status") or "Cleared - False Positive"
-        approved = await screening_db.approve_ai_triage_task(
-            conn,
-            triage_id=triage_id,
-            reviewer=actor,
-            reviewer_notes=body.reviewer_notes,
-            final_screening_outcome=str(final_screening_outcome or ""),
-        )
     if approved is None:
         raise HTTPException(status_code=409, detail="Only pending AI tasks can be approved")
     audit_log(
@@ -2830,13 +2871,41 @@ async def internal_screening_jobs_bulk(request: Request, body: InternalScreening
 @app.post("/refresh_opensanctions", dependencies=[Depends(require_refresh_opensanctions_auth)])
 @limiter.limit("2/minute")
 async def refresh_opensanctions(request: Request, body: RefreshRequest):
+    return await refresh_with_lock(body)
+
+
+async def refresh_with_lock(body):
+    # Cross-process, nonblocking lock: CSV staging and both backend publications
+    # must not interleave with another refresh on the shared data volume.
+    import fcntl
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(os.path.join(DATA_DIR, '.refresh.lock'), 'a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return JSONResponse(status_code=409, content={'status': 'busy', 'message': 'A watchlist refresh is already running.'})
+        pool = await screening_db.get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.execute("INSERT INTO screening_source_health(singleton,last_attempt_at) VALUES(true,now()) ON CONFLICT(singleton) DO UPDATE SET last_attempt_at=now()")
+        result = await _refresh_opensanctions_impl(body)
+        if pool:
+            async with pool.acquire() as conn:
+                if isinstance(result, dict) and result.get('status') == 'ok':
+                    await conn.execute("UPDATE screening_source_health SET last_success_at=now(),last_error=NULL WHERE singleton")
+                else:
+                    await conn.execute("UPDATE screening_source_health SET last_error='Refresh failed; inspect service logs. Existing published data retained where possible.' WHERE singleton")
+        return result
+
+
+async def _refresh_opensanctions_impl(body):
     """
     Download latest consolidated sanctions (and optionally PEPs), write to parquet,
     and (by default) rebuild PostgreSQL watchlist table from refreshed CSV data.
     Requires admin JWT or REFRESH_OPENSANCTIONS_API_KEY (header X-Refresh-Opensanctions-Key or Authorization: Bearer <key>).
     """
     try:
-        refresh_opensanctions_data(include_peps=body.include_peps)
+        await asyncio.to_thread(refresh_opensanctions_data, include_peps=body.include_peps)
         postgres_synced = False
         postgres_rows = {"sanctions": 0, "peps": 0}
         refresh_run_info = None
@@ -2861,9 +2930,6 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
             sanctions_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
             uk_snapshot = build_uk_sanctions_snapshot(sanctions_csv)
             auto_delta_enabled = os.environ.get("UK_DELTA_RESCREEN_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-            max_terms = max(10, int(os.environ.get("UK_DELTA_MAX_TERMS", "250")))
-            max_candidates = max(100, int(os.environ.get("UK_DELTA_MAX_CANDIDATES", "15000")))
-            system_requestor = os.environ.get("UK_DELTA_SYSTEM_REQUESTOR", "system:uk-delta-rescreen").strip() or "system:uk-delta-rescreen"
 
             async with pool.acquire() as conn:
                 previous_run = await screening_db.get_latest_refresh_run(conn)
@@ -2914,42 +2980,8 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
                         conn,
                         latest_uk_hash=uk_hash,
                     )
-                    if auto_delta_enabled:
-                        candidate_terms = (delta.get("candidate_terms") or [])[:max_terms]
-                        candidates = await screening_db.shortlist_screened_entities_by_terms(
-                            conn,
-                            terms=candidate_terms,
-                            max_candidates=max_candidates,
-                        )
-                        candidate_count = len(candidates)
-                        for candidate in candidates:
-                            entity_key = str(candidate.get("entity_key") or "").strip()
-                            if not entity_key:
-                                failed_count += 1
-                                continue
-                            if await screening_db.has_pending_or_running_job(conn, entity_key):
-                                already_pending_count += 1
-                                continue
-                            try:
-                                dob_raw = candidate.get("date_of_birth")
-                                dob_str = dob_raw.isoformat() if hasattr(dob_raw, "isoformat") else (str(dob_raw) if dob_raw else None)
-                                await screening_db.enqueue_job(
-                                    conn,
-                                    entity_key=entity_key,
-                                    name=str(candidate.get("display_name") or ""),
-                                    date_of_birth=dob_str,
-                                    country=None,
-                                    entity_type=str(candidate.get("entity_type") or "Person"),
-                                    requestor=system_requestor,
-                                    business_reference=f"UK-DELTA-{refresh_run_id}",
-                                    reason_for_check="Periodic Re-Screen",
-                                    reason="uk_delta_rescreen",
-                                    refresh_run_id=refresh_run_id,
-                                    force_rescreen=True,
-                                )
-                                queued_count += 1
-                            except Exception:
-                                failed_count += 1
+                    # Full-population reconciliation is durably queued by the monitoring loop.
+                    # Do not use a capped name shortlist as the coverage boundary.
 
                 await screening_db.finalize_refresh_run(
                     conn,
@@ -2973,6 +3005,7 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
                     },
                     "rescreen": {
                         "enabled": auto_delta_enabled,
+                        "mode": "superseded_by_all_sources_monitoring",
                         "candidate_count": candidate_count,
                         "queued_count": queued_count,
                         "already_pending_count": already_pending_count,
@@ -2980,7 +3013,13 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
                         "stale_overrides_marked": stale_overrides_marked,
                     },
                 }
+        monitoring = None
+        if pool is not None and body.include_peps:
+            from screening_monitoring import tick
+            async with pool.acquire() as conn:
+                monitoring = await tick(conn)
         return {
+            "monitoring": monitoring,
             "status": "ok",
             "include_peps": body.include_peps,
             "postgres_synced": postgres_synced,
@@ -2993,6 +3032,77 @@ async def refresh_opensanctions(request: Request, body: RefreshRequest):
             status_code=500,
             content={"status": "error", "message": _GENERIC_ERROR_MESSAGE},
         )
+
+class CompanyInvestigationRequest(BaseModel):
+    business_reference: str = Field(..., min_length=1, max_length=200)
+    reason_for_check: str = 'Business Partner Due Diligence'
+
+
+@app.post('/api/companies/{company_number}/investigations')
+async def company_investigation(company_number: str, body: CompanyInvestigationRequest, payload: dict = Depends(get_current_user)):
+    from company_investigations import investigate
+    from routes.companies_house import _raise_http_error
+    if not body.business_reference.strip() or body.reason_for_check not in screening_db._REASON_FOR_CHECK_ALLOWED:
+        raise HTTPException(400, 'A business reference and valid reason are required')
+    try:
+        return await investigate(company_number, body.business_reference.strip(), body.reason_for_check, payload.get('sub') or 'internal-user')
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        _raise_http_error(exc)
+
+
+@app.get('/api/companies/{company_number}/investigations', dependencies=[Depends(get_current_user)])
+async def company_investigation_list(company_number: str):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, 'Database unavailable')
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT investigation_id,created_at,status,business_reference FROM company_screening_investigations WHERE company_number=$1 ORDER BY created_at DESC LIMIT 20',company_number)
+    return {'items':screening_db._to_json_safe([dict(r) for r in rows])}
+
+
+@app.get('/api/company-investigations/{investigation_id}', dependencies=[Depends(get_current_user)])
+async def company_investigation_detail(investigation_id: str):
+    from uuid import UUID
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, 'Database unavailable')
+    try:
+        identifier = UUID(investigation_id)
+    except ValueError:
+        raise HTTPException(400, 'Invalid investigation ID')
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM company_screening_investigations WHERE investigation_id=$1',identifier)
+    if not row:
+        raise HTTPException(404, 'Investigation not found')
+    from source_assurance import decode
+    item = dict(row)
+    item['relationships'] = decode(item.pop('relationship_snapshot'))
+    item['checks'] = json.loads(item['checks']) if isinstance(item['checks'],str) else item['checks']
+    item['message'] = 'Saved relationship snapshot and original screening responses. This is not an overall company clearance.'
+    return screening_db._to_json_safe(item)
+
+
+@app.get('/screening/assurance', dependencies=[Depends(get_current_user)])
+async def screening_assurance():
+    from screening_monitoring import summary
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail='Database unavailable')
+    async with pool.acquire() as conn:
+        return screening_db._to_json_safe(await summary(conn))
+
+
+@app.post('/admin/screening/reconcile', dependencies=[Depends(require_admin)])
+async def reconcile_screening():
+    from screening_monitoring import tick
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail='Database unavailable')
+    async with pool.acquire() as conn:
+        return await tick(conn, force=True)
+
 
 # Server-side Companies House integration routes (API key remains backend-only).
 app.include_router(companies_house_router, dependencies=[Depends(get_current_user)])

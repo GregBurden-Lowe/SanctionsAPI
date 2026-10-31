@@ -39,6 +39,7 @@ OSN_COLS = [
     "name",         # display name
     "aliases",
     "birth_date",
+    "positions",
     "countries",
     "program_ids",
     "dataset",      # dataset label/source
@@ -50,8 +51,8 @@ OSN_COLS = [
 SANCTIONS_DATASET_ALLOWLIST = [
     "United Nations",                          # UN Security Council
     "OFAC",                                    # US OFAC (SDN etc.)
-    "HM Treasury", "HMT", "UK Financial",      # UK HMT/OFSI lists
-    "EU Council", "EU Financial Sanctions",    # EU lists
+    "HM Treasury", "HMT", "UK Financial", "UK FCDO", "UK Sanctions List", "OFSI",      # UK HMT/OFSI lists
+    "EU Council", "EU Financial Sanctions", "European Union",    # EU lists
 ]
 
 # UK consolidated list indicators (for change detection and re-screen triggers)
@@ -521,12 +522,23 @@ def refresh_opensanctions_data(include_peps: bool = True):
     df = pd.concat(parts, ignore_index=True)
 
     # Write compact parquet
+    from source_assurance import build_manifest, require_current, METADATA_KEY
+    manifest = build_manifest(sanc_csv, peps_csv if include_peps else None)
+    require_current(manifest, include_peps)
     table = pa.Table.from_pandas(df)
+    table = table.replace_schema_metadata({**(table.schema.metadata or {}), METADATA_KEY: json.dumps(manifest).encode()})
     import tempfile
     with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".parquet", delete=False) as temp:
         temp_path = temp.name
     try:
         pq.write_table(table, temp_path)
+        # Content-addressed snapshots preserve the exact screening data for replay.
+        archive_dir = os.path.join(DATA_DIR, 'watchlist_versions')
+        os.makedirs(archive_dir, exist_ok=True)
+        try:
+            os.link(temp_path, os.path.join(archive_dir, manifest['version'] + '.parquet'))
+        except FileExistsError:
+            pass
         os.replace(temp_path, OSN_PARQUET)
     finally:
         if os.path.exists(temp_path):
@@ -704,12 +716,21 @@ async def sync_watchlist_entities_postgres(
             batch.clear()
         return inserted
 
+    from source_assurance import build_manifest, require_current, parquet_manifest
+    manifest = build_manifest(sanctions_csv_path, peps_csv_path if include_peps else None)
+    published = parquet_manifest()
+    if published.get('version') == manifest['version']:
+        manifest = published
+    require_current(manifest, include_peps)
     async with conn.transaction():
+        await conn.execute("CREATE TABLE IF NOT EXISTS watchlist_source_state (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), manifest jsonb NOT NULL)")
         await conn.execute("TRUNCATE TABLE watchlist_entities")
         sanctions_count = await _ingest_csv(sanctions_csv_path, "sanctions")
         peps_count = await _ingest_csv(peps_csv_path or "", "peps") if include_peps else 0
         if not sanctions_count or (include_peps and not peps_count):
             raise ScreeningUnavailableError("Refresh did not provide all required datasets; existing watchlist retained.")
+
+        await conn.execute("INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=EXCLUDED.manifest", json.dumps(manifest))
 
     return {"sanctions": sanctions_count, "peps": peps_count}
 
@@ -717,8 +738,18 @@ async def sync_watchlist_entities_postgres(
 # Loading & caching
 # =============================================================================
 
-@lru_cache(maxsize=1)
-def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
+def get_opensanctions_df(parquet_path: str = OSN_PARQUET):
+    # Atomic replacement changes inode; every process observes updates without a restart.
+    try:
+        stat = os.stat(parquet_path)
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    except FileNotFoundError:
+        signature = None
+    return _load_opensanctions_df(parquet_path, signature)
+
+
+@lru_cache(maxsize=2)
+def _load_opensanctions_df(parquet_path: str, signature) -> pd.DataFrame:
     """
     Load parquet once, project required columns, and precompute normalized fields.
     Uses Arrow-backed dtypes to keep memory small.
@@ -754,10 +785,12 @@ def get_opensanctions_df(parquet_path: str = OSN_PARQUET) -> pd.DataFrame:
     ).dt.strftime("%Y-%m-%d")
 
     df["source_type"] = df["source_type"].astype("string[pyarrow]").fillna("")
+    from source_assurance import METADATA_KEY, decode
+    df.attrs['source_manifest'] = decode((table.schema.metadata or {}).get(METADATA_KEY))
     return df
 
 def clear_osn_cache():
-    get_opensanctions_df.cache_clear()
+    _load_opensanctions_df.cache_clear()
 
 # =============================================================================
 # Matching
@@ -771,15 +804,17 @@ def screening_fingerprint(name, dob, country, entity_type, backend):
     # Preserve all name tokens; entity keys are only legacy grouping identifiers.
     payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),
                "country": _normalize_country(country), "entity_type": (entity_type or "Person").lower(),
-               "backend": backend, "rules_version": "evidence-v3", "matching_config": get_matching_config()}
+               "backend": backend, "rules_version": "evidence-v4", "matching_config": get_matching_config()}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def stamp_screening_result(result, name, dob, country, entity_type, backend):
     result["Screening Inputs"] = {"name": name, "dob": dob, "country": country, "entity_type": entity_type, "backend": backend}
     result["Screening Fingerprint"] = screening_fingerprint(name, dob, country, entity_type, backend)
-    result["Matching Rules Version"] = "evidence-v3"
+    result["Matching Rules Version"] = "evidence-v4"
     result["Matching Configuration"] = get_matching_config()
+    from screening_guidance import enrich_result
+    enrich_result(result)
     return result
 
 
@@ -1249,6 +1284,7 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             reasons.append("Country evidence is unavailable or was not supplied.")
         evidence.append({
             "record_id": _safe_str(row.get("entity_id") or row.get("id")) or None,
+            "source_evidence_hash": hashlib.sha256(json.dumps({'name': display_name, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}, sort_keys=True).encode()).hexdigest(),
             "name": display_name, "matched_name": names[matched_index], "matched_alias": bool(matched_index),
             "entity_type": entity_type, "source_type": source_type,
             "dataset": _safe_str(row.get("dataset")), "regime": _safe_str(row.get("regime") or _derive_regime_like_row(row)),
@@ -1279,8 +1315,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
 
 
 def perform_opensanctions_check(name, dob, country=None, entity_type="Person", parquet_path=OSN_PARQUET,
-                               requestor=None, log_search=True, include_peps=True):
-    df = get_opensanctions_df(parquet_path)
+                               requestor=None, log_search=True, include_peps=True, dataframe=None):
+    df = dataframe if dataframe is not None else get_opensanctions_df(parquet_path)
     sources = set(df.get("source_type", pd.Series(dtype=str)).astype(str).str.lower())
     if df.empty or "sanctions" not in sources or (include_peps and "peps" not in sources):
         raise ScreeningUnavailableError("Required sanctions or PEP data is unavailable.")

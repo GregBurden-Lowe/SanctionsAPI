@@ -1,0 +1,57 @@
+# Separate project: does not recreate the legacy Compose stack, database or Ollama.
+x-runtime: &runtime
+  image: ${ROLLOUT_IMAGE:?Set immutable image}
+  env_file: ${ROLLOUT_ENV_FILE:?Set absolute runtime env file}
+  environment:
+    SANCTIONS_SCHEMA_MODE: verify
+    RELEASE_ID: ${ROLLOUT_RELEASE:?Set image ID}
+    SEED_DEFAULT_ADMIN: 'false'
+    PORT: '8000'
+  networks: [existing]
+  volumes:
+    - data:/app/data
+  restart: unless-stopped
+  stop_grace_period: 12m
+
+x-api: &api
+  <<: *runtime
+  volumes:
+    - data:/app/data
+    - ${ROLLOUT_ASSETS:?Set shared assets directory}:/app/frontend/dist/assets:ro
+  healthcheck:
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=6)"]
+    interval: 5s
+    timeout: 8s
+    retries: 12
+    start_period: 30s
+
+x-worker: &worker
+  <<: *runtime
+  command: [python, screening_worker.py]
+  healthcheck:
+    test: [CMD, python, -c, "import os,pathlib; assert pathlib.Path('/tmp/screening-worker-ready').read_text() == os.environ['RELEASE_ID']"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 60s
+
+services:
+  api-blue:
+    <<: *api
+    ports: ['127.0.0.1:${ROLLOUT_BLUE_PORT:-8101}:8000']
+  api-green:
+    <<: *api
+    ports: ['127.0.0.1:${ROLLOUT_GREEN_PORT:-8102}:8000']
+  worker-blue:
+    <<: *worker
+  worker-green:
+    <<: *worker
+
+networks:
+  existing:
+    external: true
+    name: ${ROLLOUT_NETWORK:?Set existing Compose network}
+volumes:
+  data:
+    external: true
+    name: ${ROLLOUT_DATA_VOLUME:?Set existing sanctions data volume}

@@ -24,7 +24,8 @@ frontend/.env.local
 data/
 
 # Env and docs (optional; uncomment if you don’t want in image)
-# .env
-# .env.local
+.env
+.env.*
+deploy/*.local.json
 # README.md
 # tests/

@@ -21,8 +21,12 @@ def project_result(engine, decision=None, *, stale=False):
     if not stale and decision.get('outcome', '').startswith('False Positive'):
         result.update({'Is Sanctioned': False, 'Is PEP': False, 'Match Found': False,
                        'Risk Level': 'Cleared', 'Decision Explanation': 'An analyst resolved this run as a false positive. Original engine evidence is retained.'})
+        if decision.get('decision_type') == 'ai_auto_clear':
+            result['Decision Explanation'] = 'Automatically cleared from an AI recommendation. No human approval was performed. Original engine evidence is retained.'
         # Keep original match name, similarity, sources and screening timestamp.
         result['Check Summary'] = {**result.get('Check Summary', {}), 'Status': 'Cleared - False Positive'}
+        result['Screening Guidance'] = {**result.get('Screening Guidance', {}),
+            'finding': 'resolved_false_positive', 'next_actions': ['Retain the recorded review reason. Reopen if relevant identity or candidate evidence changes.']}
     return result
 
 
@@ -33,6 +37,14 @@ async def write_decision(conn, row, actor, outcome, notes, decision_type='analys
         row['current_run_id'], row['entity_key'], actor, outcome, notes, decision_type)
     decision = {key: str(value) if key in ('decision_id', 'run_id', 'decided_at') else value for key, value in dict(record).items()}
     false_positive = outcome.startswith('False Positive')
+    if false_positive and decision_type == 'analyst':
+        from screening_guidance import reusable_candidates
+        engine = decode(row['result_json'])
+        for candidate in reusable_candidates(engine):
+            await conn.execute("""INSERT INTO screening_candidate_resolutions
+                (decision_id,subject_signature,candidate_signature,business_reference)
+                VALUES($1,$2,$3,$4)""", record['decision_id'], engine['Review Subject Signature'],
+                candidate['candidate_signature'], row['business_reference'])
     await conn.execute('''UPDATE screened_entities SET review_decision=$2::jsonb,
         review_status='COMPLETED', review_outcome=$3, review_notes=$4,
         review_completed_by=$5, review_completed_at=now(), updated_at=now(),

@@ -1,4 +1,4 @@
-# Screening decision rules — evidence-v3
+# Screening decision rules — evidence-v4
 
 This is the locally implemented matching stage following the history foundation. Production activation is a separate release step.
 
@@ -8,13 +8,13 @@ Names are Unicode folded, punctuation normalised and whitespace collapsed. Perso
 
 DOB input supports YYYY, DD-MM-YYYY, DD/MM/YYYY and YYYY-MM-DD. Invalid/future values and incomplete dates other than year-only are rejected instead of being silently omitted or assigned invented date parts.
 
-The `evidence-v3` fingerprint invalidates cached results from previous matching rules. Existing historical runs remain unchanged.
+The `evidence-v4` fingerprint invalidates cached results from previous matching/assurance rules. See [internal screening improvements](INTERNAL_SCREENING_IMPROVEMENTS.md) for the new source and review controls. Existing historical runs remain unchanged.
 
 ## Shared execution policy
 
 Interactive PostgreSQL, interactive Parquet and background worker checks now use `screening_policy.py`. Each performs person and organisation sanctions checks. PEP checking is enabled only for a submitted Person whose name does not look company-like. The supplied DOB applies to the person check; country evidence is retained for both types. The submitted entity type remains unchanged and the result explains possible misclassification.
 
-Worker and interactive backend fingerprints remain separate conservatively; `evidence-v3` invalidates old cached decisions because worker coverage and hyphen handling have changed. Release API and worker together. The existing CSV compatibility log is appended once per successful execution; durable request/run history remains the audit record.
+Worker and interactive backend fingerprints remain separate conservatively; `evidence-v4` invalidates old cached decisions so unversioned results cannot bypass source assurance. Release API and worker together. The existing CSV compatibility log is appended once per successful execution; durable request/run history remains the audit record.
 
 ## Shared evaluator
 

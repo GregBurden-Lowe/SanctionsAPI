@@ -55,6 +55,8 @@ npm run dev
 | `AI_TRIAGE_ENABLED` | Enable scheduled AI triage worker loop. Default: `true`. |
 | `AI_TRIAGE_RUN_HOUR` | 24-hour local hour when the scheduled AI triage worker should run. Default: `22`. |
 | `AI_TRIAGE_POLL_SECONDS` | Sleep interval for the AI triage worker loop. Default: `300`. |
+| `AI_TRIAGE_AUTO_CLEAR_ENABLED` | Automatically approve and clear effective CLEAR recommendations on the unchanged screening run. Default: `true`. |
+| `AI_TRIAGE_TIMEZONE` | Timezone for the nightly batch start. Default: `Europe/London`. |
 | `AI_TRIAGE_BATCH_LIMIT` | Max outstanding sanctions or PEP matches triaged per run. Default: `25`. |
 
 **Rate limiting** (per client IP): `/auth/login` 5/min, `/auth/signup` 3/min, `POST /opcheck` 60/min, `GET /opcheck/jobs/{job_id}` 60/min, `POST /refresh_opensanctions` 2/min, `POST /internal/screening/jobs` 120/min, `POST /internal/screening/jobs/bulk` 20/min. Exceeding returns 429. The client IP is taken from the direct connection unless behind a trusted proxy (see below).
@@ -180,7 +182,7 @@ VITE_API_BASE_URL=https://sanctions-check.co.uk
 - **POST /admin/ai-triage/run** — Admin-only manual AI triage trigger for outstanding sanctions or PEP matches.
 - **GET /ai-triage/tasks** — Logged-in analyst task list of pending AI recommendations.
 - **GET /ai-triage/tasks/{triage_id}** — Full detail for one AI recommendation.
-- **POST /ai-triage/tasks/{triage_id}/approve** — Human approval path. Only this can apply an AI-suggested clear in v1.
+- **POST /ai-triage/tasks/{triage_id}/approve** — Manual approval path. Effective CLEAR recommendations can also be approved automatically by the triage worker, with an explicitly automated audit decision.
 - **POST /ai-triage/tasks/{triage_id}/reject** — Human rejection path for an AI recommendation.
 - **POST /refresh_opensanctions** — Body: `{ include_peps?: boolean, sync_postgres?: boolean }` (`sync_postgres` defaults to `true`). Returns `{ status: "ok", include_peps, postgres_synced, postgres_rows }` or 500 with `{ status: "error", message }`.
 
@@ -284,6 +286,8 @@ The container listens on `0.0.0.0` and uses the `PORT` env (default 8000), so it
 
 ### Replacing an existing DigitalOcean deployment
 
+For an existing Docker Compose + Nginx Droplet, use the [blue/green deployment workflow](docs/ZERO_DOWNTIME_DEPLOYMENT.md). It provides readiness checks, graceful draining and rollback for compatible releases after a coordinated baseline installation. The legacy replacement instructions below involve downtime and are not the rolling upgrade procedure.
+
 If you already have the API running (e.g. NSSM on a Droplet, or an older App Platform app) and want to switch to the Dockerised stack:
 
 **1. Back up before changing anything**
@@ -362,3 +366,7 @@ Requires the server to be running (e.g. `uvicorn api_server:app --port 8000`). T
 ## Design system
 
 UI tokens and component recipes are defined in `design.json`. The frontend (Tailwind + React) must use only those tokens and classes; do not add new colors, spacing, or variants without updating the design file.
+
+## Internal screening workflow
+
+See [internal screening improvements](docs/INTERNAL_SCREENING_IMPROVEMENTS.md) for source manifests, freshness limits, all-source monitoring, scoped review reuse, quality metrics and connected company investigations. Existing screening endpoints and required request fields remain unchanged. Migration 005 and a verified source refresh are required before activation.

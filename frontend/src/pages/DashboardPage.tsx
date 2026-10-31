@@ -1,3 +1,4 @@
+import { ScreeningAssurance } from '@/components/ScreeningAssurance'
 import { useEffect, useState } from 'react'
 import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, SectionHeader } from '@/components'
 import { getDashboardSummary } from '@/api/client'
@@ -68,6 +69,7 @@ export function DashboardPage() {
   return (
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-[1600px] space-y-6">
+        <ScreeningAssurance />
         <SectionHeader title="Dashboard" />
 
         <div className="flex items-center gap-3">

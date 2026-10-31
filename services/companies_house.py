@@ -146,8 +146,7 @@ def get_officers(company_number: str, active_only: bool = False) -> List[Dict[st
     number = (company_number or "").strip()
     if not number:
         raise CompaniesHouseNotFoundError("Invalid company number")
-    data = _request(f"/company/{number}/officers")
-    items = data.get("items") or []
+    items = _all_items(f"/company/{number}/officers")
     out: List[Dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -179,6 +178,8 @@ def get_officers(company_number: str, active_only: bool = False) -> List[Dict[st
                 "nationality": item.get("nationality"),
                 "date_of_birth": dob,
                 "officer_id": officer_id,
+                "country_of_residence": item.get("country_of_residence"),
+                "source_path": (item.get("links") or {}).get("self"),
             }
         )
     return out
@@ -516,6 +517,7 @@ def get_company_screening_data(company_number: str) -> Dict[str, Any]:
     director_turnover = detect_director_turnover(officers_with_risk)
     return {
         "company": company,
+        "ownership": get_ownership(company_number),
         "officers": officers_with_risk,
         "insolvency": get_insolvency(company_number),
         "shell_risk": shell_risk,
@@ -523,3 +525,72 @@ def get_company_screening_data(company_number: str) -> Dict[str, Any]:
         "age_risk": age_risk,
         "director_turnover": director_turnover,
     }
+
+
+def _all_items(path):
+    """Read every page; a broken/incomplete page is an error, never an empty register."""
+    result = []
+    while True:
+        page = _request(path, params={'items_per_page': 100, 'start_index': len(result)})
+        items = page.get('items') or []
+        total = page.get('total_results', page.get('total_count'))
+        if total is None:
+            raise CompaniesHouseUpstreamError('Register pagination total is unavailable')
+        if not items and len(result) < int(total):
+            raise CompaniesHouseUpstreamError('Register pagination is incomplete')
+        result.extend(items)
+        if len(result) >= int(total):
+            return result
+        if len(result) > 10000:
+            raise CompaniesHouseUpstreamError('Register is too large for an interactive review')
+
+
+def get_ownership(company_number):
+    from datetime import timezone
+    observed = datetime.now(timezone.utc).isoformat()
+    try:
+        items = _all_items(f'/company/{company_number}/persons-with-significant-control')
+        statements = _all_items(f'/company/{company_number}/persons-with-significant-control-statements')
+    except CompaniesHouseError as exc:
+        return {'status': 'unavailable', 'observed_at': observed, 'persons': [], 'statements': [],
+                'limitations': [str(exc), 'Ownership information could not be retrieved; do not interpret this as no owners.']}
+    persons = []
+    hidden = False
+    for item in items:
+        if item.get('ceased_on'):
+            continue
+        kind = item.get('kind', '')
+        if not item.get('name') or 'super-secure' in kind:
+            hidden = True
+            continue
+        persons.append({'name': item['name'], 'entity_type': 'Person' if 'individual' in kind else 'Organization',
+            'date_of_birth': item.get('date_of_birth'), 'country': item.get('country_of_residence'),
+            'natures_of_control': item.get('natures_of_control', []),
+            'source_path': item.get('links', {}).get('self'), 'kind': kind,
+            'identification': item.get('identification')})
+    current_statements = [item for item in statements if not item.get('ceased_on')]
+    return {'status': 'requires_review' if hidden or current_statements else 'retrieved', 'observed_at': observed,
+            'persons': persons, 'statements': current_statements,
+            'limitations': ['Registry-reported direct relationships only. No complete ownership chain or sanctions control determination.',
+                           *(['Protected ownership details are not available for screening.'] if hidden else [])]}
+
+
+def connected_subjects(bundle):
+    """Keep each relationship; never equate two people solely because their names agree."""
+    company = bundle['company']
+    subjects = [{'name': company['company_name'], 'entity_type': 'Organization', 'dob': None,
+                 'country': (company.get('registered_office_address') or {}).get('country'),
+                 'relationship': 'company', 'source_path': '/company/'+company['company_number']}]
+    for officer in bundle['officers']:
+        if officer.get('status') != 'active' or not officer.get('name'):
+            continue
+        subjects.append({'name': officer['name'], 'entity_type': 'Organization' if 'corporate' in (officer.get('role') or '') else 'Person',
+            'dob': str(officer['date_of_birth']['year']) if (officer.get('date_of_birth') or {}).get('year') else None,
+            'country': officer.get('country_of_residence'), 'relationship': officer.get('role') or 'officer',
+            'source_path': officer.get('source_path')})
+    for person in bundle.get('ownership', {}).get('persons', []):
+        subjects.append({'name': person['name'], 'entity_type': person['entity_type'],
+            'dob': str(person['date_of_birth']['year']) if (person.get('date_of_birth') or {}).get('year') else None,
+            'country': person.get('country'), 'relationship': 'person with significant control',
+            'source_path': person.get('source_path'), 'natures_of_control': person['natures_of_control']})
+    return subjects

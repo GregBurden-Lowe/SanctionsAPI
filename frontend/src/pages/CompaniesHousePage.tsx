@@ -1,3 +1,6 @@
+import { Link } from 'react-router-dom'
+import { investigateCompany, listCompanyInvestigations, getCompanyInvestigation } from '@/api/client'
+import type { OpCheckResponse } from '@/types/api'
 import { useState } from 'react'
 import { Button, Card, CardBody, CardHeader, CardTitle, ErrorBox, Input, SectionHeader } from '@/components'
 import {
@@ -28,6 +31,9 @@ function riskTone(level: string | null | undefined): string {
 
 export function CompaniesHousePage() {
   const { user } = useAuth()
+  const [investigation, setInvestigation] = useState<{investigation_id: string; status: string; message: string; checks: Array<{subject: {name: string; relationship: string}; result: OpCheckResponse & {message?: string}}> } | null>(null)
+  const [savedInvestigations, setSavedInvestigations] = useState<Array<{investigation_id: string; created_at: string; status: string; business_reference: string}>>([])
+  const [investigating, setInvestigating] = useState(false)
   const [query, setQuery] = useState('')
   const [loadingSearch, setLoadingSearch] = useState(false)
   const [loadingBundle, setLoadingBundle] = useState(false)
@@ -68,6 +74,8 @@ export function CompaniesHousePage() {
   const loadBundle = async (companyNumber: string | null) => {
     const num = (companyNumber || '').trim()
     if (!num) return
+    setInvestigation(null)
+    setSavedInvestigations([])
     setLoadingBundle(true)
     setError(null)
     try {
@@ -81,6 +89,9 @@ export function CompaniesHousePage() {
       setBundle(data)
       setLoadedCompanyNumber(num)
       setBusinessReference(`CH-${num}`)
+      const saved = await listCompanyInvestigations(num)
+      if (!saved.ok) throw new Error('Company loaded, but saved investigations could not be retrieved.')
+      setSavedInvestigations((await saved.json()).items || [])
     } catch (e) {
       setBundle(null)
       setError(e instanceof Error ? e.message : 'Failed to load company screening bundle.')
@@ -160,6 +171,20 @@ export function CompaniesHousePage() {
     }
   }
 
+  const runInvestigation = async () => {
+    if (!loadedCompanyNumber || !businessReference.trim()) { setError('A business reference is required.'); return }
+    setInvestigating(true); setError(null)
+    try {
+      const response = await investigateCompany(loadedCompanyNumber, businessReference.trim(), reasonForCheck)
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Connected review failed')
+      setInvestigation(data)
+      const saved = await listCompanyInvestigations(loadedCompanyNumber)
+      if (saved.ok) setSavedInvestigations((await saved.json()).items || [])
+    } catch (e) { setError(e instanceof Error ? e.message : 'Connected review failed') }
+    finally { setInvestigating(false) }
+  }
+
   return (
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-[1600px] space-y-6">
@@ -178,7 +203,7 @@ export function CompaniesHousePage() {
                 placeholder="e.g. The Lettings Hub or SW1A 1AA"
               />
               <div className="pt-7">
-                <Button type="button" onClick={() => void runSearch()} disabled={loadingSearch}>
+                <Button type="button" onClick={() => void runSearch()} disabled={loadingSearch || investigating}>
                   {loadingSearch ? 'Searching…' : 'Search'}
                 </Button>
               </div>
@@ -197,6 +222,7 @@ export function CompaniesHousePage() {
                   type="button"
                   variant="ghost"
                   size="sm"
+                  disabled={investigating}
                   onClick={() => {
                     setLoadedCompanyNumber(null)
                     setBundle(null)
@@ -236,7 +262,7 @@ export function CompaniesHousePage() {
                             type="button"
                             variant="secondary"
                             size="sm"
-                            disabled={loadingBundle || !row.company_number}
+                            disabled={loadingBundle || investigating || !row.company_number}
                             onClick={() => void loadBundle(row.company_number)}
                           >
                             {loadingBundle ? 'Loading…' : 'Load'}
@@ -250,6 +276,26 @@ export function CompaniesHousePage() {
             )}
           </CardBody>}
         </Card>
+
+        {bundle?.ownership && <Card><CardHeader><CardTitle>Ownership and connected review</CardTitle></CardHeader><CardBody className="space-y-3 text-sm">
+          <p>PSC register: {bundle.ownership.status} · Retrieved {new Date(bundle.ownership.observed_at).toLocaleString()}</p>
+          {bundle.ownership.persons.map((p, i) => <p key={`${p.name}-${i}`}><strong>{p.name}</strong> ({p.entity_type}) · {p.natures_of_control.map(v => v.replace(/-/g, ' ')).join('; ')}</p>)}
+          {bundle.ownership.statements.map((statement, i) => <p key={i}>{statement.statement?.replace(/-/g, ' ')}</p>)}
+          {bundle.ownership.limitations.map(text => <p key={text}>{text}</p>)}
+          <Button disabled={investigating || loadingBundle} onClick={() => void runInvestigation()}>{investigating ? 'Screening connected parties…' : 'Run connected review'}</Button>
+          {savedInvestigations.length > 0 && <div><p className="font-medium">Saved investigations</p>{savedInvestigations.map(saved => <Button key={saved.investigation_id} variant="ghost" disabled={investigating} onClick={async () => {
+            try {
+              const response = await getCompanyInvestigation(saved.investigation_id)
+              if (!response.ok) throw new Error('Saved investigation could not be loaded')
+              setInvestigation(await response.json())
+            } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load investigation') }
+          }}>{new Date(saved.created_at).toLocaleString()} · {saved.business_reference} · {saved.status}</Button>)}</div>}
+          {investigation && <div className="space-y-2"><p>Status: {investigation.status}. {investigation.message}</p><p className="text-xs">Saved investigation: {investigation.investigation_id}</p>
+            {investigation.checks.map((check, i) => <div className="border-t border-border pt-2" key={i}><strong>{check.subject.name}</strong> · {check.subject.relationship}<p>{check.result['Screening Guidance']?.finding.replace(/_/g, ' ') || check.result['Check Summary']?.Status || check.result.message || 'Incomplete'}</p>
+              {check.result.request_id && <Link className="text-brand underline" to={`/history/${check.result.request_id}`}>Open evidence and review</Link>}
+            </div>)}
+          </div>}
+        </CardBody></Card>}
 
         {bundle && (
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">

@@ -344,6 +344,8 @@ async def ensure_schema(conn) -> None:
         await conn.execute((Path(__file__).parent / "migrations/002_review_decisions.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/003_job_recovery.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/004_request_recovery.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/005_internal_screening.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/006_ai_auto_clear.sql").read_text())
 
 
 async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -356,8 +358,8 @@ async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] 
         SELECT result_json, screening_valid_until, manual_override_stale, current_run_id, last_screened_at, review_decision
         FROM screened_entities
         WHERE entity_key = $1 AND screening_valid_until > NOW()
-          AND screened_against_refresh_run_id IS NOT DISTINCT FROM
-            (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1)
+          AND (result_json ? 'Source Coverage' OR screened_against_refresh_run_id IS NOT DISTINCT FROM
+            (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1))
         """,
         entity_key,
     )
@@ -370,6 +372,13 @@ async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] 
     # Legacy results are retained as evidence, but cannot prove input compatibility.
     if not fingerprint or result.get("Screening Fingerprint") != fingerprint:
         return None
+    if 'Source Coverage' in result:
+        from source_assurance import postgres_manifest, parquet_manifest, assess
+        backend = result.get('Screening Inputs', {}).get('backend')
+        current = await postgres_manifest(conn) if backend == 'postgres_beta' else parquet_manifest()
+        coverage = assess(current, result.get('PEP Check', {}).get('checked', True))
+        if coverage['status'] != 'current' or coverage.get('version') != result['Source Coverage'].get('version'):
+            return None
     result = project_result(result, row['review_decision'], stale=row['manual_override_stale'])
     result.update(run_id=str(row["current_run_id"]), screened_at=row["last_screened_at"].isoformat(), reused=True)
     return result
@@ -414,6 +423,11 @@ async def upsert_screening(
         raise ValueError("business_reference is required")
     if reason_for_check_clean not in _REASON_FOR_CHECK_ALLOWED:
         raise ValueError("reason_for_check is required and must be a valid enum value")
+    result['Review Business Reference'] = business_reference_clean
+    if 'Source Coverage' in result:
+        # Do not label exact execution evidence with a separately queried latest refresh.
+        screened_against_uk_hash = None
+        screened_against_refresh_run_id = None
     now = datetime.now(timezone.utc)
     valid_until = now + timedelta(days=365)
     status = (result.get("Check Summary") or {}).get("Status") or "Unknown"
@@ -490,6 +504,11 @@ async def upsert_screening(
             screened_against_uk_hash,
             screened_against_refresh_run_id,
         )
+        decision = await conn.fetchval('SELECT reuse_candidate_decisions($1)', entity_key)
+        if decision:
+            effective = project_result(result, decision)
+            result.clear()
+            result.update(effective)
         row = await conn.fetchrow("SELECT current_run_id, last_screened_at FROM screened_entities WHERE entity_key=$1", entity_key)
         result.update(run_id=str(row["current_run_id"]), screened_at=row["last_screened_at"].isoformat(), reused=False)
         request_id=screening_history.active_request.get()
@@ -861,6 +880,9 @@ def _ai_triage_result_snapshot(result_json: Dict[str, Any]) -> Dict[str, Any]:
             "Source": summary.get("Source"),
             "Date": summary.get("Date"),
         },
+        "Candidate Evidence": result.get("Candidate Evidence") or [],
+        "Candidate Evidence Summary": result.get("Candidate Evidence Summary") or {},
+        "Source Coverage": result.get("Source Coverage") or {},
         "Top Matches": result.get("Top Matches") or [],
         "Input Classification": result.get("Input Classification") or {},
     }
@@ -890,9 +912,15 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, 
             OR COALESCE((result_json->>'Is PEP')::boolean, FALSE) = TRUE
           )
           AND COALESCE(review_status, 'UNREVIEWED') <> 'COMPLETED'
+          AND NOT EXISTS (
+            SELECT 1 FROM ai_triage_recommendations r
+            WHERE r.entity_key=screened_entities.entity_key
+              AND r.result_snapshot_json->>'run_id'=screened_entities.current_run_id::text
+              AND (r.status <> 'ERROR' OR r.created_at > now()-interval '24 hours')
+          )
         ORDER BY
           CASE WHEN review_status = 'IN_REVIEW' THEN 0 ELSE 1 END,
-          last_screened_at ASC
+          last_screened_at ASC, entity_key ASC
         LIMIT $1
         """,
         limit,
@@ -1589,6 +1617,9 @@ async def list_review_queue(
             country_input,
             status AS decision,
             current_run_id::text AS run_id,
+            (SELECT q.request_id::text FROM screening_requests q WHERE q.run_id=screened_entities.current_run_id ORDER BY q.requested_at DESC LIMIT 1) AS request_id,
+            result_json->'Screening Guidance' AS screening_guidance,
+            result_json->'Monitoring Change' AS monitoring_change,
             business_reference,
             reason_for_check,
             last_requestor AS screening_user,
@@ -1607,6 +1638,8 @@ async def list_review_queue(
     out: List[Dict[str, Any]] = []
     for r in rows:
         d = dict(r)
+        for field in ('screening_guidance','monitoring_change'):
+            d[field] = _decode_jsonish(d.get(field))
         if d.get("screening_timestamp") is not None:
             d["screening_timestamp"] = d["screening_timestamp"].isoformat()
         out.append(_to_json_safe(d))
@@ -1802,7 +1835,7 @@ async def list_ai_triage_tasks(
         LEFT JOIN screened_entities se
           ON se.entity_key = r.entity_key
         {where_sql}
-        ORDER BY r.created_at DESC
+        ORDER BY r.created_at DESC, r.triage_id DESC
         LIMIT ${idx_limit} OFFSET ${idx_offset}
         """,
         *args,

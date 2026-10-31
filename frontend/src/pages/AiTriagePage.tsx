@@ -53,6 +53,8 @@ function formatConfidenceBandPercent(value: string | null | undefined): string {
 }
 
 export function AiTriagePage() {
+  const [statusFilter, setStatusFilter] = useState<'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED' | 'ERROR'>('PENDING_REVIEW')
+  const [hasMore, setHasMore] = useState(false)
   const [items, setItems] = useState<AiTriageTask[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -64,18 +66,20 @@ export function AiTriagePage() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
-  const load = async () => {
+  const load = async (append = false) => {
     setLoading(true)
     setError(null)
     try {
-      const res = await listAiTriageTasks({ status: 'PENDING_REVIEW', limit: 200 })
+      const res = await listAiTriageTasks({ status: statusFilter, limit: 201, offset: append ? items.length : 0 })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setError((data as { detail?: string }).detail ?? 'Failed to load AI suggestions.')
         setItems([])
         return
       }
-      setItems(((data as { items?: AiTriageTask[] }).items ?? []) as AiTriageTask[])
+      const incoming = (data as { items?: AiTriageTask[] }).items ?? []
+      setHasMore(incoming.length > 200)
+      setItems(previous => append ? [...previous, ...incoming.slice(0, 200)] : incoming.slice(0, 200))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load AI suggestions.')
       setItems([])
@@ -86,7 +90,7 @@ export function AiTriagePage() {
 
   useEffect(() => {
     void load()
-  }, [])
+  }, [statusFilter])
 
   const openDetail = async (item: AiTriageTask) => {
     setSelected(item)
@@ -164,14 +168,19 @@ export function AiTriagePage() {
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-[1600px] space-y-6">
         <SectionHeader title="AI suggestions" />
+        <p className="text-sm text-text-secondary">Suggestions accumulate across batches. Clear recommendations are automatically approved and cleared after guardrail and screening-version checks. Find completed clearances under Approved.</p>
 
         <div className="flex flex-wrap items-center gap-3">
           <Button type="button" variant="secondary" onClick={() => void load()} disabled={loading}>
             <BiRefresh className="h-4 w-4" />
             {loading ? 'Refreshing…' : 'Refresh suggestions'}
           </Button>
+          <label className="text-sm">Show <select aria-label="Suggestion status" value={statusFilter} disabled={loading} onChange={e => setStatusFilter(e.target.value as typeof statusFilter)} className="rounded border border-border bg-white px-3 py-2">
+            <option value="PENDING_REVIEW">Pending review</option><option value="APPROVED">Approved (including automatic)</option><option value="REJECTED">Rejected</option><option value="SUPERSEDED">Superseded</option><option value="ERROR">Errors</option>
+          </select></label>
+          {hasMore && <Button variant="secondary" disabled={loading} onClick={() => void load(true)}>Load more suggestions</Button>}
           <div className="flex flex-wrap gap-2 text-xs text-text-secondary">
-            <span className="rounded-full border border-border bg-white px-3 py-1">Pending: {items.length}</span>
+            <span className="rounded-full border border-border bg-white px-3 py-1">Loaded: {items.length}</span>
             <span className="rounded-full border border-border bg-white px-3 py-1">Clear: {counters.clear}</span>
             <span className="rounded-full border border-border bg-white px-3 py-1">Investigate: {counters.investigate}</span>
             <span className="rounded-full border border-border bg-white px-3 py-1">Unsure: {counters.unsure}</span>
@@ -183,12 +192,12 @@ export function AiTriagePage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Pending AI recommendations</CardTitle>
+            <CardTitle>{statusFilter === 'PENDING_REVIEW' ? 'Pending AI recommendations' : 'AI recommendation history'}</CardTitle>
           </CardHeader>
           <CardBody>
             {items.length === 0 ? (
               <p className="text-sm text-text-secondary">
-                {loading ? 'Loading AI suggestions…' : 'No pending AI recommendations right now.'}
+                {loading ? 'Loading AI suggestions…' : 'No AI recommendations in this view.'}
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -218,6 +227,7 @@ export function AiTriagePage() {
                         <td className="px-3 py-3">
                           <div className="flex flex-col gap-2">
                             <RecommendationBadge value={item.effective_recommended_action} />
+                            {item.human_decision === 'AUTO_APPROVED' && <span className="text-xs text-semantic-success">Automatically approved and cleared</span>}
                             {item.guardrail_overridden && (
                               <span className="text-xs text-[#dc2626]">Guardrail override applied</span>
                             )}
@@ -231,7 +241,7 @@ export function AiTriagePage() {
                         <td className="px-3 py-3 text-text-secondary">{formatDate(item.created_at)}</td>
                         <td className="px-3 py-3">
                           <Button type="button" variant="secondary" onClick={() => void openDetail(item)}>
-                            Review
+                            {item.status === 'PENDING_REVIEW' ? 'Review' : 'View'}
                           </Button>
                         </td>
                       </tr>
@@ -268,15 +278,15 @@ export function AiTriagePage() {
               Close
             </Button>
             <div className="flex items-center gap-2">
-              <Button type="button" variant="secondary" onClick={() => void handleAction('reject')} disabled={actionLoading || detailLoading}>
+              <Button type="button" variant="secondary" onClick={() => void handleAction('reject')} disabled={actionLoading || detailLoading || selected?.status !== 'PENDING_REVIEW'}>
                 <BiXCircle className="h-4 w-4" />
                 Reject
               </Button>
-              <Button type="button" variant="secondary" onClick={() => void handleAction('approve')} disabled={actionLoading || detailLoading}>
+              <Button type="button" variant="secondary" onClick={() => void handleAction('approve')} disabled={actionLoading || detailLoading || selected?.status !== 'PENDING_REVIEW'}>
                 <BiCheckCircle className="h-4 w-4" />
                 Approve only
               </Button>
-              <Button type="button" onClick={() => void handleAction('approve', true)} disabled={actionLoading || detailLoading}>
+              <Button type="button" onClick={() => void handleAction('approve', true)} disabled={actionLoading || detailLoading || selected?.status !== 'PENDING_REVIEW'}>
                 <BiCheckCircle className="h-4 w-4" />
                 Approve & clear
               </Button>
@@ -288,6 +298,7 @@ export function AiTriagePage() {
         {detailError && <ErrorBox message={detailError} />}
         {selected && !detailLoading && (
           <div className="space-y-4">
+            {selected.human_decision === 'AUTO_APPROVED' && <p className="text-sm font-medium">Automatically approved and cleared · {formatDate(selected.reviewed_at)} · {selected.reviewer}</p>}
             <div className="grid gap-4 md:grid-cols-2">
               <Card>
                 <CardHeader>

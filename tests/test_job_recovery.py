@@ -18,6 +18,17 @@ from utils import _empty_no_match_result
 @unittest.skipUnless(os.getenv('SANCTIONS_TEST_ADMIN_DSN'), 'Requires disposable PostgreSQL database')
 class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        from datetime import datetime, timezone
+        import pandas as pd
+        self.source_manifest = {'version':'test-source', 'ingested_at':datetime.now(timezone.utc).isoformat(),
+            'list_counts':{k:1 for k in ('UK','UN','EU','OFAC','PEP')}}
+        source_frame = pd.DataFrame()
+        source_frame.attrs['source_manifest'] = self.source_manifest
+        for mocked in (patch('utils.get_opensanctions_df', return_value=source_frame),
+                       patch('source_assurance.parquet_manifest', return_value=self.source_manifest),
+                       patch.dict(os.environ, {'SCREENING_MONITORING_ENABLED':'false'})):
+            mocked.start()
+            self.addCleanup(mocked.stop)
         self.admin = await asyncpg.connect(os.environ['SANCTIONS_TEST_ADMIN_DSN'])
         self.database = 'sanctions_recovery_' + uuid4().hex
         await self.admin.execute(f'CREATE DATABASE "{self.database}"')
@@ -37,6 +48,19 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def claim(self, token=None):
         claim_lease(self.worker,self.job,token or self.token,60)
         self.worker.commit()
+
+    async def test_graceful_worker_stop_finishes_current_job_without_claiming_next(self):
+        import threading
+        stopping = threading.Event()
+        other = await screening_db.enqueue_job(self.conn, 'next-job', 'Next Ltd', None, 'UK', 'Organization', 'fixture', 'NEXT', 'Client Onboarding')
+        def match(**kwargs):
+            stopping.set()
+            return _empty_no_match_result('fixture')
+        with patch.dict(os.environ, {'DATABASE_URL':self.dsn}), patch('utils.perform_opensanctions_check',side_effect=match), \
+             patch('screening_worker.time.sleep'):
+            screening_worker.main(stopping)
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM screening_jobs WHERE job_id=$1::uuid',self.job),'completed')
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM screening_jobs WHERE job_id=$1::uuid',other),'pending')
 
     async def expire(self):
         await self.conn.execute("UPDATE screening_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=$1::uuid",self.job)

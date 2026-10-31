@@ -7,6 +7,14 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
   if (!evidence) return null
   const summary = result['Candidate Evidence Summary']
   return <Card><CardHeader><CardTitle>Candidate evidence</CardTitle></CardHeader><CardBody className="space-y-4">
+    {result['Source Coverage'] && <div className="rounded-lg border border-border p-3 text-sm space-y-1">
+      <p className="font-medium">Source coverage at screening: {result['Source Coverage'].status}</p>
+      <p>Lists checked: {result['Source Coverage'].required_lists?.join(', ') || 'Not verified'}</p>
+      <p>Ingested: {result['Source Coverage'].ingested_at || 'Unknown'} · Source publication time: {result['Source Coverage'].source_published_at || 'Not verified'}</p>
+      <p className="break-all text-xs">Dataset version: {result['Source Coverage'].version || 'Not recorded'}</p>
+    </div>}
+    {result['Screening Guidance'] && <div className="text-sm"><p className="font-medium">Next actions</p><ul className="list-disc pl-5">{result['Screening Guidance'].next_actions.map(action => <li key={action}>{action}</li>)}</ul></div>}
+    {result['Monitoring Change'] && <p className="text-sm">{result['Monitoring Change'].message} New candidates: {result['Monitoring Change'].added_candidates.length}; changed: {result['Monitoring Change'].changed_candidates.length}; removed: {result['Monitoring Change'].removed_candidates.length}.</p>}
     <p className="text-sm text-text-secondary">Name similarity is a matching score, not the probability that this is the same person or company. Missing details do not establish a mismatch.</p>
     {summary && <p className="text-sm">{summary.potential_matches} potential matches · {summary.excluded} excluded by conflicting DOB evidence</p>}
     {!evidence.length && <p className="text-sm">No candidate passed the name-matching rules.</p>}

@@ -1,0 +1,15 @@
+{
+  "project": "sanctions-rollout",
+  "env_file": "/opt/sanctions/.env",
+  "network": "sanctionsapi_default",
+  "data_volume": "sanctionsapi_sanctions-data",
+  "assets_dir": "/var/lib/sanctions-rollout/assets",
+  "state_dir": "/var/lib/sanctions-rollout",
+  "upstream_file": "/etc/nginx/snippets/sanctions-active.conf",
+  "nginx_pid_file": "/run/nginx.pid",
+  "edge_ready_url": "https://sanctions-check.co.uk/ready",
+  "blue_port": 8101,
+  "green_port": 8102,
+  "ready_timeout": 180,
+  "drain_timeout": 720
+}

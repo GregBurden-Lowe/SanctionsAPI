@@ -73,11 +73,26 @@ export interface ReviewDecision {
   outcome: string
   notes: string
   decided_at: string
-  decision_type: 'analyst' | 'system_no_match'
+  decision_type: 'analyst' | 'system_no_match' | 'reused_candidate_decisions' | 'ai_auto_clear'
   stale?: boolean
 }
 
+export interface SourceCoverage {
+  version?: string
+  status: string
+  ingested_at?: string
+  source_published_at?: string | null
+  required_lists?: string[]
+  missing_lists?: string[]
+  list_counts?: Record<string, number>
+  age_hours?: number | null
+}
+
 export interface OpCheckResponse {
+  'Source Coverage'?: SourceCoverage;
+  'Screening Guidance'?: { finding: string; identity_confirmed: boolean; next_actions: string[]; limitations?: string[] };
+  'Monitoring Change'?: { previous_run_id?: string; added_candidates: string[]; removed_candidates: string[]; changed_candidates: string[]; message: string };
+
   'Engine Result'?: OpCheckResponse;
   'Review Decision'?: ReviewDecision;
   'Candidate Evidence'?: CandidateEvidenceItem[];
@@ -151,6 +166,9 @@ export interface ScreenedEntity {
 }
 
 export interface ReviewQueueItem {
+  request_id?: string | null
+  screening_guidance?: OpCheckResponse['Screening Guidance']
+  monitoring_change?: OpCheckResponse['Monitoring Change']
   run_id?: string
   entity_name: string
   entity_key: string
@@ -359,12 +377,12 @@ export interface AiTriageTask {
   guardrail_overridden: boolean
   guardrail_reasons: string[] | null
   status: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED' | 'ERROR'
-  human_decision: 'APPROVED' | 'REJECTED' | null
+  human_decision: 'APPROVED' | 'REJECTED' | 'AUTO_APPROVED' | null
   reviewer: string | null
   reviewed_at: string | null
   reviewer_notes: string | null
   final_screening_outcome: string | null
-  agreement_indicator: 'AGREED' | 'DISAGREED' | null
+  agreement_indicator: 'AGREED' | 'DISAGREED' | 'AUTO_APPLIED' | null
   created_at: string
   updated_at?: string
   business_reference?: string | null
@@ -431,6 +449,13 @@ export interface CompaniesHouseScreeningBundle {
     accounts?: { overdue?: boolean } | null
     has_charges?: boolean | null
     registered_office_address?: Record<string, unknown> | null
+  }
+  ownership?: {
+    status: string
+    observed_at: string
+    persons: Array<{ name: string; entity_type: string; natures_of_control: string[]; source_path?: string }>
+    statements: Array<{ statement?: string }>
+    limitations: string[]
   }
   officers: CompaniesHouseOfficer[]
   insolvency: {

@@ -18,3 +18,9 @@ See the [project README](../README.md) for setup, database connection, and deplo
 - [Read-only retention inventory and policy requirements](SCREENING_RETENTION_PREVIEW.md)
 - [Local release review and outstanding conditions](SCREENING_RELEASE_REVIEW.md)
 - [Generate acceptance candidate packs from Admin tools](SCREENING_ACCEPTANCE_EXPORT.md)
+- [Blue/green deployment, baseline installation and rollback](ZERO_DOWNTIME_DEPLOYMENT.md)
+- [Local diagnostic replay of real-world acceptance candidates](REAL_WORLD_VALIDATION_RUNNER.md)
+
+- [Internal screening improvements](INTERNAL_SCREENING_IMPROVEMENTS.md): compatibility, six implemented workflows, operational settings, validation and release requirements.
+- [AI suggestion batches and automatic Clear approval](AI_TRIAGE_BATCHES.md)
+- [Deploy the internal screening and AI release](INTERNAL_SCREENING_RELEASE.md)

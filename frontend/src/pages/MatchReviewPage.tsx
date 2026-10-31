@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { BiCheckCircle, BiRefresh, BiSearch, BiShow } from 'react-icons/bi'
 import { Button, Card, ErrorBox, Input, Modal } from '@/components'
@@ -509,6 +510,8 @@ export function MatchReviewPage() {
                 placeholder="Record analyst rationale for this review outcome."
               />
             </div>
+            {selected?.request_id && <Link className="text-brand underline" to={`/history/${selected.request_id}`}>Open evidence before recording the decision</Link>}
+            {selected?.screening_guidance && <ul className="text-sm list-disc pl-5">{selected.screening_guidance.next_actions.map(action => <li key={action}>{action}</li>)}</ul>}
             {actionError && <ErrorBox message={actionError} />}
           </div>
         )}
@@ -524,6 +527,9 @@ export function MatchReviewPage() {
           </Button>
         }
       >
+        {detailItem?.request_id && <Link className="text-brand underline" to={`/history/${detailItem.request_id}`}>Open screening evidence and source coverage</Link>}
+        {detailItem?.screening_guidance && <ul className="text-sm list-disc pl-5 my-3">{detailItem.screening_guidance.next_actions.map(action => <li key={action}>{action}</li>)}</ul>}
+        {detailItem?.monitoring_change && <p className="text-sm my-3">{detailItem.monitoring_change.message}</p>}
         {detailItem && (
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
             <div className="sm:col-span-2">

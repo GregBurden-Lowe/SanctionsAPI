@@ -41,6 +41,17 @@ class ScreeningSafetyTests(unittest.TestCase):
 @unittest.skipUnless(os.getenv('SANCTIONS_TEST_ADMIN_DSN'), 'Set SANCTIONS_TEST_ADMIN_DSN for isolated PostgreSQL integration tests')
 class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        from datetime import datetime, timezone
+        import pandas as pd
+        self.source_manifest = {'version':'test-source', 'ingested_at':datetime.now(timezone.utc).isoformat(),
+            'list_counts':{k:1 for k in ('UK','UN','EU','OFAC','PEP')}}
+        source_frame = pd.DataFrame()
+        source_frame.attrs['source_manifest'] = self.source_manifest
+        for mocked in (patch('utils.get_opensanctions_df', return_value=source_frame),
+                       patch('source_assurance.parquet_manifest', return_value=self.source_manifest),
+                       patch.dict(os.environ, {'SCREENING_MONITORING_ENABLED':'false'})):
+            mocked.start()
+            self.addCleanup(mocked.stop)
         self.admin = await asyncpg.connect(os.environ['SANCTIONS_TEST_ADMIN_DSN'])
         self.database = 'sanctions_history_test_' + uuid4().hex
         await self.admin.execute(f'CREATE DATABASE "{self.database}"')
@@ -234,7 +245,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await conn.execute('''CREATE TABLE watchlist_entities (
                 source_type text, entity_id text, entity_schema text, name text, name_norm text,
                 birth_date date, country text, dataset text, regime text, raw_json jsonb)''')
-            rows = [dict(id='subject-1', name='Jane Smith', schema='Person', birth_date='1980', countries='US', aliases='Jane Jones', dataset='OFAC')]
+            rows = [dict(id='subject-1', name='Jane Smith', schema='Person', birth_date='1980', countries='US', aliases='Jane Jones', dataset='OFAC;United Nations;EU Council;UK FCDO')]
             with tempfile.TemporaryDirectory() as folder:
                 path = Path(folder) / 'sanctions.csv'
                 with path.open('w') as file:
@@ -407,8 +418,10 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         ])
         async with self.pool.acquire() as conn:
             job = await screening_db.enqueue_job(conn, 'policy-parity', 'Hyde and Partners', None, 'UK', 'Person', 'Fixture', 'PARITY', 'Client Onboarding')
+        rows.attrs['source_manifest'] = self.source_manifest
         with patch('utils.get_opensanctions_df', return_value=rows):
             interactive = run_parquet_check(name='Hyde and Partners', dob=None, country='UK', entity_type='Person')
+            stamp_screening_result(interactive, 'Hyde and Partners', None, 'UK', 'Person', 'worker-original')
             with patch.dict(os.environ, {'DATABASE_URL': make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)}), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     screening_worker.main()
@@ -716,3 +729,30 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.headers['content-type'],'application/zip')
                 self.assertEqual(response.headers['cache-control'],'no-store')
                 self.assertIn('attachment;',response.headers['content-disposition'])
+
+    async def test_rollout_readiness_schema_contract_and_verify_only_startup(self):
+        from deployment_runtime import install_schema, verify_schema, schema_contract
+        import httpx
+        async with self.pool.acquire() as conn:
+            await install_schema(conn)
+            await verify_schema(conn)
+            await conn.execute('CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text, name text, name_norm text)')
+            await conn.execute("INSERT INTO watchlist_entities(source_type, entity_id, entity_schema, name, name_norm) VALUES('sanctions','s','Person','Fixture','fixture'),('peps','p','Person','Fixture','fixture')")
+            await conn.execute('INSERT INTO watchlist_source_state VALUES(true,$1::jsonb)', json.dumps(self.source_manifest))
+        with patch.dict(os.environ, {'SANCTIONS_SCHEMA_MODE':'verify', 'RELEASE_ID':'fixture-release','SEED_DEFAULT_ADMIN':'false'}), \
+             patch.object(api_server,'_validate_jwt_secret'), patch.object(screening_db,'ensure_schema',AsyncMock()) as ensure, \
+             patch.object(screening_db,'close_pool',AsyncMock()):
+            async with api_server.lifespan(api_server.app):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_server.app),base_url='http://test') as client:
+                    response = await client.get('/ready')
+                    self.assertEqual(response.status_code,200,response.text)
+                    self.assertEqual(response.json()['release'],'fixture-release')
+                    self.assertEqual(response.json()['schema_contract'],schema_contract())
+                    ensure.assert_not_called()
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("DELETE FROM watchlist_entities WHERE source_type='peps'")
+                    self.assertEqual((await client.get('/ready')).status_code,503)
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE deployment_schema SET contract='incompatible'")
+            with self.assertRaisesRegex(RuntimeError,'does not match'):
+                await verify_schema(conn)

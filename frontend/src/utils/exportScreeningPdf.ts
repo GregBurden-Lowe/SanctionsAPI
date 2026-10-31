@@ -77,6 +77,7 @@ function formatEntityTypeLabel(entityType: string): string {
 }
 
 function getGuidanceText(result: OpCheckResponse): string {
+  if (result['Review Decision']?.decision_type === 'ai_auto_clear') return 'Automatically cleared from an AI recommendation. No human approval was performed; original engine evidence is preserved.'
   if (result['Check Summary']?.Status?.includes('False Positive')) return 'Manually resolved as a false positive. Candidate evidence preserves the original engine findings.'
   if (result['Is Sanctioned']) {
     return 'Potential sanctions match. Stop and escalate for enhanced review before proceeding.'
@@ -237,6 +238,12 @@ function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): stri
         </table>
       </section>
 
+      ${result['Source Coverage'] ? `<section class="panel span2"><h2>Source coverage and next actions</h2>
+        <p>Status at screening: ${escapeHtml(result['Source Coverage'].status)} · Lists: ${escapeHtml(result['Source Coverage'].required_lists?.join(', ') || 'Not verified')}</p>
+        <p>Ingested: ${escapeHtml(result['Source Coverage'].ingested_at || 'Unknown')} · Source publication: ${escapeHtml(result['Source Coverage'].source_published_at || 'Not verified')}</p>
+        <p style="overflow-wrap:anywhere">Version: ${escapeHtml(result['Source Coverage'].version || 'Not recorded')}</p>
+        ${(result['Screening Guidance']?.next_actions || []).map(action => `<p>${escapeHtml(action)}</p>`).join('')}
+        </section>` : ''}
       ${result['Candidate Evidence'] ? `<section class="panel span2">
         <h2>Candidate Evidence</h2>
         <div class="muted compact">Similarity scores do not confirm identity. Missing details do not establish a mismatch. Showing ${Math.min(result['Candidate Evidence'].length, 8)} of ${result['Candidate Evidence Summary']?.evaluated_name_matches ?? result['Candidate Evidence'].length} evaluated name matches; open the saved record for more detail.</div>
