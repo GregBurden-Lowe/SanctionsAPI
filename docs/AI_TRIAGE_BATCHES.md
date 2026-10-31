@@ -10,6 +10,10 @@ Manual runs retain their existing endpoint and batch size. The scheduled worker 
 
 The UI now has status views and Load more pagination beyond the initial 200 displayed suggestions. Approved suggestions, including automatic clearances, remain available for inspection. Automatic approvals are visibly labelled.
 
+Admins can use **Retry failed (25)** to bypass the error cooldown for unresolved failures tied to the current immutable screening run. This uses the existing run endpoint with optional `retry_failed: true` (default false), caps retries at 25, and records a `manual_retry` run. Retried failures are ordered by oldest last error so repeated failures cannot monopolize successive retry batches. Original errors are retained, and any existing non-error suggestion for that screening run prevents another attempt. Changed screening runs are handled by normal batches. The existing batch lock prevents concurrent retries; Clear retry results use the same guarded automatic approval path. No migration is required.
+
+The Errors view hides a failed attempt once a later successful assessment exists for the same entity and immutable screening run. Clear, Investigate and Unsure are all successful assessments for this purpose; this does not mean the entity has been cleared. Filtering happens before pagination. **Show resolved errors for audit** restores the complete error history. No rows, timestamps or statuses are changed or deleted. The existing list endpoint retains its default behavior for integrations, with optional `hide_resolved_errors=true` used by the UI; direct detail access remains available. A failed retry or success against a different screening run does not hide the original error.
+
 ## Automatic clearance
 
 `AI_TRIAGE_AUTO_CLEAR_ENABLED=true` is the default, as requested. Each newly generated effective `CLEAR` recommendation is applied immediately after generation. Each batch also processes up to its batch limit of existing pending Clear recommendations before generating new suggestions. Set the option to `false` to retain manual approval only.

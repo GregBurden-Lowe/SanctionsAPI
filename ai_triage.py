@@ -379,6 +379,7 @@ async def _run_ai_triage_batch(
     trigger_type: str,
     triggered_by: str,
     limit: int = 25,
+    retry_failed: bool = False,
 ) -> Dict[str, Any]:
     cfg = get_local_llm_config()
     run_id = await screening_db_module.create_ai_triage_run(
@@ -399,7 +400,7 @@ async def _run_ai_triage_batch(
     errors: List[str] = []
 
     try:
-        candidates = await screening_db_module.list_ai_triage_candidates(conn, limit=limit)
+        candidates = await screening_db_module.list_ai_triage_candidates(conn, limit=limit, retry_failed=retry_failed)
         selected = len(candidates)
         await screening_db_module.update_ai_triage_run_selected(conn, run_id=run_id, selected_count=selected)
 
@@ -521,22 +522,25 @@ async def auto_clear_task(conn, triage_id):
         return True
 
 
-async def run_ai_triage_batch(conn, *, screening_db_module, trigger_type, triggered_by, limit=25):
+async def run_ai_triage_batch(conn, *, screening_db_module, trigger_type, triggered_by, limit=25, retry_failed=False):
     # Session lock covers LLM work without a long database transaction. A crashed
     # connection releases it; concurrent manual/scheduled runs cannot duplicate a batch.
     if not await conn.fetchval('SELECT pg_try_advisory_lock(720031006)'):
         return {'status':'busy','selected_count':0,'created_count':0}
     try:
+        if retry_failed:
+            limit = max(1, min(25, int(limit)))
         existing = []
         auto_approved = 0
-        if auto_clear_enabled():
+        if auto_clear_enabled() and not retry_failed:
             existing = await conn.fetch("""SELECT triage_id FROM ai_triage_recommendations
                 WHERE status='PENDING_REVIEW' AND effective_recommended_action='CLEAR'
                 ORDER BY created_at,triage_id LIMIT $1""",max(1,min(250,int(limit))))
             for row in existing:
                 auto_approved += int(await auto_clear_task(conn,str(row['triage_id'])))
         result = await _run_ai_triage_batch(conn,screening_db_module=screening_db_module,
-            trigger_type=trigger_type,triggered_by=triggered_by,limit=limit)
+            trigger_type=trigger_type,triggered_by=triggered_by,limit=limit,retry_failed=retry_failed)
+        result['retry_failed'] = retry_failed
         result.update(auto_approved_count=auto_approved+result.get("auto_approved_count",0),existing_clear_processed=len(existing))
         return result
     finally:

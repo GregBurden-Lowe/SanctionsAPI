@@ -210,11 +210,11 @@ export async function clearAiTriageRuns(): Promise<Response> {
   })
 }
 
-export async function runAiTriage(limit = 25): Promise<Response> {
+export async function runAiTriage(limit = 25, retryFailed = false): Promise<Response> {
   return authFetch(resolve('/admin/ai-triage/run'), {
     method: 'POST',
     headers: defaultHeaders(),
-    body: JSON.stringify({ limit }),
+    body: JSON.stringify({ limit, retry_failed: retryFailed }),
   })
 }
 
@@ -441,11 +441,13 @@ export async function listAiTriageTasks(params: {
   status?: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED' | 'ERROR'
   limit?: number
   offset?: number
+  hideResolvedErrors?: boolean
 } = {}): Promise<Response> {
   const sp = new URLSearchParams()
   if (params.status) sp.set('status', params.status)
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
+  if (params.hideResolvedErrors != null) sp.set('hide_resolved_errors', String(params.hideResolvedErrors))
   const qs = sp.toString()
   return authFetch(resolve(`/ai-triage/tasks${qs ? `?${qs}` : ''}`), {
     method: 'GET',

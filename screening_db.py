@@ -888,7 +888,7 @@ def _ai_triage_result_snapshot(result_json: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, Any]]:
+async def list_ai_triage_candidates(conn, *, limit: int = 25, retry_failed: bool = False) -> List[Dict[str, Any]]:
     limit = max(1, min(250, int(limit)))
     rows = await conn.fetch(
         """
@@ -916,14 +916,27 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25) -> List[Dict[str, 
             SELECT 1 FROM ai_triage_recommendations r
             WHERE r.entity_key=screened_entities.entity_key
               AND r.result_snapshot_json->>'run_id'=screened_entities.current_run_id::text
-              AND (r.status <> 'ERROR' OR r.created_at > now()-interval '24 hours')
+              AND (r.status <> 'ERROR' OR (NOT $2::boolean AND r.created_at > now()-interval '24 hours'))
           )
+          AND (NOT $2::boolean OR EXISTS (
+            SELECT 1 FROM ai_triage_recommendations r
+            WHERE r.entity_key=screened_entities.entity_key
+              AND r.result_snapshot_json->>'run_id'=screened_entities.current_run_id::text
+              AND r.status='ERROR'
+          ))
         ORDER BY
+          CASE WHEN $2::boolean THEN (
+            SELECT max(r.created_at) FROM ai_triage_recommendations r
+            WHERE r.entity_key=screened_entities.entity_key
+              AND r.result_snapshot_json->>'run_id'=screened_entities.current_run_id::text
+              AND r.status='ERROR'
+          ) END ASC NULLS LAST,
           CASE WHEN review_status = 'IN_REVIEW' THEN 0 ELSE 1 END,
           last_screened_at ASC, entity_key ASC
         LIMIT $1
         """,
         limit,
+        retry_failed,
     )
     out: List[Dict[str, Any]] = []
     for row in rows:
@@ -1784,6 +1797,7 @@ async def list_ai_triage_tasks(
     status: Optional[str] = "PENDING_REVIEW",
     limit: int = 100,
     offset: int = 0,
+    hide_resolved_errors: bool = False,
 ) -> List[Dict[str, Any]]:
     limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
@@ -1797,6 +1811,14 @@ async def list_ai_triage_tasks(
         n += 1
         conditions.append(f"r.status = ${n}")
         args.append(status_clean)
+    if hide_resolved_errors:
+        conditions.append("""NOT (r.status = 'ERROR' AND EXISTS (
+            SELECT 1 FROM ai_triage_recommendations later
+            WHERE later.entity_key = r.entity_key
+              AND NULLIF(later.result_snapshot_json->>'run_id', '') = NULLIF(r.result_snapshot_json->>'run_id', '')
+              AND later.created_at > r.created_at
+              AND later.status IN ('PENDING_REVIEW', 'APPROVED', 'REJECTED', 'SUPERSEDED')
+        ))""")
     where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     args.extend([limit, offset])
     idx_limit = len(args) - 1

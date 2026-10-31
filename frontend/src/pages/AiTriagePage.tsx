@@ -53,6 +53,7 @@ function formatConfidenceBandPercent(value: string | null | undefined): string {
 }
 
 export function AiTriagePage() {
+  const [showResolvedErrors, setShowResolvedErrors] = useState(false)
   const [statusFilter, setStatusFilter] = useState<'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED' | 'ERROR'>('PENDING_REVIEW')
   const [hasMore, setHasMore] = useState(false)
   const [items, setItems] = useState<AiTriageTask[]>([])
@@ -70,7 +71,7 @@ export function AiTriagePage() {
     setLoading(true)
     setError(null)
     try {
-      const res = await listAiTriageTasks({ status: statusFilter, limit: 201, offset: append ? items.length : 0 })
+      const res = await listAiTriageTasks({ status: statusFilter, limit: 201, offset: append ? items.length : 0, hideResolvedErrors: !showResolvedErrors })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setError((data as { detail?: string }).detail ?? 'Failed to load AI suggestions.')
@@ -90,7 +91,7 @@ export function AiTriagePage() {
 
   useEffect(() => {
     void load()
-  }, [statusFilter])
+  }, [statusFilter, showResolvedErrors])
 
   const openDetail = async (item: AiTriageTask) => {
     setSelected(item)
@@ -189,6 +190,10 @@ export function AiTriagePage() {
 
         {toast && <div className="rounded-lg border border-[rgba(34,197,94,0.25)] bg-[rgba(34,197,94,0.08)] px-4 py-3 text-sm text-[#15803d]">{toast}</div>}
         {error && <ErrorBox message={error} />}
+        {statusFilter === 'ERROR' && <div className="space-y-2 text-sm text-text-secondary">
+          <p>Errors with a later successful assessment for the same screening run are hidden by default and retained for audit. Clear, Investigate and Unsure all count as completed assessments. An administrator can retry unresolved failures using Admin → AI triage → Retry failed (25).</p>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={showResolvedErrors} disabled={loading} onChange={e => setShowResolvedErrors(e.target.checked)} />Show resolved errors for audit</label>
+        </div>}
 
         <Card>
           <CardHeader>

@@ -65,9 +65,94 @@ class AiBatchTests(unittest.IsolatedAsyncioTestCase):
         await screening_db.upsert_screening(self.conn,key,'Alice Smith','alice smith',None,None,'Person','tester',key,'Client Onboarding',result)
         return result
 
-    async def batch(self,limit=25):
+    async def batch(self,limit=25,retry_failed=False):
         return await ai_triage.run_ai_triage_batch(self.conn,screening_db_module=screening_db,
-            trigger_type='manual',triggered_by='test',limit=limit)
+            trigger_type='manual_retry' if retry_failed else 'manual',triggered_by='test',limit=limit,retry_failed=retry_failed)
+
+    async def test_retry_bypasses_cooldown_preserves_error_and_auto_approves(self):
+        await self.seed()
+        with patch('ai_triage.triage_candidate',AsyncMock(side_effect=TimeoutError('test timeout'))):
+            await self.batch()
+        before=dict(await self.conn.fetchrow("SELECT * FROM ai_triage_recommendations WHERE status='ERROR'"))
+        with patch('ai_triage.triage_candidate',AsyncMock(return_value=recommendation('CLEAR'))) as model:
+            self.assertEqual((await self.batch())['selected_count'],0)
+            result=await self.batch(retry_failed=True)
+            self.assertEqual(result['auto_approved_count'],1)
+            self.assertEqual(model.await_count,1)
+            self.assertEqual((await self.batch(retry_failed=True))['selected_count'],0)
+        after=dict(await self.conn.fetchrow('SELECT * FROM ai_triage_recommendations WHERE triage_id=$1',before['triage_id']))
+        self.assertEqual(before,after)
+        self.assertEqual(await self.conn.fetchval("SELECT count(*) FROM ai_triage_recommendations WHERE human_decision='AUTO_APPROVED'"),1)
+        self.assertEqual(len(await screening_db.list_ai_triage_tasks(self.conn,status='ERROR')),1)
+        self.assertEqual(await screening_db.list_ai_triage_tasks(self.conn,status='ERROR',hide_resolved_errors=True),[])
+        self.assertIsNotNone(await screening_db.get_ai_triage_task(self.conn,triage_id=str(before['triage_id'])))
+
+    async def test_successful_assessments_hide_errors_before_pagination(self):
+        for i in range(4): await self.seed(f'subject-{i}')
+        with patch('ai_triage.triage_candidate',AsyncMock(side_effect=TimeoutError('test timeout'))):
+            await self.batch()
+        with patch('ai_triage.triage_candidate',AsyncMock(return_value=recommendation('INVESTIGATE'))):
+            await self.batch(limit=1,retry_failed=True)
+        with patch('ai_triage.triage_candidate',AsyncMock(return_value=recommendation('UNSURE'))):
+            await self.batch(limit=1,retry_failed=True)
+        first=await screening_db.list_ai_triage_tasks(self.conn,status='ERROR',hide_resolved_errors=True,limit=1)
+        second=await screening_db.list_ai_triage_tasks(self.conn,status='ERROR',hide_resolved_errors=True,limit=1,offset=1)
+        self.assertEqual(len(first),1); self.assertEqual(len(second),1)
+        self.assertNotEqual(first[0]['triage_id'],second[0]['triage_id'])
+        self.assertEqual(await screening_db.list_ai_triage_tasks(self.conn,status='ERROR',hide_resolved_errors=True,limit=1,offset=2),[])
+        self.assertEqual(len(await screening_db.list_ai_triage_tasks(self.conn,status='ERROR')),4)
+
+    async def test_failed_retries_and_success_on_different_run_do_not_hide_errors(self):
+        await self.seed()
+        with patch('ai_triage.triage_candidate',AsyncMock(side_effect=TimeoutError('test timeout'))):
+            await self.batch()
+            await self.batch(retry_failed=True)
+        self.assertEqual(len(await screening_db.list_ai_triage_tasks(self.conn,status='ERROR',hide_resolved_errors=True)),2)
+        await self.seed()
+        with patch('ai_triage.triage_candidate',AsyncMock(return_value=recommendation())):
+            await self.batch()
+        self.assertEqual(len(await screening_db.list_ai_triage_tasks(self.conn,status='ERROR',hide_resolved_errors=True)),2)
+
+    async def test_retry_only_targets_failed_current_runs_without_success(self):
+        for key in ('changed','resolved','failed'): await self.seed(key)
+        with patch('ai_triage.triage_candidate',AsyncMock(side_effect=TimeoutError('test timeout'))):
+            await self.batch()
+        # A changed run and a fresh never-triaged record belong to normal batches.
+        await self.seed('changed')
+        await self.seed('fresh')
+        await self.conn.execute("UPDATE screened_entities SET review_status='COMPLETED' WHERE entity_key='resolved'")
+        with patch('ai_triage.triage_candidate',AsyncMock(return_value=recommendation())) as model:
+            result=await self.batch(retry_failed=True)
+            self.assertEqual(result['created_count'],1)
+            self.assertEqual(model.await_args.args[0]['entity_key'],'failed')
+            self.assertEqual((await self.batch(retry_failed=True))['selected_count'],0)
+
+    async def test_repeated_retry_failures_rotate_and_batch_is_capped(self):
+        for i in range(30): await self.seed(f'failure-{i:02d}')
+        with patch('ai_triage.triage_candidate',AsyncMock(side_effect=TimeoutError('test timeout'))):
+            await self.batch(limit=30)
+        await self.conn.execute("UPDATE ai_triage_recommendations SET created_at=now()-interval '1 hour' WHERE status='ERROR'")
+        with patch('ai_triage.triage_candidate',AsyncMock(side_effect=TimeoutError('test timeout'))) as model:
+            result=await self.batch(limit=100,retry_failed=True)
+            self.assertEqual(result['selected_count'],25)
+            first={call.args[0]['entity_key'] for call in model.await_args_list}
+        with patch('ai_triage.triage_candidate',AsyncMock(return_value=recommendation())) as model:
+            result=await self.batch(limit=5,retry_failed=True)
+            second={call.args[0]['entity_key'] for call in model.await_args_list}
+        self.assertEqual(result['selected_count'],5)
+        self.assertFalse(first & second)
+
+    async def test_retry_obeys_existing_batch_lock(self):
+        other=await asyncpg.connect(os.environ['SANCTIONS_TEST_ADMIN_DSN'],database=self.database)
+        try:
+            await other.execute('SELECT pg_advisory_lock(720031006)')
+            try:
+                self.assertEqual((await self.batch(retry_failed=True))['status'],'busy')
+                self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM ai_triage_runs'),0)
+            finally:
+                await other.execute('SELECT pg_advisory_unlock(720031006)')
+        finally:
+            await other.close()
 
     async def test_batches_stack_beyond_25_without_reselecting_existing_suggestions(self):
         for i in range(60): await self.seed(f'subject-{i}')

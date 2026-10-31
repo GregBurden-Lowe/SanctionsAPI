@@ -171,20 +171,25 @@ export function AdminPage() {
     }
   }
 
-  const handleRunAiTriage = async () => {
+  const handleRunAiTriage = async (retryFailed = false) => {
     setAiRunning(true)
     setAiError(null)
     setAiMessage(null)
     try {
-      const res = await runAiTriage(25)
+      const res = await runAiTriage(25, retryFailed)
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setAiError((data as { detail?: string }).detail ?? 'Failed to start AI triage run.')
         return
       }
+      if ((data as { status?: string }).status === 'busy') {
+        setAiMessage('Another AI batch is running. Wait for it to finish, then retry.')
+        await loadAiTriage()
+        return
+      }
       const typed = data as { run_id?: string; selected?: number; created?: number; skipped?: number; errors?: number }
       setAiMessage(
-        `AI triage run started${typed.run_id ? ` (${typed.run_id})` : ''}. Selected ${(data as { selected_count?: number }).selected_count ?? typed.selected ?? 0}, created ${(data as { created_count?: number }).created_count ?? typed.created ?? 0}, skipped ${(data as { skipped_count?: number }).skipped_count ?? typed.skipped ?? 0}, errors ${(data as { error_count?: number }).error_count ?? typed.errors ?? 0}.`,
+        `AI ${retryFailed ? 'retry' : 'triage'} run completed${typed.run_id ? ` (${typed.run_id})` : ''}. Selected ${(data as { selected_count?: number }).selected_count ?? typed.selected ?? 0}, created ${(data as { created_count?: number }).created_count ?? typed.created ?? 0}, skipped ${(data as { skipped_count?: number }).skipped_count ?? typed.skipped ?? 0}, errors ${(data as { error_count?: number }).error_count ?? typed.errors ?? 0}.`,
       )
       await loadAiTriage()
     } catch (err) {
@@ -354,10 +359,14 @@ export function AdminPage() {
               <Button type="button" onClick={() => void handleRunAiTriage()} disabled={aiRunning || aiLoading || aiClearingRuns}>
                 {aiRunning ? 'Running…' : 'Run AI triage now'}
               </Button>
+              <Button type="button" variant="secondary" onClick={() => void handleRunAiTriage(true)} disabled={aiRunning || aiLoading || aiClearingRuns}>
+                Retry failed (25)
+              </Button>
               <Button type="button" variant="secondary" onClick={() => void handleClearAiRuns()} disabled={aiClearingRuns || aiLoading || aiRunning || aiRuns.length === 0}>
                 {aiClearingRuns ? 'Clearing…' : 'Clear recent runs'}
               </Button>
             </div>
+            <p className="text-sm text-text-secondary">Retry failed bypasses the 24-hour cooldown for unresolved errors on the current screening run. Each retry creates a new attempt; previous errors remain in history. Successful or already reviewed suggestions are not retried.</p>
             {aiError && <ErrorBox message={aiError} />}
             {aiMessage && <p className="text-sm text-semantic-success">{aiMessage}</p>}
             <div className="rounded-lg border border-border bg-app p-4 text-sm text-text-secondary">

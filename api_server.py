@@ -485,6 +485,7 @@ class MatchingConfigUpdateRequest(BaseModel):
 
 class AiTriageRunRequest(BaseModel):
     limit: int = Field(25, ge=1, le=250, description="Maximum number of outstanding sanctions or PEP matches to triage")
+    retry_failed: bool = Field(False, description="Retry up to 25 unresolved current-run AI failures without the 24-hour cooldown; preserve all previous attempts")
 
 
 class AiTriageDecisionRequest(BaseModel):
@@ -1498,9 +1499,10 @@ async def admin_run_ai_triage(
         result = await run_ai_triage_batch(
             conn,
             screening_db_module=screening_db,
-            trigger_type="manual",
+            trigger_type="manual_retry" if body.retry_failed else "manual",
             triggered_by=actor,
             limit=body.limit,
+            retry_failed=body.retry_failed,
         )
     audit_log(
         "admin",
@@ -2552,6 +2554,7 @@ async def list_ai_triage_tasks(
     status: Optional[str] = "PENDING_REVIEW",
     limit: int = 100,
     offset: int = 0,
+    hide_resolved_errors: bool = False,
 ):
     pool = await screening_db.get_pool()
     if pool is None:
@@ -2563,6 +2566,7 @@ async def list_ai_triage_tasks(
                 status=(status or "").strip().upper() or None,
                 limit=limit,
                 offset=offset,
+                hide_resolved_errors=hide_resolved_errors,
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
