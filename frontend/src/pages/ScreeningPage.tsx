@@ -545,7 +545,7 @@ export function ResultCard({
 }) {
   const summary = result['Check Summary']
   const outcome = getOutcome(result)
-  const { list: sourceList, hasUK, otherCount } = parseSourceList(summary?.Source)
+  const { list: sourceList } = parseSourceList(summary?.Source)
   const [showSourcesModal, setShowSourcesModal] = useState(false)
   const [pdfError, setPdfError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -619,13 +619,6 @@ export function ResultCard({
       icon: result['Match Found'] ? BiInfoCircle : BiMinus,
       tone: result['Match Found'] ? 'info' : 'neutral',
     },
-    {
-      title: 'Source labels',
-      subtitle: 'Labels on matched records — not proof of complete list coverage',
-      badge: sourceList.length > 0 ? `${sourceList.length} label${sourceList.length !== 1 ? 's' : ''}` : 'None',
-      icon: sourceList.length > 0 ? BiInfoCircle : BiMinus,
-      tone: sourceList.length > 0 ? 'info' : 'neutral',
-    },
   ]
 
   const toneBadge = (tone: CheckTone) => ({
@@ -665,8 +658,6 @@ export function ResultCard({
     ['Entity type', formatEntityTypeLabel(searchDetails.entityType || '—')],
     ['Potential matches', String(potentialMatches)],
     ['Excluded', String(excluded)],
-    ['UK-labelled source', hasUK ? 'Yes' : 'No'],
-    ['Other source labels', String(otherCount)],
     ...(summary?.Date ? [['Checked at', summary.Date] as [string, string]] : []),
   ]
 
