@@ -21,10 +21,11 @@ from rapidfuzz import fuzz
 # =============================================================================
 
 DATA_DIR = "data"
-OSN_PARQUET = os.path.join(DATA_DIR, "opensanctions.parquet")
+OWN_PARQUET = os.path.join(DATA_DIR, "watchlists.parquet")       # self-scraped combined watchlist
+OSN_PARQUET = OWN_PARQUET                                          # kept for backward compat
 MATCHING_CONFIG_PATH = os.path.join(DATA_DIR, "matching_config.json")
 
-# Latest consolidated dumps
+# OpenSanctions URLs — kept for reference; no longer downloaded at runtime.
 CONSOLIDATED_SANCTIONS_URL = (
     "https://data.opensanctions.org/datasets/latest/sanctions/targets.simple.csv"
 )
@@ -49,10 +50,10 @@ OSN_COLS = [
 
 # Restrict sanctions data to these sources only (case-insensitive substring match)
 SANCTIONS_DATASET_ALLOWLIST = [
-    "United Nations",                          # UN Security Council
+    "United Nations", "UN Security Council",   # UN Security Council
     "OFAC",                                    # US OFAC (SDN etc.)
     "HM Treasury", "HMT", "UK Financial", "UK FCDO", "UK Sanctions List", "OFSI",      # UK HMT/OFSI lists
-    "EU Council", "EU Financial Sanctions", "European Union",    # EU lists
+    "EU Council", "EU Financial Sanctions", "European Union", "EU Consolidated",         # EU lists
 ]
 
 # UK consolidated list indicators (for change detection and re-screen triggers)
@@ -62,6 +63,7 @@ UK_DATASET_PATTERNS = [
     "OFSI",
     "UK Financial",
     "UK FCDO",
+    "UK Sanctions List",  # FCDO replacement for legacy OFSI list
 ]
 
 _PERSON_NAME_PARTICLES = frozenset({
@@ -470,86 +472,56 @@ def compute_uk_snapshot_delta(
 
 def refresh_opensanctions_data(include_peps: bool = True):
     """
-    Download latest consolidated sanctions (filtered to UN/EU/OFAC/HMT) and optional PEPs.
-    Keep only columns we need, add 'source_type', and write a single compact parquet.
+    Refresh watchlist data from all self-scraped sources (UN, OFAC, UK, EU + PEPs).
+
+    Replaces the former OpenSanctions CSV download. Calls each scraper, merges
+    the results into data/watchlists.parquet, and embeds a source manifest in
+    the parquet metadata for freshness checking.
     """
+    import sys as _sys
+    import tempfile
+    from pathlib import Path as _Path
+    _scripts_dir = str(_Path(__file__).parent / "scripts")
+    if _scripts_dir not in _sys.path:
+        _sys.path.insert(0, _scripts_dir)
+    from fetch_all_watchlists import fetch_all
+
     os.makedirs(DATA_DIR, exist_ok=True)
-    parts: List[pd.DataFrame] = []
+    df = fetch_all(include_peps=include_peps, output_path=OWN_PARQUET)
 
-    # Sanctions
-    try:
-        sanc_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
-        _download_csv(CONSOLIDATED_SANCTIONS_URL, sanc_csv, timeout=300)
-        df_s = pd.read_csv(sanc_csv, low_memory=False)
+    if df.empty or "sanctions" not in set(df["source_type"].unique()):
+        raise ScreeningUnavailableError(
+            "Refresh did not provide sanctions data; existing watchlist retained."
+        )
+    if include_peps and "peps" not in set(df["source_type"].unique()):
+        raise ScreeningUnavailableError(
+            "Refresh did not provide PEP data; existing watchlist retained."
+        )
 
-        # Ensure columns exist
-        for c in OSN_COLS:
-            if c not in df_s.columns and c != "source_type":
-                df_s[c] = pd.Series(dtype="string")
-
-        # Filter to allowlist datasets
-        df_s["dataset"] = df_s["dataset"].astype("string").fillna("")
-        mask = df_s["dataset"].apply(_dataset_allowed)
-        df_s = df_s[mask].copy()
-
-        df_s = df_s[[c for c in OSN_COLS if c != "source_type"]]
-        df_s["source_type"] = "sanctions"
-        parts.append(df_s)
-        print(f"[OpenSanctions] Sanctions kept: {len(df_s):,} rows (filtered to UN/EU/OFAC/HMT).")
-    except Exception as e:
-        print(f"[OpenSanctions] Sanctions download/parsing failed: {e}")
-
-    # PEPs (optional)
-    if include_peps:
-        try:
-            peps_csv = os.path.join(DATA_DIR, "os_peps_latest.csv")
-            _download_csv(CONSOLIDATED_PEPS_URL, peps_csv, timeout=300)
-            df_p = pd.read_csv(peps_csv, low_memory=False)
-            for c in OSN_COLS:
-                if c not in df_p.columns and c != "source_type":
-                    df_p[c] = pd.Series(dtype="string")
-            df_p = df_p[[c for c in OSN_COLS if c != "source_type"]]
-            df_p["source_type"] = "peps"
-            parts.append(df_p)
-            print(f"[OpenSanctions] PEPs added: {len(df_p):,} rows.")
-        except Exception as e:
-            print(f"[OpenSanctions] PEPs download/parsing failed: {e}")
-
-    loaded_sources = {str(part["source_type"].iloc[0]) for part in parts if not part.empty}
-    if "sanctions" not in loaded_sources or (include_peps and "peps" not in loaded_sources):
-        raise ScreeningUnavailableError("Refresh did not provide all required datasets; existing watchlist retained.")
-
-    df = pd.concat(parts, ignore_index=True)
-
-    # Do not publish a snapshot whose nested aliases cannot be interpreted.
-    for aliases in df['aliases']:
-        _parse_aliases(aliases)
-
-    # Write compact parquet
-    from source_assurance import build_manifest, require_current, METADATA_KEY
-    manifest = build_manifest(sanc_csv, peps_csv if include_peps else None)
+    # Embed freshness manifest in parquet metadata for the parquet-based screening path.
+    from source_assurance import build_own_manifest, require_current, METADATA_KEY
+    manifest = build_own_manifest(OWN_PARQUET, include_peps)
     require_current(manifest, include_peps)
     table = pa.Table.from_pandas(df)
-    table = table.replace_schema_metadata({**(table.schema.metadata or {}), METADATA_KEY: json.dumps(manifest).encode()})
-    import tempfile
-    with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".parquet", delete=False) as temp:
-        temp_path = temp.name
+    table = table.replace_schema_metadata(
+        {**(table.schema.metadata or {}), METADATA_KEY: json.dumps(manifest).encode()}
+    )
+    with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".parquet", delete=False) as tmp:
+        tmp_path = tmp.name
     try:
-        pq.write_table(table, temp_path)
-        # Content-addressed snapshots preserve the exact screening data for replay.
-        archive_dir = os.path.join(DATA_DIR, 'watchlist_versions')
+        pq.write_table(table, tmp_path)
+        archive_dir = os.path.join(DATA_DIR, "watchlist_versions")
         os.makedirs(archive_dir, exist_ok=True)
         try:
-            os.link(temp_path, os.path.join(archive_dir, manifest['version'] + '.parquet'))
+            os.link(tmp_path, os.path.join(archive_dir, manifest["version"] + ".parquet"))
         except FileExistsError:
             pass
-        os.replace(temp_path, OSN_PARQUET)
+        os.replace(tmp_path, OWN_PARQUET)
     finally:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-    print(f"[OpenSanctions] Parquet saved -> {OSN_PARQUET}")
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    print(f"[Watchlists] Parquet saved -> {OWN_PARQUET}")
 
-    # clear cache
     clear_osn_cache()
 
 
@@ -741,6 +713,185 @@ async def sync_watchlist_entities_postgres(
         await conn.execute("INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=EXCLUDED.manifest", json.dumps(manifest))
 
     return {"sanctions": sanctions_count, "peps": peps_count}
+
+
+async def sync_own_watchlists_postgres(
+    conn,
+    *,
+    watchlists_parquet_path: Optional[str] = None,
+    include_peps: bool = True,
+    batch_size: int = 2_000,
+) -> Dict[str, int]:
+    """
+    Rebuild watchlist_entities from the self-scraped watchlists parquet.
+
+    Drop-in replacement for sync_watchlist_entities_postgres using our own
+    scraped data (UN, OFAC, UK, EU, Wikidata PEPs, CIA World Leaders) instead
+    of an OpenSanctions CSV.
+    """
+    from source_assurance import build_own_manifest, require_current
+
+    parquet_path = watchlists_parquet_path or OWN_PARQUET
+
+    exists = await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL")
+    if not exists:
+        raise ScreeningUnavailableError("Watchlist data is unavailable")
+
+    manifest = build_own_manifest(parquet_path, include_peps)
+    require_current(manifest, include_peps)
+
+    has_country_col = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'watchlist_entities'
+              AND column_name  = 'country'
+        )
+        """
+    )
+    if not has_country_col:
+        try:
+            await conn.execute("ALTER TABLE watchlist_entities ADD COLUMN IF NOT EXISTS country TEXT")
+            has_country_col = True
+        except Exception:
+            has_country_col = False
+
+    if has_country_col:
+        sql = """
+            INSERT INTO watchlist_entities (
+                source_type, entity_id, entity_schema, name, name_norm,
+                birth_date, country, dataset, regime, raw_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9, $10::jsonb)
+        """
+    else:
+        sql = """
+            INSERT INTO watchlist_entities (
+                source_type, entity_id, entity_schema, name, name_norm,
+                birth_date, dataset, regime, raw_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9::jsonb)
+        """
+
+    df = pd.read_parquet(parquet_path)
+    df = df.fillna("")
+    if not include_peps:
+        df = df[df["source_type"] != "peps"]
+
+    counts: Dict[str, int] = {}
+    batch: List[Tuple[Any, ...]] = []
+
+    async with conn.transaction():
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS watchlist_source_state "
+            "(singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), manifest jsonb NOT NULL)"
+        )
+        await conn.execute("TRUNCATE TABLE watchlist_entities")
+
+        for _, row in df.iterrows():
+            source_type = _safe_str(row.get("source_type")).strip() or "sanctions"
+            dataset = _safe_str(row.get("dataset")).strip()
+            name = _safe_str(row.get("name")).strip()
+            if not name:
+                continue
+            entity_schema = _safe_str(row.get("schema")).strip() or "Person"
+            name_norm = _normalize_text(name)
+            if not name_norm:
+                continue
+
+            _parse_aliases(row.get("aliases"))  # validate; aborts transaction on malformed input
+
+            birth_date = _parse_birth_date_for_db(_safe_str(row.get("birth_date")))
+            country = _normalize_country(_safe_str(row.get("countries")))
+            regime = (
+                _safe_str(row.get("program_ids")).split(";", 1)[0].strip()
+                or _safe_str(row.get("sanctions")).split(";", 1)[0].strip()
+                or dataset
+                or None
+            )
+            entity_id = _safe_str(row.get("id")).strip() or hashlib.sha1(
+                f"{source_type}|{name_norm}|{dataset}|{birth_date or ''}".encode("utf-8")
+            ).hexdigest()
+
+            raw_json = json.dumps(
+                {
+                    "aliases": _safe_str(row.get("aliases")),
+                    "birth_date": _safe_str(row.get("birth_date")),
+                    "positions": _safe_str(row.get("positions")),
+                    "program_ids": _safe_str(row.get("program_ids")),
+                    "sanctions": _safe_str(row.get("sanctions")),
+                    "countries": _safe_str(row.get("countries")),
+                    "dataset": dataset,
+                },
+                ensure_ascii=True,
+            )
+
+            if has_country_col:
+                batch.append((source_type, entity_id, entity_schema, name, name_norm,
+                               birth_date, country, dataset or None, regime, raw_json))
+            else:
+                batch.append((source_type, entity_id, entity_schema, name, name_norm,
+                               birth_date, dataset or None, regime, raw_json))
+
+            counts[source_type] = counts.get(source_type, 0) + 1
+
+            if len(batch) >= batch_size:
+                await conn.executemany(sql, batch)
+                batch.clear()
+
+        if batch:
+            await conn.executemany(sql, batch)
+            batch.clear()
+
+        sanctions_count = counts.get("sanctions", 0)
+        peps_count = counts.get("peps", 0)
+        if not sanctions_count or (include_peps and not peps_count):
+            raise ScreeningUnavailableError(
+                "Refresh did not provide all required datasets; existing watchlist retained."
+            )
+
+        await conn.execute(
+            "INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) "
+            "ON CONFLICT(singleton) DO UPDATE SET manifest=EXCLUDED.manifest",
+            json.dumps(manifest),
+        )
+
+    return counts
+
+
+def build_uk_sanctions_snapshot_from_parquet(
+    uk_parquet_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build a deterministic UK sanctions snapshot from the UK scraper parquet output.
+
+    Reads data/uk_sanctions.parquet (written by fetch_uk_sanctions.py) instead
+    of the OpenSanctions CSV, computing the same fingerprint structure used by
+    compute_uk_snapshot_delta and watchlist_uk_snapshot_entries.
+    """
+    if uk_parquet_path is None:
+        uk_parquet_path = os.path.join(DATA_DIR, "uk_sanctions.parquet")
+    if not uk_parquet_path or not os.path.exists(uk_parquet_path):
+        return {"uk_hash": "", "row_count": 0, "entries": []}
+
+    df = pd.read_parquet(uk_parquet_path)
+    df = df.fillna("")
+
+    entries: List[Dict[str, str]] = []
+    for _, row in df.iterrows():
+        entry = _build_uk_snapshot_entry(dict(row))
+        if entry is None:
+            continue
+        entries.append(entry)
+
+    entries.sort(key=lambda e: e["fingerprint"])
+    digest = hashlib.sha256()
+    for entry in entries:
+        digest.update(entry["fingerprint"].encode("utf-8"))
+        digest.update(b"\n")
+    return {"uk_hash": digest.hexdigest(), "row_count": len(entries), "entries": entries}
+
 
 # =============================================================================
 # Loading & caching

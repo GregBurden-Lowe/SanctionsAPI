@@ -102,8 +102,8 @@ from utils import (
     ScreeningUnavailableError,
     perform_postgres_watchlist_check,
     refresh_opensanctions_data,
-    sync_watchlist_entities_postgres,
-    build_uk_sanctions_snapshot,
+    sync_own_watchlists_postgres,
+    build_uk_sanctions_snapshot_from_parquet,
     compute_uk_snapshot_delta,
     derive_entity_key,
     derive_entity_key_variants,
@@ -2917,13 +2917,9 @@ async def _refresh_opensanctions_impl(body):
             pool = await screening_db.get_pool()
             if pool is None:
                 raise RuntimeError("DATABASE_URL is required for sync_postgres=true")
-            sanctions_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
-            peps_csv = os.path.join(DATA_DIR, "os_peps_latest.csv")
             async with pool.acquire() as conn:
-                postgres_rows = await sync_watchlist_entities_postgres(
+                postgres_rows = await sync_own_watchlists_postgres(
                     conn,
-                    sanctions_csv_path=sanctions_csv,
-                    peps_csv_path=peps_csv,
                     include_peps=body.include_peps,
                 )
             postgres_synced = True
@@ -2931,8 +2927,7 @@ async def _refresh_opensanctions_impl(body):
         # Delta-driven UK list monitoring and targeted re-screening.
         pool = await screening_db.get_pool()
         if pool is not None:
-            sanctions_csv = os.path.join(DATA_DIR, "os_sanctions_latest.csv")
-            uk_snapshot = build_uk_sanctions_snapshot(sanctions_csv)
+            uk_snapshot = build_uk_sanctions_snapshot_from_parquet()
             auto_delta_enabled = os.environ.get("UK_DELTA_RESCREEN_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
             async with pool.acquire() as conn:

@@ -9,7 +9,7 @@ METADATA_KEY = b'screening.source_manifest.v1'
 LIST_LABELS = {
     'UK': ('hm treasury', 'hmt', 'ofsi', 'uk financial', 'uk fcdo', 'uk sanctions list'),
     'UN': ('united nations', 'un security council'),
-    'EU': ('eu council', 'eu financial sanctions', 'european union'),
+    'EU': ('eu council', 'eu financial sanctions', 'european union', 'eu consolidated'),
     'OFAC': ('ofac',),
 }
 
@@ -87,3 +87,64 @@ def parquet_manifest(path=None):
         return decode((pq.read_schema(path or OSN_PARQUET).metadata or {}).get(METADATA_KEY))
     except (FileNotFoundError, OSError, ValueError):
         return {}
+
+
+def build_own_manifest(watchlists_parquet_path: str, include_peps: bool = True) -> dict:
+    """Build a source manifest from our self-scraped watchlists parquet file."""
+    import hashlib as _hl
+    import pandas as pd
+
+    try:
+        df = pd.read_parquet(watchlists_parquet_path, columns=["dataset", "source_type", "name"])
+    except Exception:
+        df = pd.DataFrame(columns=["dataset", "source_type", "name"])
+
+    df = df.fillna("")
+    df = df[df["name"].str.strip() != ""]
+
+    counts = {name: 0 for name in LIST_LABELS}
+    counts["PEP"] = 0
+    datasets: set = set()
+
+    pep_mask = df["source_type"] == "peps"
+    counts["PEP"] = int(pep_mask.sum())
+    for ds in df.loc[pep_mask, "dataset"].unique():
+        datasets.add(str(ds))
+
+    sanc_df = df[~pep_mask]
+    for label, grp in sanc_df.groupby("dataset", sort=False):
+        label = str(label)
+        datasets.add(label)
+        for list_name, label_patterns in LIST_LABELS.items():
+            if any(part in label.lower() for part in label_patterns):
+                counts[list_name] += len(grp)
+                break
+
+    file_hash = ""
+    try:
+        hasher = _hl.sha256()
+        with open(watchlists_parquet_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                hasher.update(chunk)
+        file_hash = hasher.hexdigest()
+    except OSError:
+        pass
+
+    hashes = {"all": file_hash}
+    version = _hl.sha256(
+        json.dumps({"files": hashes, "lists": LIST_LABELS, "format": 3}, sort_keys=True).encode()
+    ).hexdigest()
+
+    return {
+        "version": version,
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "source_published_at": None,
+        "publication_time_verified": False,
+        "file_hashes": hashes,
+        "list_counts": counts,
+        "datasets": sorted(datasets),
+        "scope": (
+            "Self-scraped sanctions lists (UN, OFAC, UK, EU) "
+            "and PEP collections (Wikidata, CIA World Leaders)."
+        ),
+    }
