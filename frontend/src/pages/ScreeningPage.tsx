@@ -3,7 +3,7 @@ import { CandidateEvidence } from '@/components/CandidateEvidence'
 import { useEffect, useState, useRef } from 'react'
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import type { IconType } from 'react-icons'
-import { BiCheckCircle, BiQuestionMark, BiXCircle } from 'react-icons/bi'
+import { BiCheckCircle, BiInfoCircle, BiMinus, BiQuestionMark, BiXCircle } from 'react-icons/bi'
 import {
   Button,
   Input,
@@ -23,16 +23,6 @@ import type { TopMatch } from '@/types/api'
 import { generateScreeningPdf } from '@/utils/exportScreeningPdf'
 import type { SearchDetails } from '@/utils/exportScreeningPdf'
 
-function getStatusDisplay(summary: OpCheckResponse['Check Summary']) {
-  const status = summary?.Status ?? 'Unknown'
-  const risk = (status + (summary?.Source ?? '')).toLowerCase()
-  if (risk.includes('cleared')) return { label: status.includes('False Positive') ? 'Manually resolved — false positive' : 'No potential match identified', semantic: 'success' as const }
-  if (risk.includes('fail sanction') || risk.includes('high risk'))
-    return { label: 'Potential sanctions match — review required', semantic: 'error' as const }
-  if (risk.includes('fail pep') || risk.includes('medium'))
-    return { label: 'Potential PEP match — review required', semantic: 'warning' as const }
-  return { label: status, semantic: 'info' as const }
-}
 
 function formatTopMatch(m: TopMatch): { name: string; score: number } {
   if (Array.isArray(m) && m.length >= 2) return { name: m[0], score: m[1] }
@@ -420,11 +410,10 @@ export function ScreeningResultPage() {
 
   return (
     <div className="px-[26px] pt-[22px] pb-[26px]">
-      <div className="max-w-[1600px] space-y-6">
-        <SectionHeader title="Screening result" />
-        {result.request_id && <p className="text-sm"><Link className="underline" to={`/history/${result.request_id}`}>Open permanent screening record</Link> · {result.reused ? 'Previous result reused' : 'New screening'}</p>}
-        <div className="flex justify-end">
-          <Button type="button" variant="ghost" onClick={() => navigate('/')}>
+      <div className="max-w-[1600px] space-y-5">
+        <div className="flex items-center justify-between gap-4">
+          <SectionHeader title="Screening result" />
+          <Button type="button" variant="ghost" size="sm" onClick={() => navigate('/')}>
             Run another check
           </Button>
         </div>
@@ -465,8 +454,8 @@ export function ScreeningResultPage() {
             </CardBody>
           </Card>
         )}
-        <SearchDetailsCard searchDetails={searchDetails} />
         <ResultCard result={result} searchDetails={searchDetails} />
+        <SearchDetailsCard searchDetails={searchDetails} />
       </div>
     </div>
   )
@@ -511,28 +500,39 @@ function parseSourceList(source: string | undefined): {
   return { list: items, hasUK, otherCount, summaryLines }
 }
 
-function getResultGuidance(result: OpCheckResponse): { heading: string; body: string; className: string } {
-  if (result['Check Summary']?.Status?.includes('False Positive')) {
-    return { heading: 'What this means', body: 'An analyst resolved this result as a false positive. Candidate evidence below records the original engine findings.', className: 'text-sm text-text-secondary leading-relaxed' }
+function getOutcome(result: OpCheckResponse): {
+  heading: string
+  detail: string
+  semantic: 'success' | 'error' | 'warning'
+} {
+  const status = result['Check Summary']?.Status ?? ''
+  if (status.includes('False Positive')) {
+    return {
+      heading: 'Cleared — discounted as false positive',
+      detail: 'An analyst resolved this as a false positive. Original engine findings are preserved below.',
+      semantic: 'warning',
+    }
   }
   if (result['Is Sanctioned']) {
     return {
-      heading: 'What this means',
-      body: 'A potential sanctions match was found. Review the candidate evidence and verify identity before recording a decision.',
-      className: 'text-sm text-text-primary font-medium leading-relaxed',
+      heading: 'Potential sanctions match — review required',
+      detail: 'Stop and escalate for enhanced due diligence before proceeding.',
+      semantic: 'error',
     }
   }
   if (result['Is PEP']) {
     return {
-      heading: 'What this means',
-      body: 'A potential PEP match was found. Verify identity, review the evidence and record the decision.',
-      className: 'text-sm text-text-secondary leading-relaxed',
+      heading: 'PEP indicator — enhanced due diligence required',
+      detail: 'Verify identity, review the candidate evidence below and record your decision.',
+      semantic: 'warning',
     }
   }
   return {
-    heading: 'What this means',
-    body: result['PEP Check']?.checked === false ? 'No potential sanctions match identified under the current rules. PEP screening was not performed.' : 'No potential sanctions or PEP match identified under the current rules. This is not proof of identity.',
-    className: 'text-sm text-text-secondary leading-relaxed',
+    heading: 'Cleared — no sanctions or PEP match',
+    detail: result['PEP Check']?.checked === false
+      ? 'No potential sanctions match identified. PEP screening was not performed.'
+      : 'No potential sanctions or PEP match under current rules. This is not proof of identity.',
+    semantic: 'success',
   }
 }
 
@@ -544,157 +544,103 @@ export function ResultCard({
   searchDetails: SearchDetails
 }) {
   const summary = result['Check Summary']
-  const { label: statusLabel, semantic } = getStatusDisplay(summary)
-  const borderAccent =
-    semantic === 'success'
-      ? 'border-l-semantic-success'
-      : semantic === 'error'
-        ? 'border-l-semantic-error'
-        : semantic === 'warning'
-          ? 'border-l-semantic-warning'
-          : 'border-l-semantic-info'
-
-  const hasTopMatches = (result['Top Matches']?.length ?? 0) > 0
-  const guidance = getResultGuidance(result)
-  const { list: sourceList, summaryLines: sourceSummaryLines } = parseSourceList(summary?.Source)
+  const outcome = getOutcome(result)
+  const { list: sourceList, hasUK, otherCount } = parseSourceList(summary?.Source)
   const [showSourcesModal, setShowSourcesModal] = useState(false)
   const [pdfError, setPdfError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
   const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch)
   const inputClassification = result['Input Classification']
+  const candidateSummary = result['Candidate Evidence Summary']
+  const potentialMatches = candidateSummary?.potential_matches ?? (result['Match Found'] ? 1 : 0)
+  const excluded = candidateSummary?.excluded ?? 0
 
-  const statusClasses =
-    semantic === 'success'
-      ? 'bg-semantic-success/15 text-semantic-success border-semantic-success/30'
-      : semantic === 'error'
-        ? 'bg-semantic-error/15 text-semantic-error border-semantic-error/30'
-        : semantic === 'warning'
-          ? 'bg-semantic-warning/15 text-semantic-warning border-semantic-warning/30'
-          : 'bg-semantic-info/15 text-semantic-info border-semantic-info/30'
+  // Outcome bar
+  const outcomeBar = {
+    success: { bar: 'bg-semantic-success/10 border-semantic-success/25', text: 'text-semantic-success', icon: 'bg-semantic-success' },
+    error:   { bar: 'bg-semantic-error/10 border-semantic-error/25',     text: 'text-semantic-error',   icon: 'bg-semantic-error'   },
+    warning: { bar: 'bg-semantic-warning/10 border-semantic-warning/25', text: 'text-semantic-warning', icon: 'bg-semantic-warning' },
+  }[outcome.semantic]
+  const OutcomeIcon = outcome.semantic === 'error' ? BiXCircle : outcome.semantic === 'warning' ? BiInfoCircle : BiCheckCircle
 
-  const verificationRows = [
-    {
-      title: 'Person check',
-      subtitle:
-        result['Entity Type Checks']?.Person?.status
-          ? `Person list result: ${result['Entity Type Checks']?.Person?.status}`
-          : 'Person list result unavailable',
-      badge:
-        result['Entity Type Checks']?.Person?.is_match === true
-          ? 'Match'
-          : result['Entity Type Checks']?.Person?.is_match === false
-            ? 'Clear'
-            : 'Unknown',
-      icon:
-        result['Entity Type Checks']?.Person?.is_match === true
-          ? BiXCircle
-          : result['Entity Type Checks']?.Person?.is_match === false
-            ? BiCheckCircle
-            : BiQuestionMark,
-      tone:
-        result['Entity Type Checks']?.Person?.is_match === true
-          ? 'warn'
-          : result['Entity Type Checks']?.Person?.is_match === false
-            ? 'ok'
-            : 'neutral',
-    },
-    {
-      title: 'Organisation check',
-      subtitle:
-        result['Entity Type Checks']?.Organization?.status
-          ? `Organisation list result: ${result['Entity Type Checks']?.Organization?.status}`
-          : 'Organisation list result unavailable',
-      badge:
-        result['Entity Type Checks']?.Organization?.is_match === true
-          ? 'Match'
-          : result['Entity Type Checks']?.Organization?.is_match === false
-            ? 'Clear'
-            : 'Unknown',
-      icon:
-        result['Entity Type Checks']?.Organization?.is_match === true
-          ? BiXCircle
-          : result['Entity Type Checks']?.Organization?.is_match === false
-            ? BiCheckCircle
-            : BiQuestionMark,
-      tone:
-        result['Entity Type Checks']?.Organization?.is_match === true
-          ? 'warn'
-          : result['Entity Type Checks']?.Organization?.is_match === false
-            ? 'ok'
-            : 'neutral',
-    },
-    {
-      title: 'PEP processing',
-      subtitle:
-        result['PEP Check']?.message
-          ? result['PEP Check']?.message
-          : result['PEP Check']?.checked === false ? 'PEP screening was not performed.' : 'PEP screening executed.',
-      badge:
-        result['PEP Check']?.checked === false
-          ? 'Skipped'
-          : 'Checked',
-      icon:
-        result['PEP Check']?.checked === false
-          ? BiQuestionMark
-          : BiCheckCircle,
-      tone:
-        result['PEP Check']?.checked === false
-          ? 'neutral'
-          : 'ok',
-    },
-    {
-      title: 'Input classification',
-      subtitle:
-        inputClassification?.likely_misclassified
-          ? `Submitted as ${inputClassification?.submitted_as ?? 'Unknown'}, but engine inference is ${inputClassification?.inferred_as ?? 'Unknown'}.`
-          : inputClassification?.signals?.[0] || 'No entity-type mismatch indicators detected.',
-      badge:
-        inputClassification?.likely_misclassified
-          ? 'Check type'
-          : inputClassification?.inferred_as ?? 'Aligned',
-      icon:
-        inputClassification?.likely_misclassified
-          ? BiQuestionMark
-          : BiCheckCircle,
-      tone:
-        inputClassification?.likely_misclassified
-          ? 'warn'
-          : 'ok',
-    },
+  // Check rows
+  type CheckTone = 'pass' | 'fail' | 'neutral' | 'info'
+  type CheckRow = { title: string; subtitle: string; badge: string; icon: IconType; tone: CheckTone }
+
+  const verificationRows: CheckRow[] = [
     {
       title: 'Sanctions status',
       subtitle: result['Is Sanctioned'] ? 'Potential sanctions match found' : result['Engine Result']?.['Is Sanctioned'] ? 'Engine match resolved by analyst' : 'No sanctions match detected',
-      badge: result['Is Sanctioned'] ? 'Review required' : 'Cleared',
+      badge: result['Is Sanctioned'] ? 'Match found' : 'Clear',
       icon: result['Is Sanctioned'] ? BiXCircle : BiCheckCircle,
-      tone: result['Is Sanctioned'] ? 'warn' : 'ok',
+      tone: result['Is Sanctioned'] ? 'fail' : 'pass',
     },
     {
       title: 'PEP status',
-      subtitle: result['PEP Check']?.checked === false ? 'PEP screening was not performed' : result['Is PEP'] ? 'Potential PEP indicator found' : result['Engine Result']?.['Is PEP'] ? 'Engine indicator resolved by analyst' : 'No PEP indicator found',
-      badge: result['PEP Check']?.checked === false ? 'Not checked' : result['Is PEP'] ? 'Review required' : result['Engine Result']?.['Is PEP'] ? 'Resolved' : 'No match',
-      icon: result['Is PEP'] ? BiQuestionMark : BiCheckCircle,
-      tone: result['Is PEP'] ? 'warn' : 'ok',
+      subtitle: result['PEP Check']?.checked === false ? 'PEP screening not performed' : result['Is PEP'] ? 'Potential PEP indicator found' : result['Engine Result']?.['Is PEP'] ? 'Engine indicator resolved by analyst' : 'No PEP indicator found',
+      badge: result['PEP Check']?.checked === false ? 'Skipped' : result['Is PEP'] ? 'Match found' : result['Engine Result']?.['Is PEP'] ? 'Resolved' : 'Clear',
+      icon: result['PEP Check']?.checked === false ? BiMinus : result['Is PEP'] ? BiXCircle : BiCheckCircle,
+      tone: result['PEP Check']?.checked === false ? 'neutral' : result['Is PEP'] ? 'fail' : 'pass',
+    },
+    {
+      title: 'Person list',
+      subtitle: result['Entity Type Checks']?.Person?.status ? `Person list: ${result['Entity Type Checks'].Person.status}` : 'Person list result unavailable',
+      badge: result['Entity Type Checks']?.Person?.is_match === true ? 'Match' : result['Entity Type Checks']?.Person?.is_match === false ? 'Clear' : 'N/A',
+      icon: result['Entity Type Checks']?.Person?.is_match === true ? BiXCircle : result['Entity Type Checks']?.Person?.is_match === false ? BiCheckCircle : BiMinus,
+      tone: result['Entity Type Checks']?.Person?.is_match === true ? 'fail' : result['Entity Type Checks']?.Person?.is_match === false ? 'pass' : 'neutral',
+    },
+    {
+      title: 'Organisation list',
+      subtitle: result['Entity Type Checks']?.Organization?.status ? `Organisation list: ${result['Entity Type Checks'].Organization.status}` : 'Organisation list result unavailable',
+      badge: result['Entity Type Checks']?.Organization?.is_match === true ? 'Match' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Clear' : 'N/A',
+      icon: result['Entity Type Checks']?.Organization?.is_match === true ? BiXCircle : result['Entity Type Checks']?.Organization?.is_match === false ? BiCheckCircle : BiMinus,
+      tone: result['Entity Type Checks']?.Organization?.is_match === true ? 'fail' : result['Entity Type Checks']?.Organization?.is_match === false ? 'pass' : 'neutral',
+    },
+    {
+      title: 'PEP processing',
+      subtitle: result['PEP Check']?.message ?? (result['PEP Check']?.checked === false ? 'PEP screening was not performed.' : 'PEP screening executed.'),
+      badge: result['PEP Check']?.checked === false ? 'Skipped' : 'Done',
+      icon: result['PEP Check']?.checked === false ? BiMinus : BiCheckCircle,
+      tone: result['PEP Check']?.checked === false ? 'neutral' : 'pass',
+    },
+    {
+      title: 'Entity type',
+      subtitle: inputClassification?.likely_misclassified
+        ? `Submitted as ${inputClassification.submitted_as ?? '—'}, engine infers ${inputClassification.inferred_as ?? '—'}.`
+        : inputClassification?.signals?.[0] ?? 'No entity-type mismatch detected.',
+      badge: inputClassification?.likely_misclassified ? 'Mismatch' : inputClassification?.inferred_as ?? formatEntityTypeLabel(searchDetails.entityType || 'Person'),
+      icon: inputClassification?.likely_misclassified ? BiQuestionMark : BiInfoCircle,
+      tone: inputClassification?.likely_misclassified ? 'neutral' : 'info',
     },
     {
       title: 'Name similarity',
-      subtitle: 'Matching score; identity is not confirmed',
-      badge: String(result.Score),
-      icon: BiQuestionMark,
-      tone: 'neutral',
+      subtitle: result['Match Found'] ? 'Similarity score — identity not confirmed' : 'No candidate reached the alert threshold',
+      badge: result['Match Found'] ? `${result.Score} / 100` : 'N/A',
+      icon: result['Match Found'] ? BiInfoCircle : BiMinus,
+      tone: result['Match Found'] ? 'info' : 'neutral',
     },
     {
-      title: 'Reported sources',
-      subtitle: 'Result source labels; not proof of complete list coverage',
-      badge: sourceList.length > 0 ? `${sourceList.length} source${sourceList.length > 1 ? 's' : ''}` : 'No sources',
-      icon: BiQuestionMark,
-      tone: 'neutral',
+      title: 'Source labels',
+      subtitle: 'Labels on matched records — not proof of complete list coverage',
+      badge: sourceList.length > 0 ? `${sourceList.length} label${sourceList.length !== 1 ? 's' : ''}` : 'None',
+      icon: sourceList.length > 0 ? BiInfoCircle : BiMinus,
+      tone: sourceList.length > 0 ? 'info' : 'neutral',
     },
-  ] as const satisfies ReadonlyArray<{
-    title: string
-    subtitle: string
-    badge: string
-    icon: IconType
-    tone: 'ok' | 'warn' | 'neutral'
-  }>
+  ]
+
+  const toneBadge = (tone: CheckTone) => ({
+    pass:    'bg-semantic-success/10 text-semantic-success border-semantic-success/25',
+    fail:    'bg-semantic-error/10 text-semantic-error border-semantic-error/25',
+    neutral: 'bg-surface text-text-muted border-border',
+    info:    'bg-semantic-info/10 text-semantic-info border-semantic-info/25',
+  }[tone])
+
+  const toneIcon = (tone: CheckTone) => ({
+    pass:    'text-semantic-success',
+    fail:    'text-semantic-error',
+    neutral: 'text-text-muted',
+    info:    'text-semantic-info',
+  }[tone])
 
   const handleDownloadPdf = async () => {
     setPdfError(null)
@@ -705,200 +651,172 @@ export function ResultCard({
     }
   }
 
+  const handleCopy = () => {
+    if (!result.entity_key) return
+    navigator.clipboard.writeText(result.entity_key).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+
+  // Result detail rows
+  const detailRows: Array<[string, string]> = [
+    ['Screened name', searchDetails.searchName || '—'],
+    ['Entity type', formatEntityTypeLabel(searchDetails.entityType || '—')],
+    ['Potential matches', String(potentialMatches)],
+    ['Excluded', String(excluded)],
+    ['UK-labelled source', hasUK ? 'Yes' : 'No'],
+    ['Other source labels', String(otherCount)],
+    ...(summary?.Date ? [['Checked at', summary.Date] as [string, string]] : []),
+  ]
+
   return (
-    <div className="space-y-6">
-      <Card className="bg-surface/90">
-        <CardBody className="space-y-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className={`pl-4 border-l-2 ${borderAccent}`}>
-              <p className="text-xs font-medium text-text-muted uppercase tracking-wide">
-                Screening result
-              </p>
-              <p className="text-3xl font-semibold leading-tight text-text-primary mt-1">
-                {statusLabel}
-              </p>
-              <p className="text-sm text-text-secondary mt-2">{guidance.body}</p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <span className={`inline-flex items-center rounded-lg border px-3 py-1 text-xs font-semibold ${statusClasses}`}>
-                {result['Risk Level']}
-              </span>
-              <span className="inline-flex items-center rounded-lg border border-border bg-app px-3 py-1 text-xs font-medium text-text-secondary">
-                {(result['Match Found'] || result['Engine Result']?.['Match Found']) ? `Name similarity ${result.Score}/100` : 'Identity confidence not assessed'}
-              </span>
-              <span className="inline-flex items-center rounded-lg border border-border bg-app px-3 py-1 text-xs font-medium text-text-secondary">
-                Score {result.Score}
-              </span>
-            </div>
+    <div className="space-y-4">
+      {/* Outcome bar */}
+      <div className={`flex flex-col gap-3 rounded-[13px] border px-5 py-4 sm:flex-row sm:items-center ${outcomeBar.bar}`}>
+        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${outcomeBar.icon}`}>
+          <OutcomeIcon className="h-5 w-5 text-white" aria-hidden />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className={`font-semibold text-[14px] leading-snug ${outcomeBar.text}`}>{outcome.heading}</p>
+          <p className={`text-xs mt-0.5 opacity-80 ${outcomeBar.text}`}>{outcome.detail}</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {result.request_id && (
+            <Link
+              to={`/history/${result.request_id}`}
+              className="text-xs text-text-secondary underline hover:text-text-primary"
+            >
+              {result.reused ? 'Reused record' : 'Permanent record'}
+            </Link>
+          )}
+          {sourceList.length > 0 && (
+            <Button type="button" variant="ghost" size="sm" onClick={() => setShowSourcesModal(true)}>
+              Sources
+            </Button>
+          )}
+          <Button type="button" variant="secondary" size="sm" onClick={handleDownloadPdf}>
+            Download PDF
+          </Button>
+        </div>
+      </div>
+
+      {pdfError && <p className="text-xs text-semantic-error" role="alert">{pdfError}</p>}
+
+      {/* Meta tiles */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {([
+          ['Risk level', result['Risk Level'] || '—'],
+          ['Match score', `${result.Score} / 100`],
+          ['Similarity band', result.Confidence || 'Not assessed'],
+          ['Checked at', summary?.Date ?? '—'],
+        ] as [string, string][]).map(([label, value]) => (
+          <div key={label} className="rounded-[13px] border border-border bg-surface p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1">{label}</p>
+            <p className="text-[13px] font-semibold text-text-primary leading-snug">{value}</p>
           </div>
-        </CardBody>
-      </Card>
+        ))}
+      </div>
 
       {result['Review Decision'] && <ReviewDecisionCard decision={result['Review Decision']} />}
-      {result['Engine Result'] && <p className="text-sm text-text-secondary">Original engine outcome: {result['Engine Result']['Check Summary']?.Status}. The candidate evidence and similarity scores below are unchanged.</p>}
-      <CandidateEvidence result={result} search={searchDetails} />
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-        <div className="xl:col-span-5 space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Decision summary</CardTitle>
-            </CardHeader>
-            <CardBody className="space-y-4 text-sm">
-              <dl className="space-y-3">
-                <div className="flex justify-between gap-4 border-b border-border pb-2">
-                  <dt className="text-text-muted">Risk level</dt>
-                  <dd className="text-text-primary font-medium">{result['Risk Level']}</dd>
-                </div>
-                <div className="flex justify-between gap-4 border-b border-border pb-2">
-                  <dt className="text-text-muted">Name similarity band</dt>
-                  <dd className="text-text-primary">{result.Confidence}</dd>
-                </div>
-                <div className="flex justify-between gap-4 border-b border-border pb-2">
-                  <dt className="text-text-muted">Score</dt>
-                  <dd className="text-text-primary">{result.Score}</dd>
-                </div>
-                <div className="flex justify-between gap-4">
-                  <dt className="text-text-muted">Source summary</dt>
-                  <dd className="text-right text-text-primary">{sourceSummaryLines.join(' · ')}</dd>
-                </div>
-              </dl>
-              {summary?.Date && (
-                <p className="text-xs text-text-muted pt-2 border-t border-border">
-                  <span className="font-medium">Checked at</span> {summary.Date}
-                </p>
-              )}
-              {result.entity_key && (
-                <p className="text-xs text-text-muted pt-2 border-t border-border flex items-center gap-2 flex-wrap">
-                  <span className="font-medium">Reference</span>
-                  <code className="text-text-primary font-mono text-xs bg-app px-1.5 py-0.5 rounded break-all">
-                    {result.entity_key}
-                  </code>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs"
-                    onClick={() => navigator.clipboard.writeText(result.entity_key!).then(() => {})}
-                  >
-                    Copy
-                  </Button>
-                </p>
-              )}
-            </CardBody>
-          </Card>
+      {result['Engine Result'] && (
+        <p className="text-xs text-text-muted px-1">
+          Original engine outcome before analyst review: <span className="text-text-secondary">{result['Engine Result']['Check Summary']?.Status ?? '—'}</span>
+        </p>
+      )}
 
-          {result['Match Found'] && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Potential matched subject</CardTitle>
-              </CardHeader>
-              <CardBody>
-                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-                  {result['Sanctions Name'] && (
-                    <div className="sm:col-span-2">
-                      <dt className="text-xs font-medium text-text-muted">Name</dt>
-                      <dd className="text-text-primary mt-0.5">{result['Sanctions Name']}</dd>
-                    </div>
-                  )}
+      <CandidateEvidence result={result} search={searchDetails} />
+
+      {/* Checks + detail */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Checks run</CardTitle>
+            <span className="ml-auto text-[11px] rounded-md border border-border bg-app px-2 py-0.5 text-text-muted">
+              {verificationRows.length}
+            </span>
+          </CardHeader>
+          <CardBody className="grid grid-cols-1 gap-2 sm:grid-cols-2 p-3">
+            {verificationRows.map((row) => (
+              <div
+                key={row.title}
+                className="flex items-start gap-2.5 rounded-lg border border-border bg-app/60 px-3 py-2.5"
+              >
+                <row.icon className={`mt-0.5 h-4 w-4 shrink-0 ${toneIcon(row.tone)}`} aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12px] font-semibold text-text-primary leading-snug">{row.title}</p>
+                  <p className="text-[11px] text-text-muted mt-0.5 leading-snug">{row.subtitle}</p>
+                </div>
+                <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${toneBadge(row.tone)}`}>
+                  {row.badge}
+                </span>
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+
+        <div className="space-y-4">
+          <Card>
+            <CardHeader><CardTitle>Result detail</CardTitle></CardHeader>
+            <CardBody className="p-0">
+              {detailRows.map(([label, value]) => (
+                <div key={label} className="flex items-baseline justify-between gap-4 border-b border-border px-5 py-2.5 last:border-0">
+                  <dt className="shrink-0 text-[12px] text-text-muted">{label}</dt>
+                  <dd className="text-right text-[12px] font-medium text-text-primary">{value}</dd>
+                </div>
+              ))}
+              {result['Match Found'] && result['Sanctions Name'] && (
+                <>
+                  <div className="flex items-baseline justify-between gap-4 border-b border-border px-5 py-2.5">
+                    <dt className="shrink-0 text-[12px] text-text-muted">Matched name</dt>
+                    <dd className="text-right text-[12px] font-medium text-text-primary">{result['Sanctions Name']}</dd>
+                  </div>
                   {result.Regime && (
-                    <div>
-                      <dt className="text-xs font-medium text-text-muted">Regime</dt>
-                      <dd className="text-text-secondary mt-0.5">{result.Regime}</dd>
+                    <div className="flex items-baseline justify-between gap-4 border-b border-border px-5 py-2.5">
+                      <dt className="shrink-0 text-[12px] text-text-muted">Regime</dt>
+                      <dd className="text-right text-[12px] font-medium text-text-primary">{result.Regime}</dd>
                     </div>
                   )}
                   {result['Birth Date'] && (
-                    <div>
-                      <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
-                      <dd className="text-text-secondary mt-0.5">{result['Birth Date']}</dd>
+                    <div className="flex items-baseline justify-between gap-4 px-5 py-2.5">
+                      <dt className="shrink-0 text-[12px] text-text-muted">Matched DOB</dt>
+                      <dd className="text-right text-[12px] font-medium text-text-primary">{result['Birth Date']}</dd>
                     </div>
                   )}
-                </dl>
-              </CardBody>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Actions</CardTitle>
-            </CardHeader>
-            <CardBody className="space-y-3">
-              <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="secondary" onClick={handleDownloadPdf}>
-                  Download PDF
-                </Button>
-                {sourceList.length > 0 && (
-                  <Button type="button" variant="ghost" onClick={() => setShowSourcesModal(true)}>
-                    View sources
-                  </Button>
-                )}
-              </div>
-              {pdfError && (
-                <p className="text-xs text-semantic-error" role="alert">
-                  {pdfError}
-                </p>
+                </>
               )}
             </CardBody>
           </Card>
-        </div>
 
-        <div className="xl:col-span-7 space-y-6">
-          <Card>
-            <CardHeader className="items-center">
-              <CardTitle>Verification board</CardTitle>
-              <span className="text-xs rounded-md border border-border bg-app px-2 py-1 text-text-secondary">
-                {verificationRows.length} checks
-              </span>
-            </CardHeader>
-            <CardBody className="space-y-3">
-              {verificationRows.map((row) => (
-                <div key={row.title} className="flex items-center justify-between gap-4 rounded-lg border border-border bg-app/70 px-3 py-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-text-primary truncate">{row.title}</p>
-                    <p className="text-xs text-text-secondary mt-0.5">{row.subtitle}</p>
-                  </div>
-                  <span
-                    className={`shrink-0 status-pill with-icon inline-flex items-center gap-1 ${
-                      row.tone === 'ok'
-                        ? 'bg-[rgba(34,197,94,0.1)] border-[rgba(34,197,94,0.24)] text-[#16a34a]'
-                        : row.tone === 'warn'
-                          ? row.badge.toLowerCase().includes('sanction')
-                            ? 'status-pill-sanction'
-                            : 'status-pill-pep'
-                          : 'bg-surface text-text-secondary border border-border'
-                    }`}
-                  >
-                    <row.icon className="h-4 w-4" aria-hidden />
-                    {row.badge}
-                  </span>
-                </div>
-              ))}
-            </CardBody>
-          </Card>
-
-          {hasTopMatches && (
+          {topMatches.length > 0 && (
             <Card>
-              <CardHeader>
-                <CardTitle>Name similarity suggestions</CardTitle>
-              </CardHeader>
-              <CardBody className="space-y-3">
-                <p className="text-xs text-text-secondary leading-relaxed">
-                  Similar names shown for investigator context. They do not change the decision outcome.
-                </p>
-                <div className="space-y-2">
-                  {topMatches.map((item, i) => (
-                    <div key={`${item.name}-${i}`} className="flex items-center justify-between gap-4 rounded-lg border border-border bg-app/70 px-3 py-2">
-                      <span className="text-sm text-text-primary">{item.name}</span>
-                      <span className="text-xs text-text-secondary rounded-md bg-surface border border-border px-2 py-1">
-                        Score {item.score}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+              <CardHeader><CardTitle>Name suggestions</CardTitle></CardHeader>
+              <CardBody className="p-0">
+                <p className="px-5 pt-3 pb-2 text-[11px] text-text-muted">Similar names for context — they do not change the outcome.</p>
+                {topMatches.map((item, i) => (
+                  <div key={`${item.name}-${i}`} className="flex items-center justify-between gap-4 border-t border-border px-5 py-2.5">
+                    <span className="text-[12px] text-text-primary">{item.name}</span>
+                    <span className="text-[11px] text-text-muted border border-border bg-app px-2 py-0.5 rounded-md">
+                      {item.score}
+                    </span>
+                  </div>
+                ))}
               </CardBody>
             </Card>
           )}
         </div>
       </div>
+
+      {/* Reference bar */}
+      {result.entity_key && (
+        <div className="flex items-center gap-3 rounded-[13px] border border-border bg-surface px-4 py-3">
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Reference</span>
+          <code className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">{result.entity_key}</code>
+          <Button type="button" variant="ghost" size="sm" onClick={handleCopy}>
+            {copied ? 'Copied' : 'Copy'}
+          </Button>
+        </div>
+      )}
 
       <Modal
         isOpen={showSourcesModal}
@@ -910,10 +828,10 @@ export function ResultCard({
           </Button>
         }
       >
-        <p className="text-text-muted text-xs mb-3">Sanction lists matched for this result. Read-only reference.</p>
-        <ul className="max-h-[60vh] overflow-y-auto space-y-2 text-text-secondary">
+        <p className="text-text-muted text-xs mb-3">Sanction list labels matched for this result.</p>
+        <ul className="max-h-[60vh] overflow-y-auto space-y-1 text-text-secondary">
           {sourceList.map((item, i) => (
-            <li key={i} className="py-1 border-b border-border last:border-0">
+            <li key={i} className="py-1.5 border-b border-border last:border-0 text-[13px]">
               {item}
             </li>
           ))}
