@@ -131,8 +131,12 @@ def build_own_manifest(watchlists_parquet_path: str, include_peps: bool = True) 
         pass
 
     hashes = {"all": file_hash}
+    # Version is derived from data content (counts + datasets), not the file hash.
+    # The file hash changes when parquet metadata is embedded after the initial write,
+    # which would otherwise cause a spurious version mismatch between the parquet and
+    # postgres manifests on every refresh.
     version = _hl.sha256(
-        json.dumps({"files": hashes, "lists": LIST_LABELS, "format": 3}, sort_keys=True).encode()
+        json.dumps({"list_counts": counts, "datasets": sorted(datasets), "format": 3}, sort_keys=True).encode()
     ).hexdigest()
 
     return {
