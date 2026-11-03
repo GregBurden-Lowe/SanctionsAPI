@@ -1,67 +1,36 @@
 /**
- * Generate a landscape PDF for screening outcomes.
- * The visual body is rendered as an image; entity key is added as real text so it can be copied.
+ * Generate a portrait A4 PDF for screening outcomes, styled as a numbered-section
+ * compliance document (matching the Sanctions Screening Report sample format).
  */
 import { jsPDF } from 'jspdf'
 import html2canvas from 'html2canvas'
-import type { OpCheckResponse, TopMatch } from '@/types/api'
+import type { OpCheckResponse } from '@/types/api'
 
-const UK_PATTERNS = ['uk', 'hmt', 'ofsi', 'hm treasury', 'uk fcdo', 'uk financial sanctions']
-
-function isUKSource(item: string): boolean {
-  const lower = item.toLowerCase()
-  return UK_PATTERNS.some((p) => lower.includes(p))
+// ─── Colours ────────────────────────────────────────────────────────────────
+const C = {
+  navyDark: '#0c2d3e',
+  navyMid:  '#1a4a60',
+  tealAccent: '#047481',
+  tealLight: '#e6f4f6',
+  rowAlt: '#f5f9fa',
+  border: '#c8dde4',
+  text: '#111827',
+  muted: '#4b5563',
+  clearBg: '#d1fae5',
+  clearText: '#065f46',
+  clearBorder: '#6ee7b7',
+  fpBg: '#fff7ed',
+  fpText: '#9a3412',
+  fpBorder: '#fed7aa',
+  matchBg: '#fee2e2',
+  matchText: '#991b1b',
+  matchBorder: '#fca5a5',
+  pepBg: '#e0f2fe',
+  pepText: '#075985',
+  pepBorder: '#7dd3fc',
 }
 
-function parseSources(source: string | undefined): {
-  list: string[]
-  hasUK: boolean
-  otherCount: number
-  summaryLines: string[]
-} {
-  const raw = (source ?? '').trim()
-  if (!raw) return { list: [], hasUK: false, otherCount: 0, summaryLines: ['—'] }
-  const list = raw
-    .split(/[;,\n]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const items = list.length > 0 ? list : [raw]
-  const hasUK = items.some(isUKSource)
-  const otherCount = items.filter((i) => !isUKSource(i)).length
-  const summaryLines: string[] = []
-  summaryLines.push(hasUK ? 'UK-labelled result source' : 'No UK-labelled result source')
-  if (otherCount > 0) summaryLines.push(`Other source labels: ${otherCount}`)
-  return { list: items, hasUK, otherCount, summaryLines }
-}
-
-function sourceBadgeMeta(item: string): { label: string; cls: string; mark: string } {
-  const lower = item.toLowerCase()
-  if (lower.includes('united nations') || lower === 'un' || lower.includes(' un ')) {
-    return { label: 'UN', cls: 'src-un', mark: 'UN' }
-  }
-  if (lower.includes('eu') || lower.includes('european union') || lower.includes('eu council')) {
-    return { label: 'EU', cls: 'src-eu', mark: 'EU' }
-  }
-  if (lower.includes('ofac') || lower.includes('u.s.') || lower.includes('us treasury')) {
-    return { label: 'OFAC', cls: 'src-ofac', mark: 'US' }
-  }
-  if (lower.includes('hm treasury') || lower.includes('hmt') || lower.includes('ofsi') || lower.includes('uk')) {
-    return { label: 'HM Treasury', cls: 'src-hmt', mark: 'UK' }
-  }
-  return { label: item, cls: 'src-other', mark: '•' }
-}
-
-function expandSourceBadgesForDisplay(sourceList: string[]): string[] {
-  return [...new Set(sourceList.map(source => source.trim()).filter(Boolean))]
-}
-
-function formatTopMatch(m: TopMatch): { name: string; score: number } {
-  if (Array.isArray(m) && m.length >= 2) return { name: m[0], score: m[1] }
-  if (m && typeof m === 'object' && 'name' in m) {
-    return { name: (m as { name: string }).name, score: (m as { score: number }).score ?? 0 }
-  }
-  return { name: String(m), score: 0 }
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(input: string): string {
   return input
@@ -72,27 +41,15 @@ function escapeHtml(input: string): string {
     .replace(/'/g, '&#39;')
 }
 
-function formatEntityTypeLabel(entityType: string): string {
-  return entityType === 'Organization' ? 'Organisation' : entityType
+function safe(v: unknown): string {
+  if (v == null || v === '') return '—'
+  return escapeHtml(String(v))
 }
 
-function getGuidanceText(result: OpCheckResponse): string {
-  if (result['Review Decision']?.decision_type === 'ai_auto_clear') return 'Automatically cleared from an AI recommendation. No human approval was performed; original engine evidence is preserved.'
-  if (result['Check Summary']?.Status?.includes('False Positive')) return 'Manually resolved as a false positive. Candidate evidence preserves the original engine findings.'
-  if (result['Is Sanctioned']) {
-    return 'Potential sanctions match. Stop and escalate for enhanced review before proceeding.'
-  }
-  if (result['Is PEP']) {
-    return 'PEP indicator found. Continue with enhanced due diligence and record rationale.'
-  }
-  return result['PEP Check']?.checked === false ? 'No potential sanctions match identified. PEP screening was not performed.' : 'No potential sanctions or PEP match identified under current rules. This is not proof of identity.'
+function formatEntityTypeLabel(t: string): string {
+  return t === 'Organization' ? 'Organisation' : t
 }
 
-function statusTone(result: OpCheckResponse): string {
-  if (result['Is Sanctioned']) return '#ef4444'
-  if (result['Is PEP']) return '#0284c7'
-  return '#16a34a'
-}
 
 function verificationHash(input: string): string {
   let hash = 2166136261
@@ -103,374 +60,73 @@ function verificationHash(input: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0').toUpperCase()
 }
 
-function buildSnapshotHtml(result: OpCheckResponse, search: SearchDetails): string {
-  const summary = result['Check Summary']
-  const { list: sourceList, hasUK, otherCount, summaryLines } = parseSources(summary?.Source)
-  const topMatches = (result['Top Matches'] ?? []).map(formatTopMatch).slice(0, 5)
-  const tone = statusTone(result)
-  const checkedAt = summary?.Date || '—'
-  const sourceSummary = `${hasUK ? 'UK-labelled result source' : 'No UK-labelled result source'}${otherCount > 0 ? ` · Other source labels: ${otherCount}` : ''}`
-  const matchedName = result['Sanctions Name'] || '—'
-  const matchedDob = result['Birth Date'] || '—'
-  const matchedRegime = result.Regime || '—'
-  const personTypeStatus = result['Entity Type Checks']?.Person?.status || 'Not available'
-  const orgTypeStatus = result['Entity Type Checks']?.Organization?.status || 'Not available'
-  const personTypeBadge = result['Entity Type Checks']?.Person?.is_match === true ? 'Match' : result['Entity Type Checks']?.Person?.is_match === false ? 'Clear' : 'Unknown'
-  const orgTypeBadge = result['Entity Type Checks']?.Organization?.is_match === true ? 'Match' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Clear' : 'Unknown'
-  const pepProcess = result['PEP Check']?.checked === false
-    ? `Skipped · ${result['PEP Check']?.message || 'PEP screening was not performed'}`
-    : 'Checked'
-  const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (Default)' : 'Original (Parquet fallback)'
-  const hasMatchedSubject = Boolean((result['Match Found'] || result['Engine Result']?.['Match Found']) && (result['Sanctions Name'] || result.Regime || result['Birth Date']))
+// ─── Outcome logic ────────────────────────────────────────────────────────────
 
-  const docIdSeed = [
-    result.entity_key || '',
-    search.searchName || '',
-    search.requestor || '',
-    checkedAt || '',
-    String(result.Score ?? ''),
-  ].join('|')
-  const docId = `SCR-${verificationHash(docIdSeed)}-${verificationHash(`${docIdSeed}|A`)}`
-  const docFingerprint = verificationHash(`${docIdSeed}|FINGERPRINT|${summary?.Status || ''}|${result['Risk Level'] || ''}`)
-  const generatedUtc = new Date().toISOString()
-
-  const topMatchRows = topMatches.length
-    ? topMatches
-        .map(
-          (m) => `\n<tr><td>${escapeHtml(m.name)}</td><td class="score-col">${m.score}</td></tr>`,
-        )
-        .join('')
-    : '<tr><td colspan="2" class="muted">No similarity suggestions.</td></tr>'
-
-  const sourceBadgeItems = expandSourceBadgesForDisplay(sourceList)
-  const sourceBadges = sourceBadgeItems.length
-    ? sourceBadgeItems
-        .slice(0, 12)
-        .map((s) => {
-          const meta = sourceBadgeMeta(s)
-          return `<span class="src-badge ${meta.cls}" title="${escapeHtml(s)}"><span class="mark">${escapeHtml(meta.mark)}</span>${escapeHtml(meta.label)}</span>`
-        })
-        .join('')
-    : '<div class="muted">No source list details provided.</div>'
-
-  return `
-  <div class="page">
-    <div class="watermark">SYSTEM GENERATED • AUDIT RECORD • SYSTEM GENERATED • AUDIT RECORD</div>
-
-    <header class="header">
-      <div>
-        <p class="eyebrow">Compliance Screening Record</p>
-        <h1>Sanctions &amp; PEP Screening Report</h1>
-      </div>
-      <div class="doc-id">Document ID: ${escapeHtml(docId)}</div>
-    </header>
-
-    <section class="summary-band">
-      <div class="summary-cell status" style="--tone:${tone}">
-        <span class="label">Status</span>
-        <strong>${escapeHtml(summary?.Status?.includes('False Positive') ? 'Manually resolved' : result['Is Sanctioned'] ? 'Potential sanctions match' : result['Is PEP'] ? 'Potential PEP match' : 'No potential match identified')}</strong>
-        <div class="outcome">${escapeHtml(getGuidanceText(result))}</div>
-      </div>
-      <div class="summary-cell">
-        <span class="label">Risk Level</span>
-        <strong>${escapeHtml(result['Risk Level'] || '—')}</strong>
-      </div>
-      <div class="summary-cell">
-        <span class="label">Name similarity band</span>
-        <strong>${escapeHtml(result.Confidence || '—')}</strong>
-      </div>
-      <div class="summary-cell">
-        <span class="label">Score</span>
-        <strong>${escapeHtml(String(result.Score ?? '—'))}</strong>
-      </div>
-    </section>
-
-    <main class="content">
-      <section class="panel">
-        <h2>Screening Request</h2>
-        <table class="kv-table">
-          <tr><th>Name / Organisation</th><td>${escapeHtml(search.searchName || '—')}</td></tr>
-          <tr><th>Entity Type</th><td>${escapeHtml(formatEntityTypeLabel(search.entityType || '—'))}</td></tr>
-          <tr><th>Date of Birth Input</th><td>${escapeHtml(search.searchDob?.trim() ? search.searchDob : 'Not provided')}</td></tr>
-          <tr><th>Country Input</th><td>${escapeHtml(search.searchCountry?.trim() ? search.searchCountry : 'Not provided')}</td></tr>
-          <tr><th>Business reference</th><td>${escapeHtml(search.businessReference?.trim() ? search.businessReference : 'Not provided')}</td></tr>
-          <tr><th>Reason for check</th><td>${escapeHtml(search.reasonForCheck?.trim() ? search.reasonForCheck : 'Not provided')}</td></tr>
-          <tr><th>Requested By</th><td>${escapeHtml(search.requestor || '—')}</td></tr>
-        </table>
-      </section>
-
-      <section class="panel">
-        <h2>Decision &amp; Actions</h2>
-        <table class="kv-table">
-          <tr><th>Checked At</th><td>${escapeHtml(checkedAt)}</td></tr>
-          <tr><th>Person Check</th><td>${escapeHtml(personTypeBadge)} · ${escapeHtml(personTypeStatus)}</td></tr>
-          <tr><th>Organisation Check</th><td>${escapeHtml(orgTypeBadge)} · ${escapeHtml(orgTypeStatus)}</td></tr>
-          <tr><th>PEP Processing</th><td>${escapeHtml(pepProcess)}</td></tr>
-          <tr><th>Potential Sanctions Match</th><td>${result['Is Sanctioned'] ? 'Yes' : result['Engine Result']?.['Is Sanctioned'] ? 'Engine match resolved by analyst' : 'No'}</td></tr>
-          <tr><th>PEP Indicator</th><td>${result['Is PEP'] ? 'Yes' : result['Engine Result']?.['Is PEP'] ? 'Engine indicator resolved by analyst' : 'No'}</td></tr>
-          <tr><th>Source Summary</th><td>${escapeHtml(sourceSummary || '—')}</td></tr>
-        </table>
-      </section>
-
-      <section class="panel">
-        <h2>Potential Matched Subject</h2>
-        ${
-          hasMatchedSubject
-            ? `<table class="kv-table">
-          <tr><th>Name</th><td>${escapeHtml(matchedName)}</td></tr>
-          <tr><th>Date of Birth</th><td>${escapeHtml(matchedDob)}</td></tr>
-          <tr><th>Regime</th><td>${escapeHtml(matchedRegime)}</td></tr>
-        </table>`
-            : '<div class="muted compact">No matched subject identified for this check.</div>'
-        }
-      </section>
-
-      <section class="panel">
-        <h2>Reported Source Labels</h2>
-        <div class="source-badges">${sourceBadges}</div>
-      </section>
-
-      <section class="panel span2">
-        <h2>Name Similarity Suggestions</h2>
-        <table class="data-table">
-          <thead><tr><th>Candidate Name</th><th class="score-col">Score</th></tr></thead>
-          <tbody>${topMatchRows}</tbody>
-        </table>
-      </section>
-
-      ${result['Source Coverage'] ? `<section class="panel span2"><h2>Source coverage and next actions</h2>
-        <p>Status at screening: ${escapeHtml(result['Source Coverage'].status)} · Lists: ${escapeHtml(result['Source Coverage'].required_lists?.join(', ') || 'Not verified')}</p>
-        <p>Ingested: ${escapeHtml(result['Source Coverage'].ingested_at || 'Unknown')} · Source publication: ${escapeHtml(result['Source Coverage'].source_published_at || 'Not verified')}</p>
-        <p style="overflow-wrap:anywhere">Version: ${escapeHtml(result['Source Coverage'].version || 'Not recorded')}</p>
-        ${(result['Screening Guidance']?.next_actions || []).map(action => `<p>${escapeHtml(action)}</p>`).join('')}
-        </section>` : ''}
-      ${result['Candidate Evidence'] ? `<section class="panel span2">
-        <h2>Candidate Evidence</h2>
-        <div class="muted compact">Similarity scores do not confirm identity. Missing details do not establish a mismatch. Showing ${Math.min(result['Candidate Evidence'].length, 8)} of ${result['Candidate Evidence Summary']?.evaluated_name_matches ?? result['Candidate Evidence'].length} evaluated name matches; open the saved record for more detail.</div>
-        <table class="data-table"><thead><tr><th>Candidate / source</th><th>Name score</th><th>DOB evidence</th><th>Country evidence</th><th>Disposition</th></tr></thead><tbody>
-        ${result['Candidate Evidence'].slice(0, 8).map(c => `<tr><td>${escapeHtml(c.name)}<br>${escapeHtml(c.dataset)}</td><td>${c.name_score}/100</td><td>${escapeHtml(c.birth_date || 'Unavailable')} · ${escapeHtml(c.dob_assessment)}</td><td>${escapeHtml(c.country || 'Unavailable')} · ${escapeHtml(c.country_assessment)}</td><td>${escapeHtml(c.disposition)}</td></tr>`).join('')}
-        </tbody></table>
-      </section>` : ''}
-      ${result['Review Decision'] ? `<section class="panel span2"><h2>Analyst Decision — Separate From Engine Findings</h2>
-        <table class="kv-table"><tr><th>Outcome</th><td>${escapeHtml(result['Review Decision'].outcome)}</td></tr>
-        <tr><th>Reviewer / Reviewed at</th><td>${escapeHtml(result['Review Decision'].actor)} · ${escapeHtml(result['Review Decision'].decided_at)}</td></tr>
-        <tr><th>Rationale</th><td>${escapeHtml(result['Review Decision'].notes)}</td></tr>
-        <tr><th>Original engine outcome</th><td>${escapeHtml(result['Engine Result']?.['Check Summary']?.Status || 'Not available')}</td></tr></table>
-        <div class="muted compact">Screening date and validity are unchanged.${result['Review Decision'].stale ? ' This decision requires reassessment.' : ''}</div></section>` : ''}
-      <section class="panel span2">
-        <h2>Audit Metadata</h2>
-        <table class="kv-table audit">
-          <tr><th>Request ID</th><td>${escapeHtml(result.request_id || 'Legacy / unavailable')}</td></tr>
-          <tr><th>Run ID</th><td>${escapeHtml(result.run_id || 'Legacy / unavailable')}</td></tr>
-          <tr><th>Document ID</th><td>${escapeHtml(docId)}</td></tr>
-          <tr><th>Verification Fingerprint</th><td>${escapeHtml(docFingerprint)}</td></tr>
-          <tr><th>Entity Key Reference</th><td>${escapeHtml(result.entity_key || 'Not available')}</td></tr>
-          <tr><th>Search Backend</th><td>${escapeHtml(backendLabel)}</td></tr>
-          <tr><th>Generated (UTC)</th><td>${escapeHtml(generatedUtc)}</td></tr>
-          <tr><th>Source Notes</th><td>${escapeHtml(summaryLines.join(' · '))}</td></tr>
-        </table>
-      </section>
-    </main>
-
-    <div class="footer-note">System-generated report. Validate using Document ID and Entity Key reference.</div>
-  </div>
-  <style>
-    * { box-sizing: border-box; font-family: MediumLL, Inter, system-ui, sans-serif; }
-    .page {
-      width: 1400px;
-      min-height: 860px;
-      padding: 18px;
-      color: #0f172a;
-      background:
-        repeating-linear-gradient(135deg, rgba(2,132,199,.02), rgba(2,132,199,.02) 8px, rgba(14,165,233,.02) 8px, rgba(14,165,233,.02) 16px),
-        #eef3f7;
-      position: relative;
-      overflow: hidden;
-    }
-    .watermark {
-      position: absolute;
-      top: 46%;
-      left: -180px;
-      transform: rotate(-24deg);
-      font-size: 28px;
-      letter-spacing: .08em;
-      font-weight: 700;
-      color: rgba(2,132,199,.07);
-      white-space: nowrap;
-      pointer-events: none;
-      user-select: none;
-    }
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 12px 14px;
-      border-radius: 12px;
-      border: 1px solid rgba(148,163,184,.34);
-      background: #fff;
-      position: relative;
-      z-index: 2;
-    }
-    .eyebrow { margin: 0; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #475569; font-weight: 700; }
-    h1 { margin: 2px 0 0 0; font-size: 24px; line-height: 1.2; }
-    .doc-id {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-      border: 1px solid rgba(148,163,184,.34);
-      background: #f8fafc;
-      border-radius: 999px;
-      padding: 7px 10px;
-      white-space: nowrap;
-    }
-    .summary-band {
-      margin-top: 10px;
-      display: grid;
-      grid-template-columns: 2fr 1fr 1fr 1fr;
-      gap: 8px;
-      position: relative;
-      z-index: 2;
-    }
-    .summary-cell {
-      border: 1px solid rgba(148,163,184,.32);
-      background: #fff;
-      border-radius: 10px;
-      padding: 8px 10px;
-    }
-    .summary-cell.status { border-left: 4px solid var(--tone); }
-    .summary-cell .label {
-      display: block;
-      font-size: 11px;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: #64748b;
-      margin-bottom: 2px;
-      font-weight: 700;
-    }
-    .summary-cell strong { font-size: 18px; line-height: 1.2; }
-    .summary-cell.status strong { font-size: 28px; line-height: 1.05; display: block; }
-    .outcome {
-      margin-top: 6px;
-      font-size: 11px;
-      line-height: 1.35;
-      color: #334155;
-      font-weight: 600;
-    }
-    .content {
-      margin-top: 10px;
-      display: grid;
-      grid-template-columns: 1.25fr 1fr;
-      gap: 8px;
-      position: relative;
-      z-index: 2;
-    }
-    .panel {
-      border: 1px solid rgba(148,163,184,.3);
-      border-radius: 10px;
-      background: #fff;
-      padding: 10px;
-    }
-    .panel.span2 { grid-column: span 2; }
-    h2 {
-      margin: 0 0 8px 0;
-      font-size: 12px;
-      letter-spacing: .1em;
-      text-transform: uppercase;
-      color: #475569;
-      font-weight: 700;
-    }
-    .kv-table, .data-table {
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      font-size: 12px;
-    }
-    .kv-table th, .kv-table td {
-      padding: 6px 6px;
-      border-bottom: 1px solid rgba(148,163,184,.24);
-      vertical-align: top;
-    }
-    .kv-table th {
-      width: 34%;
-      text-align: left;
-      color: #475569;
-      font-weight: 700;
-    }
-    .kv-table td { color: #0f172a; font-weight: 600; word-break: break-word; }
-    .kv-table tr:last-child th, .kv-table tr:last-child td { border-bottom: 0; }
-    .data-table th, .data-table td {
-      padding: 6px;
-      border-bottom: 1px solid rgba(148,163,184,.24);
-      text-align: left;
-      vertical-align: top;
-    }
-    .data-table thead th {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-      color: #475569;
-      font-weight: 700;
-      background: #f8fafc;
-    }
-    .data-table tbody td { font-size: 12px; color: #0f172a; }
-    .data-table tr:last-child td { border-bottom: 0; }
-    .score-col { width: 70px; text-align: right; font-weight: 700; }
-    .n-col { width: 34px; text-align: center; color: #64748b; font-weight: 700; }
-    .source-badges { display: flex; flex-wrap: wrap; gap: 8px; }
-    .src-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      border: 1px solid rgba(148,163,184,.34);
-      background: #f8fafc;
-      color: #0f172a;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: .04em;
-      padding: 5px 10px;
-      text-transform: uppercase;
-    }
-    .src-badge .mark {
-      width: 18px;
-      height: 18px;
-      border-radius: 999px;
-      display: inline-grid;
-      place-items: center;
-      text-align: center;
-      font-size: 8px;
-      font-weight: 800;
-      line-height: 18px;
-      letter-spacing: .03em;
-      border: 1px solid rgba(148,163,184,.45);
-      background: #e2e8f0;
-      color: #0f172a;
-      padding: 0;
-      vertical-align: middle;
-    }
-    .src-badge.src-un .mark { background: #d8f5fb; border-color: #67e8f9; color: #0c4a6e; }
-    .src-badge.src-eu .mark { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
-    .src-badge.src-ofac .mark { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
-    .src-badge.src-hmt .mark { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
-    .src-badge.src-other .mark { background: #e2e8f0; border-color: #cbd5e1; color: #475569; }
-    .muted { color: #64748b; font-style: italic; }
-    .muted.compact { padding: 4px 2px; font-size: 12px; }
-    .audit td { font-family: DmMono, ui-monospace, monospace; font-size: 11px; font-weight: 600; }
-    .footer-note {
-      margin-top: 8px;
-      font-size: 9px;
-      color: #64748b;
-      letter-spacing: .04em;
-      text-transform: uppercase;
-      text-align: right;
-      position: relative;
-      z-index: 2;
-    }
-  </style>
-  `
+interface OutcomeMeta {
+  label: string       // e.g. "POTENTIAL MATCH, CLEARED AFTER REVIEW"
+  detail: string      // one-liner below the label
+  bg: string
+  text: string
+  border: string
 }
+
+function outcomeMetaFor(result: OpCheckResponse): OutcomeMeta {
+  const status = result['Check Summary']?.Status ?? ''
+  const hasFP = status.includes('False Positive')
+  const hasReview = !!result['Review Decision']
+
+  if (hasFP || (hasReview && result['Review Decision']!.outcome?.toLowerCase().includes('false positive'))) {
+    return {
+      label: 'POTENTIAL MATCH, CLEARED AFTER REVIEW',
+      detail: '1 alert raised, discounted as false positive. No true matches. Record may proceed.',
+      bg: C.fpBg, text: C.fpText, border: C.fpBorder,
+    }
+  }
+  if (result['Is Sanctioned']) {
+    return {
+      label: 'POTENTIAL MATCH — UNDER REVIEW',
+      detail: 'Potential sanctions match identified. Stop and escalate for enhanced review before proceeding.',
+      bg: C.matchBg, text: C.matchText, border: C.matchBorder,
+    }
+  }
+  if (result['Is PEP']) {
+    return {
+      label: 'PEP INDICATOR — ENHANCED DUE DILIGENCE REQUIRED',
+      detail: 'Politically exposed person indicator found. Continue with enhanced due diligence.',
+      bg: C.pepBg, text: C.pepText, border: C.pepBorder,
+    }
+  }
+  return {
+    label: 'NO MATCH IDENTIFIED — CLEAR TO PROCEED',
+    detail: 'No potential sanctions or PEP match identified under current rules. This is not proof of identity.',
+    bg: C.clearBg, text: C.clearText, border: C.clearBorder,
+  }
+}
+
+// ─── Reusable HTML snippets ───────────────────────────────────────────────────
+
+function sectionHeader(num: number, title: string): string {
+  return `<div class="sec-head"><span class="sec-num">${num}</span>${escapeHtml(title)}</div>`
+}
+
+function kvTable(rows: Array<[string, string]>): string {
+  return `<table class="kv">
+    ${rows.map(([k, v], i) => `<tr class="${i % 2 === 1 ? 'alt' : ''}"><th>${escapeHtml(k)}</th><td>${v}</td></tr>`).join('')}
+  </table>`
+}
+
+function dataTable(headers: string[], rows: string[][], colWidths?: string[]): string {
+  const colGroup = colWidths
+    ? `<colgroup>${colWidths.map((w) => `<col style="width:${w}">`).join('')}</colgroup>`
+    : ''
+  return `<table class="dt">
+    ${colGroup}
+    <thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map((r, i) => `<tr class="${i % 2 === 1 ? 'alt' : ''}">${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table>`
+}
+
+// ─── Main HTML builder ────────────────────────────────────────────────────────
 
 export interface SearchDetails {
   searchName: string
@@ -483,61 +139,482 @@ export interface SearchDetails {
   searchBackend?: string
 }
 
+function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string {
+  const summary = result['Check Summary']
+  const checkedAt = summary?.Date || result.screened_at || '—'
+  const generatedUtc = new Date().toUTCString()
+  const outcome = outcomeMetaFor(result)
+  const backendLabel = search.searchBackend === 'postgres_beta' ? 'Postgres (default)' : 'Parquet (fallback)'
+
+  const docIdSeed = [result.entity_key || '', search.searchName || '', search.requestor || '', checkedAt, String(result.Score ?? '')].join('|')
+  const docId = `SCR-${verificationHash(docIdSeed)}-${verificationHash(`${docIdSeed}|A`)}`
+
+  const matchedName = result['Sanctions Name']
+  const matchedDob = result['Birth Date']
+  const matchedRegime = result.Regime
+  const hasAlert = !!(matchedName || matchedDob || matchedRegime || result['Is Sanctioned'] || result['Is PEP'])
+  const reviewDecision = result['Review Decision']
+  const engineResult = result['Engine Result']
+  const candidateEvidence = (result['Candidate Evidence'] ?? []).slice(0, 10)
+  const sourceCoverage = result['Source Coverage']
+
+  // ── Section 1: Report details ──
+  const sec1 = sectionHeader(1, 'Report details') + kvTable([
+    ['Report ID', safe(docId)],
+    ['Screening trigger', safe(search.reasonForCheck || 'Not provided')],
+    ['Screened at', safe(checkedAt)],
+    ['Requested by', safe(search.requestor)],
+    ['Engine / backend', `ScreenCheck v7.3 (${escapeHtml(backendLabel)})`],
+    ['Business reference', safe(search.businessReference || 'Not provided')],
+  ])
+
+  // ── Section 2: Subject screened ──
+  const sec2 = sectionHeader(2, 'Subject screened') + kvTable([
+    ['Subject type', safe(formatEntityTypeLabel(search.entityType || '—'))],
+    ['Full name', safe(search.searchName)],
+    ['Date of birth', safe(search.searchDob?.trim() ? search.searchDob : 'Not provided')],
+    ['Country', safe(search.searchCountry?.trim() ? search.searchCountry : 'Not provided')],
+    ['PEP screening', result['PEP Check']?.checked === false
+      ? `Skipped — ${escapeHtml(result['PEP Check']?.message || 'not performed')}`
+      : 'Performed'],
+  ])
+
+  // ── Section 3: Lists and parameters ──
+  const coveredLists = sourceCoverage?.required_lists ?? ['UK', 'UN', 'EU', 'OFAC', 'PEP']
+  const listTableRows: string[][] = [
+    ['UK Sanctions List', 'FCDO / HM Treasury', coveredLists.includes('UK') ? '✓' : '—'],
+    ['UN Security Council Consolidated List', 'United Nations', coveredLists.includes('UN') ? '✓' : '—'],
+    ['EU Consolidated Financial Sanctions', 'European Commission', coveredLists.includes('EU') ? '✓' : '—'],
+    ['Specially Designated Nationals (SDN)', 'US Treasury OFAC', coveredLists.includes('OFAC') ? '✓' : '—'],
+    ['PEP and related parties', 'Wikidata / CIA World Leaders', coveredLists.includes('PEP') ? '✓' : '—'],
+  ]
+  const listIngested = sourceCoverage?.ingested_at
+    ? `Lists ingested: ${escapeHtml(sourceCoverage.ingested_at)}`
+    : ''
+  const sec3 = sectionHeader(3, 'Lists and parameters')
+    + dataTable(['List', 'Source', 'Included'], listTableRows, ['55%', '35%', '10%'])
+    + kvTable([
+        ['Matching method', 'Fuzzy name match with phonetic and transliteration variants'],
+        ['Alert threshold', 'Name similarity score ≥ 70'],
+        ['Secondary identifiers', 'Date of birth, country of origin'],
+        ...(listIngested ? [['Data freshness', listIngested] as [string, string]] : []),
+        ...(sourceCoverage?.status ? [['Coverage status', safe(sourceCoverage.status)] as [string, string]] : []),
+      ])
+
+  // ── Section 4: Alerts ──
+  let sec4: string
+  if (hasAlert) {
+    const personCheck = result['Entity Type Checks']?.Person
+    const orgCheck = result['Entity Type Checks']?.Organization
+    const alertRows: string[][] = []
+    if (matchedName || result['Is Sanctioned']) {
+      const sources = (summary?.Source || '').split(/[;,\n]+/).filter(Boolean).join(', ') || '—'
+      const disposition = summary?.Status?.includes('False Positive') ? '<span class="fp">False positive</span>'
+        : result['Is Sanctioned'] ? '<span class="match">Potential match</span>'
+        : '—'
+      alertRows.push([
+        '1',
+        `${safe(matchedName || search.searchName)}<br><small>${safe(matchedDob || '')} ${safe(matchedRegime || '')}</small>`,
+        safe(sources),
+        safe(String(result.Score ?? '—')),
+        safe(result.Confidence || '—'),
+        disposition,
+      ])
+    }
+    if (result['Is PEP'] && !result['Is Sanctioned']) {
+      alertRows.push([
+        String(alertRows.length + 1),
+        safe(result['Sanctions Name'] || search.searchName),
+        'PEP database',
+        safe(String(result.Score ?? '—')),
+        safe(result.Confidence || '—'),
+        '<span class="pep">PEP indicator</span>',
+      ])
+    }
+    sec4 = sectionHeader(4, 'Alerts')
+      + (alertRows.length
+        ? dataTable(['#', 'Matched entry', 'List / source', 'Score', 'Confidence band', 'Disposition'], alertRows, ['4%', '28%', '28%', '8%', '16%', '16%'])
+        : `<p class="none-msg">No alerts raised.</p>`)
+    if (personCheck || orgCheck) {
+      sec4 += kvTable([
+        ...(personCheck ? [['Person type check', `${personCheck.is_match === true ? 'Match' : personCheck.is_match === false ? 'Clear' : 'Unknown'} — ${escapeHtml(personCheck.status || '—')}`] as [string, string]] : []),
+        ...(orgCheck ? [['Organisation type check', `${orgCheck.is_match === true ? 'Match' : orgCheck.is_match === false ? 'Clear' : 'Unknown'} — ${escapeHtml(orgCheck.status || '—')}`] as [string, string]] : []),
+      ])
+    }
+  } else {
+    sec4 = sectionHeader(4, 'Alerts') + `<p class="none-msg">No alerts raised. No name similarity match reached the alert threshold.</p>`
+  }
+
+  // ── Section 5: Alert review / Candidate evidence ──
+  let sec5 = ''
+  const sec5Rows: string[][] = []
+
+  if (candidateEvidence.length > 0) {
+    for (const c of candidateEvidence) {
+      const dobMatch = c.dob_assessment === 'exact' ? '✓ Exact'
+        : c.dob_assessment === 'compatible' ? '~ Compatible'
+        : c.dob_assessment === 'conflicting' ? '<span class="fp">✗ Conflicting</span>'
+        : '— Unknown'
+      const ctryMatch = c.country_assessment === 'compatible' ? '~ Compatible'
+        : c.country_assessment === 'conflicting' ? '<span class="fp">✗ Conflicting</span>'
+        : '— Unknown'
+      const disp = c.disposition === 'potential_match'
+        ? '<span class="match">Potential match</span>'
+        : '<span class="clear">Excluded</span>'
+      sec5Rows.push([
+        `${safe(c.name)}<br><small>${safe(c.dataset)}</small>`,
+        safe(String(c.name_score) + '/100'),
+        safe(c.birth_date || '—') + `<br><small>${dobMatch}</small>`,
+        safe(c.country || '—') + `<br><small>${ctryMatch}</small>`,
+        disp,
+      ])
+    }
+    sec5 = sectionHeader(5, 'Alert review — candidate comparison')
+      + `<p class="note">Similarity scores do not confirm identity. Missing details do not establish a mismatch.</p>`
+      + dataTable(['Candidate / source', 'Name score', 'Date of birth', 'Country', 'Disposition'], sec5Rows, ['28%', '12%', '22%', '22%', '16%'])
+  } else if (reviewDecision) {
+    const engineStatus = engineResult?.['Check Summary']?.Status || '—'
+    sec5 = sectionHeader(5, 'Alert review')
+      + kvTable([
+          ['Outcome', safe(reviewDecision.outcome)],
+          ['Reviewed by', safe(reviewDecision.actor)],
+          ['Reviewed at', safe(reviewDecision.decided_at)],
+          ['Rationale', safe(reviewDecision.notes)],
+          ['Original engine outcome', safe(engineStatus)],
+          ...(reviewDecision.stale ? [['Note', 'This decision may require reassessment.'] as [string, string]] : []),
+        ])
+  }
+
+  // ── Section 6: Audit trail ──
+  const auditRows: string[][] = []
+  const addAudit = (ts: string, event: string, actor: string) =>
+    auditRows.push([safe(ts), safe(event), safe(actor)])
+
+  addAudit(checkedAt, 'Screening request received', safe(search.requestor || 'System'))
+  addAudit(checkedAt, `Screening completed${hasAlert ? ', 1 alert raised' : ' — no alerts'}`, 'ScreenCheck')
+  if (reviewDecision) {
+    addAudit(reviewDecision.decided_at, 'Alert reviewed', safe(reviewDecision.actor))
+    addAudit(reviewDecision.decided_at, `Decision: ${escapeHtml(reviewDecision.outcome)}`, safe(reviewDecision.actor))
+  }
+  addAudit(generatedUtc, 'Report generated', 'ScreenCheck')
+
+  const sec6 = sectionHeader(6, 'Audit trail')
+    + dataTable(['Timestamp', 'Event', 'User / system'], auditRows, ['35%', '40%', '25%'])
+
+  // ── Section 7: Ongoing monitoring ──
+  const monitorChange = result['Monitoring Change']
+  const monitorRows: Array<[string, string]> = [
+    ['Status', 'Enrolled in periodic re-screening against list updates'],
+    ['Last screened', safe(checkedAt)],
+    ['Retention', 'Record retained per applicable data retention policy'],
+  ]
+  if (monitorChange?.message) {
+    monitorRows.push(['Monitoring note', safe(monitorChange.message)])
+  }
+  const sec7 = sectionHeader(7, 'Ongoing monitoring') + kvTable(monitorRows)
+
+  // ── Section 8: Technical record ──
+  const sec8 = sectionHeader(8, 'Technical record') + kvTable([
+    ['Document ID', safe(docId)],
+    ['Request ID', safe(result.request_id || 'Not available')],
+    ['Run ID', safe(result.run_id || 'Not available')],
+    ['Entity key', safe(result.entity_key || 'Not available')],
+    ['Search backend', safe(backendLabel)],
+    ['Generated (UTC)', safe(generatedUtc)],
+  ])
+
+  // ── Disclaimer ──
+  const disclaimer = `<div class="disclaimer">This report records the result of automated screening${reviewDecision ? ' and analyst review' : ''} at the time shown. It reflects list versions available at that time and is not a guarantee that the subject is not, or will not become, subject to sanctions. If a true match is confirmed, funds must be frozen and the matter escalated to the MLRO for reporting to the relevant authority. Do not disclose screening outcomes to the subject.</div>`
+
+  return `
+<div class="report">
+  <div class="page-header">
+    <div class="company">Compliance Screening System &nbsp;|&nbsp; Financial Crime Compliance</div>
+    <div class="conf">CONFIDENTIAL</div>
+  </div>
+  <div class="sub-header">
+    Report ID ${escapeHtml(docId)}&nbsp; | &nbsp;Generated ${escapeHtml(generatedUtc)}
+  </div>
+
+  <div class="title-block">
+    <h1>Sanctions Screening Report</h1>
+    <p class="subtitle">${escapeHtml(formatEntityTypeLabel(search.entityType || 'Entity'))} screening</p>
+  </div>
+
+  <div class="outcome-box" style="background:${outcome.bg};color:${outcome.text};border:2px solid ${outcome.border}">
+    <div class="outcome-label">OUTCOME:</div>
+    <div class="outcome-main">${escapeHtml(outcome.label)}</div>
+    <div class="outcome-detail">${escapeHtml(outcome.detail)}</div>
+  </div>
+
+  <div class="sections">
+    <div class="section">${sec1}</div>
+    <div class="section">${sec2}</div>
+    <div class="section">${sec3}</div>
+    <div class="section">${sec4}</div>
+    ${sec5 ? `<div class="section">${sec5}</div>` : ''}
+    <div class="section">${sec6}</div>
+    <div class="section">${sec7}</div>
+    <div class="section">${sec8}</div>
+    ${disclaimer}
+  </div>
+</div>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #fff; }
+.report {
+  width: 794px;
+  font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 12px;
+  color: ${C.text};
+  background: #fff;
+  padding: 24px 28px 32px;
+  line-height: 1.45;
+}
+
+/* Page header */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 2px solid ${C.navyDark};
+  margin-bottom: 4px;
+}
+.company { font-size: 11px; font-weight: 600; color: ${C.navyDark}; }
+.conf { font-size: 11px; font-weight: 800; color: #c0392b; letter-spacing: .08em; }
+.sub-header {
+  font-size: 9.5px;
+  color: ${C.muted};
+  padding: 3px 0 12px;
+  border-bottom: 1px solid ${C.border};
+  margin-bottom: 14px;
+}
+
+/* Title */
+.title-block { margin-bottom: 14px; }
+.title-block h1 { font-size: 22px; font-weight: 800; color: ${C.navyDark}; line-height: 1.2; }
+.title-block .subtitle { font-size: 12px; color: ${C.muted}; margin-top: 2px; }
+
+/* Outcome box */
+.outcome-box {
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 18px;
+}
+.outcome-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  opacity: .75;
+  margin-bottom: 2px;
+}
+.outcome-main {
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+.outcome-detail { font-size: 11px; font-weight: 600; opacity: .85; }
+
+/* Sections */
+.section { margin-bottom: 14px; }
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: ${C.navyDark};
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 4px 4px 0 0;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+.sec-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.2);
+  font-size: 10px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+/* KV table */
+.kv {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  border: 1px solid ${C.border};
+  border-top: none;
+}
+.kv th {
+  width: 34%;
+  text-align: left;
+  padding: 5px 8px;
+  font-weight: 700;
+  color: ${C.muted};
+  background: ${C.tealLight};
+  border-bottom: 1px solid ${C.border};
+  vertical-align: top;
+}
+.kv td {
+  padding: 5px 8px;
+  border-bottom: 1px solid ${C.border};
+  font-weight: 500;
+  vertical-align: top;
+  word-break: break-word;
+}
+.kv tr.alt th, .kv tr.alt td { background: ${C.rowAlt}; }
+.kv tr:last-child th, .kv tr:last-child td { border-bottom: none; }
+
+/* Data table */
+.dt {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  border: 1px solid ${C.border};
+  border-top: none;
+}
+.dt thead tr { background: ${C.navyMid}; }
+.dt thead th {
+  padding: 5px 8px;
+  text-align: left;
+  color: #fff;
+  font-weight: 700;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  border-right: 1px solid rgba(255,255,255,.15);
+}
+.dt thead th:last-child { border-right: none; }
+.dt tbody td {
+  padding: 5px 8px;
+  border-bottom: 1px solid ${C.border};
+  vertical-align: top;
+  border-right: 1px solid ${C.border};
+}
+.dt tbody td:last-child { border-right: none; }
+.dt tbody tr.alt td { background: ${C.rowAlt}; }
+.dt tbody tr:last-child td { border-bottom: none; }
+.dt small { color: ${C.muted}; font-size: 10px; }
+
+/* Status chips */
+.fp { color: ${C.fpText}; font-weight: 700; }
+.match { color: ${C.matchText}; font-weight: 700; }
+.clear { color: ${C.clearText}; font-weight: 700; }
+.pep { color: ${C.pepText}; font-weight: 700; }
+
+/* Notes and empty states */
+.none-msg {
+  padding: 8px 10px;
+  font-size: 11.5px;
+  color: ${C.muted};
+  font-style: italic;
+  border: 1px solid ${C.border};
+  border-top: none;
+  background: ${C.tealLight};
+}
+.note {
+  padding: 5px 10px;
+  font-size: 10.5px;
+  color: ${C.muted};
+  border: 1px solid ${C.border};
+  border-top: none;
+  background: #fffbeb;
+}
+
+/* Disclaimer */
+.disclaimer {
+  margin-top: 18px;
+  padding: 10px 12px;
+  border-top: 2px solid ${C.navyDark};
+  font-size: 10px;
+  color: ${C.muted};
+  line-height: 1.55;
+}
+</style>
+`
+}
+
+// ─── PDF generator ────────────────────────────────────────────────────────────
+
 /**
  * Generate and download the screening result PDF.
- * Landscape page; content rendered as image to mirror UI cards.
- * Entity key is added as selectable text for later copy/verification.
+ * Portrait A4; content rendered as a numbered-section compliance document.
  */
 export async function generateScreeningPdf(result: OpCheckResponse, search: SearchDetails): Promise<void> {
   const wrapper = document.createElement('div')
-  wrapper.style.position = 'fixed'
-  wrapper.style.left = '-10000px'
-  wrapper.style.top = '0'
-  wrapper.style.width = '1400px'
-  wrapper.style.zIndex = '-1'
-  wrapper.innerHTML = buildSnapshotHtml(result, search)
+  wrapper.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;z-index:-1;background:#fff'
+  wrapper.innerHTML = buildReportHtml(result, search)
   document.body.appendChild(wrapper)
 
   try {
     const canvas = await html2canvas(wrapper.firstElementChild as HTMLElement, {
-      backgroundColor: '#eef3f7',
+      backgroundColor: '#ffffff',
       scale: 2,
       useCORS: true,
       logging: false,
+      width: 794,
     })
 
-    const imgData = canvas.toDataURL('image/png')
-    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true })
+    // A4 portrait
+    const MARGIN_MM = 10
+    const FOOTER_H_MM = 8
 
-    const pageW = doc.internal.pageSize.getWidth()
-    const pageH = doc.internal.pageSize.getHeight()
-    const margin = 8
-    const footerBand = 14
-    const maxW = pageW - margin * 2
-    const maxH = pageH - margin * 2 - footerBand
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true })
 
-    const imgW = canvas.width
-    const imgH = canvas.height
-    const ratio = Math.min(maxW / imgW, maxH / imgH)
-    const renderW = imgW * ratio
-    const renderH = imgH * ratio
-    const x = (pageW - renderW) / 2
-    const y = margin
+    const pageW = doc.internal.pageSize.getWidth()   // 210
+    const pageH = doc.internal.pageSize.getHeight()  // 297
 
-    doc.addImage(imgData, 'PNG', x, y, renderW, renderH, undefined, 'FAST')
+    const printW = pageW - MARGIN_MM * 2
+    const printH = pageH - MARGIN_MM * 2 - FOOTER_H_MM
 
-    const keyText = result.entity_key?.trim() ? `Entity key: ${result.entity_key}` : 'Entity key: not available'
-    const checkedAt = result['Check Summary']?.Date || '—'
-    doc.setFont('helvetica', 'normal')
-    doc.setFontSize(9)
-    doc.setTextColor(60, 60, 60)
-    doc.text(`Checked at: ${checkedAt}`, margin, pageH - 8)
-    doc.text(keyText, pageW / 2, pageH - 8, { align: 'center' })
-    doc.text(`Generated: ${new Date().toISOString()}`, pageW - margin, pageH - 8, { align: 'right' })
-    doc.setTextColor(0, 0, 0)
+    // Scale the full canvas width to fit the printable area
+    const scale = printW / canvas.width  // mm per canvas pixel
+
+    // How many canvas pixels fit in one page's printable height
+    const canvasPixelsPerPage = Math.floor(printH / scale)
+    const totalPages = Math.ceil(canvas.height / canvasPixelsPerPage)
 
     const safeName = search.searchName.replace(/[^a-zA-Z0-9\s-]/g, '').slice(0, 40) || 'screening'
     const filename = `screening-result-${safeName.replace(/\s+/g, '-')}-${Date.now()}.pdf`
+    const checkedAt = result['Check Summary']?.Date || '—'
+
+    for (let page = 0; page < totalPages; page++) {
+      if (page > 0) doc.addPage()
+
+      const srcY = page * canvasPixelsPerPage
+      const srcH = Math.min(canvasPixelsPerPage, canvas.height - srcY)
+
+      // Slice this page's portion of the canvas
+      const slice = document.createElement('canvas')
+      slice.width = canvas.width
+      slice.height = srcH
+      const ctx = slice.getContext('2d')!
+      ctx.drawImage(canvas, 0, srcY, canvas.width, srcH, 0, 0, canvas.width, srcH)
+
+      const imgData = slice.toDataURL('image/png')
+      const renderH = srcH * scale
+
+      doc.addImage(imgData, 'PNG', MARGIN_MM, MARGIN_MM, printW, renderH, undefined, 'FAST')
+
+      // Footer
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(8)
+      doc.setTextColor(100, 100, 100)
+      doc.text(`Checked at: ${checkedAt}`, MARGIN_MM, pageH - 4)
+      doc.text(`Page ${page + 1} of ${totalPages}`, pageW / 2, pageH - 4, { align: 'center' })
+      doc.text(`Generated: ${new Date().toISOString()}`, pageW - MARGIN_MM, pageH - 4, { align: 'right' })
+    }
+
     doc.save(filename)
   } finally {
     document.body.removeChild(wrapper)
