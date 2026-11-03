@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY api_server.py screening_worker.py ai_triage.py ai_triage_worker.py utils.py retention_report.py job_recovery.py screening_policy.py review_decisions.py screening_history.py screening_db.py auth_db.py security.py ./
 COPY acceptance_export.py acceptance_metrics.py source_assurance.py screening_guidance.py screening_monitoring.py company_investigations.py ./
 COPY deployment_runtime.py ./
-COPY scripts/plan_release_rescreen.py scripts/execute_release_rescreen.py scripts/validate_watchlist_aliases.py ./scripts/
+COPY scripts/ ./scripts/
+COPY db/ ./db/
 COPY services ./services
 COPY routes ./routes
 COPY migrations ./migrations
