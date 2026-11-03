@@ -1,3 +1,6 @@
+# XML parsing (safe against XXE / billion-laughs attacks)
+defusedxml>=0.7
+
 # Core API
 fastapi>=0.111
 uvicorn[standard]>=0.30
