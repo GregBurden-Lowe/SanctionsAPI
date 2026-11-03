@@ -1,7 +1,7 @@
 import type { OpCheckResponse, CandidateEvidenceItem } from '@/types/api'
 import type { SearchDetails } from '@/utils/exportScreeningPdf'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components'
-import { BiCheckCircle, BiXCircle, BiMinus } from 'react-icons/bi'
+import { BiCheckCircle, BiXCircle, BiMinus, BiInfoCircle } from 'react-icons/bi'
 
 function formatIngestedDate(raw: string | undefined): string {
   if (!raw) return 'Unknown'
@@ -50,7 +50,7 @@ function CountryBadge({ assessment }: { assessment: CandidateEvidenceItem['count
   return <span className={`rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${cls}`}>{label}</span>
 }
 
-export function CandidateEvidence({ result, search }: { result: OpCheckResponse; search: SearchDetails }) {
+export function CandidateEvidence({ result, search, isPepOnly }: { result: OpCheckResponse; search: SearchDetails; isPepOnly?: boolean }) {
   const evidence = result['Candidate Evidence']
   if (!evidence) return null
 
@@ -64,14 +64,18 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
   const evaluated = (summary?.evaluated_name_matches ?? evidence.length)
 
   const hasMatch = potentialMatches > 0
-  const VerdictIcon = hasMatch ? BiXCircle : BiMinus
-  const verdictColor = hasMatch ? 'text-semantic-error' : 'text-text-muted'
+  const VerdictIcon = isPepOnly ? BiInfoCircle : (hasMatch ? BiXCircle : BiMinus)
+  const verdictColor = isPepOnly ? 'text-semantic-info' : (hasMatch ? 'text-semantic-error' : 'text-text-muted')
 
-  const finding = hasMatch
-    ? `${potentialMatches} potential match${potentialMatches !== 1 ? 'es' : ''} — review required`
-    : 'No potential match identified'
-  const nextAction = guidance?.next_actions?.[0]
-    ?? (hasMatch ? 'Review the candidate evidence and verify identity before proceeding.' : 'Apply normal business controls and retain this screening record.')
+  const finding = isPepOnly
+    ? `${potentialMatches} PEP candidate${potentialMatches !== 1 ? 's' : ''} found — no sanctions match`
+    : hasMatch
+      ? `${potentialMatches} potential match${potentialMatches !== 1 ? 'es' : ''} — review required`
+      : 'No potential match identified'
+  const nextAction = isPepOnly
+    ? 'No action required. PEP details recorded for reference.'
+    : (guidance?.next_actions?.[0]
+      ?? (hasMatch ? 'Review the candidate evidence and verify identity before proceeding.' : 'Apply normal business controls and retain this screening record.'))
 
   return (
     <Card>
@@ -106,14 +110,14 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
         )}
 
         {/* Verdict row */}
-        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : 'border-border bg-app/60'}`}>
+        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${isPepOnly ? 'border-semantic-info/25 bg-semantic-info/5' : hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : 'border-border bg-app/60'}`}>
           <VerdictIcon className={`mt-0.5 h-4 w-4 shrink-0 ${verdictColor}`} aria-hidden />
           <div className="min-w-0 flex-1">
-            <p className={`text-[13px] font-semibold leading-snug ${hasMatch ? 'text-semantic-error' : 'text-text-primary'}`}>
+            <p className={`text-[13px] font-semibold leading-snug ${isPepOnly ? 'text-semantic-info' : hasMatch ? 'text-semantic-error' : 'text-text-primary'}`}>
               {finding}
             </p>
             <p className="text-[12px] text-text-secondary mt-0.5 leading-snug">{nextAction}</p>
-            {hasMatch && evidence.length > 0 && (() => {
+            {hasMatch && !isPepOnly && evidence.length > 0 && (() => {
               const highConf = evidence.filter(c => c.disposition === 'potential_match' && c.name_score >= 90).length
               const lowConf = evidence.filter(c => c.disposition === 'potential_match' && c.name_score < 90).length
               if (highConf === 0 && lowConf === 0) return null
@@ -159,10 +163,10 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                   open={i === 0 && isHighConfidence}
                 >
                   <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-app/60 [&::-webkit-details-marker]:hidden">
-                    <span className={`h-2 w-2 shrink-0 rounded-full ${isPotentialMatch ? 'bg-semantic-error' : 'bg-text-muted'}`} />
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${isPotentialMatch && isPepOnly ? 'bg-semantic-info' : isPotentialMatch ? 'bg-semantic-error' : 'bg-text-muted'}`} />
                     <span className="min-w-0 flex-1 text-[13px] font-medium text-text-primary truncate">{candidate.name}</span>
                     <span className="shrink-0 text-[11px] text-text-muted">{candidate.source_type === 'peps' ? 'PEP' : 'Sanctions'}</span>
-                    <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${isPotentialMatch ? 'bg-semantic-error/10 text-semantic-error border-semantic-error/25' : 'bg-surface text-text-muted border-border'}`}>
+                    <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${isPotentialMatch && isPepOnly ? 'bg-semantic-info/10 text-semantic-info border-semantic-info/25' : isPotentialMatch ? 'bg-semantic-error/10 text-semantic-error border-semantic-error/25' : 'bg-surface text-text-muted border-border'}`}>
                       {isPotentialMatch ? 'Potential match' : 'Excluded'}
                     </span>
                     <span className="shrink-0 text-[11px] text-text-muted tabular-nums">{candidate.name_score}/100</span>
