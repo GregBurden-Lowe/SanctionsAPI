@@ -10,6 +10,7 @@ import {
   getMatchingConfig,
   getRescreenSummary,
   listAiTriageRuns,
+  refreshOpensanctions,
   runAiTriage,
   updateMatchingConfig,
   type MatchingConfigResponse,
@@ -30,6 +31,10 @@ export function AdminPage() {
   const [matchingSaving, setMatchingSaving] = useState(false)
   const [matchingError, setMatchingError] = useState<string | null>(null)
   const [matchingSaved, setMatchingSaved] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
+
   const [aiHealth, setAiHealth] = useState<AiTriageHealthResponse | null>(null)
   const [aiRuns, setAiRuns] = useState<AiTriageRun[]>([])
   const [aiLoading, setAiLoading] = useState(false)
@@ -222,6 +227,25 @@ export function AdminPage() {
     }
   }
 
+  const triggerRefresh = async () => {
+    setRefreshing(true)
+    setRefreshError(null)
+    setRefreshMessage(null)
+    try {
+      const res = await refreshOpensanctions(true, true)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setRefreshError((data as { detail?: string }).detail ?? 'Refresh failed.')
+      } else {
+        setRefreshMessage('Watchlist refresh completed successfully.')
+      }
+    } catch {
+      setRefreshError('Refresh request failed. Check the service logs.')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   return (
     <div className="px-[26px] pt-[22px] pb-[26px]">
       <div className="max-w-2xl space-y-6">
@@ -234,17 +258,22 @@ export function AdminPage() {
           </CardHeader>
           <CardBody className="space-y-3">
             <p className="text-sm text-text-secondary">
-              OpenSanctions refresh is now API/cron driven and syncs Postgres by default. Use your 22:00 droplet cron job to keep watchlist tables current.
+              OpenSanctions refresh is API/cron driven and syncs Postgres by default. Use your 22:00 droplet cron job to keep watchlist tables current, or trigger a manual refresh below.
             </p>
-            <div>
-              <div className="flex items-center gap-2">
-                <Button type="button" variant="secondary" onClick={() => navigate('/admin/docs')}>
-                  Open API docs
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => navigate('/admin/api-keys')}>
-                  Manage API keys
-                </Button>
-              </div>
+            {refreshError && <ErrorBox message={refreshError} />}
+            {refreshMessage && (
+              <p className="text-sm text-semantic-success font-medium">{refreshMessage}</p>
+            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button type="button" variant="primary" onClick={triggerRefresh} disabled={refreshing}>
+                {refreshing ? 'Refreshing watchlists…' : 'Refresh watchlists now'}
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => navigate('/admin/docs')}>
+                Open API docs
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => navigate('/admin/api-keys')}>
+                Manage API keys
+              </Button>
             </div>
           </CardBody>
         </Card>
