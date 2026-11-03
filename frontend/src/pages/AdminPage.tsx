@@ -235,7 +235,12 @@ export function AdminPage() {
       const res = await refreshOpensanctions(true, true)
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setRefreshError((data as { detail?: string }).detail ?? 'Refresh failed.')
+        if (res.status === 429) {
+          setRefreshError('Rate limit reached — please wait a minute before retrying.')
+        } else {
+          const body = data as { detail?: string; error?: string }
+          setRefreshError(body.detail ?? body.error ?? `Refresh failed (${res.status}).`)
+        }
       } else {
         setRefreshMessage('Watchlist refresh completed successfully.')
       }
