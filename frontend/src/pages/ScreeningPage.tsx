@@ -43,7 +43,7 @@ const REASON_FOR_CHECK_OPTIONS = [
   'Ad-Hoc Compliance Review',
 ] as const
 
-type ReasonForCheck = (typeof REASON_FOR_CHECK_OPTIONS)[number]
+type ReasonForCheck = (typeof REASON_FOR_CHECK_OPTIONS)[number] | ''
 
 export function ScreeningPage() {
   const { user } = useAuth()
@@ -55,8 +55,10 @@ export function ScreeningPage() {
   const [dob, setDob] = useState(retry?.inputs.dob || '')
   const [country, setCountry] = useState(retry?.inputs.country || '')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>(retry?.inputs.entity_type === 'Organization' ? 'Organization' : 'Person')
-  const [businessReference, setBusinessReference] = useState(retry?.inputs.business_reference || '')
-  const [reasonForCheck, setReasonForCheck] = useState<ReasonForCheck>(retry?.inputs.reason_for_check || 'Client Onboarding')
+  const [businessReference, setBusinessReference] = useState(
+    retry?.inputs.business_reference || sessionStorage.getItem('screening_last_business_reference') || ''
+  )
+  const [reasonForCheck, setReasonForCheck] = useState<ReasonForCheck>(retry?.inputs.reason_for_check || '')
   const [requestor, setRequestor] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -78,27 +80,32 @@ export function ScreeningPage() {
     const businessReferenceTrim = businessReference.trim()
     const requestorTrim = requestor.trim()
     if (!nameTrim) {
-      setError("Please provide 'name' to run a check.")
-      return
-    }
-    if (!requestorTrim) {
-      setError("Please provide 'requestor' (your name) to run a check.")
+      setError("Please provide a name to run a check.")
       return
     }
     if (!businessReferenceTrim) {
-      setError("Please provide 'business_reference' (business reference) to run a check.")
+      setError("Please provide a business reference to link this check to a client file or case number.")
+      return
+    }
+    if (!reasonForCheck) {
+      setError("Please select a reason for check.")
+      return
+    }
+    if (!requestorTrim) {
+      setError("Please provide the requestor name to run a check.")
       return
     }
     inFlight.current = true
     setLoading(true)
     try {
+      sessionStorage.setItem('screening_last_business_reference', businessReferenceTrim)
       const params: OpCheckParams = {
         name: nameTrim,
         dob: dobTrim || null,
         country: countryTrim || null,
         entity_type: entityType,
         business_reference: businessReferenceTrim,
-        reason_for_check: reasonForCheck,
+        reason_for_check: reasonForCheck as (typeof REASON_FOR_CHECK_OPTIONS)[number],
         requestor: requestorTrim,
         search_backend: retry?.inputs.search_backend || 'postgres_beta',
         rerun_entity_key: retry?.inputs.rerun_entity_key,
@@ -200,25 +207,27 @@ export function ScreeningPage() {
                   )}
                   <div className="md:col-span-2">
                     <Input
-                      label="Business reference"
+                      label="Business reference *"
                       value={businessReference}
                       onChange={(e) => setBusinessReference(e.target.value)}
                       placeholder="e.g. BR-2026-000123"
+                      hint="Link this check to a client file or case number for your audit trail."
                       required
                     />
                   </div>
                   <div className="md:col-span-2">
                     <div>
-                      <label htmlFor="reason_for_check" className="block text-xs font-medium text-text-primary mb-1">
-                        Reason for check
+                      <label htmlFor="reason_for_check" className="block text-[12.5px] font-semibold text-[#374151] mb-[5px]">
+                        Reason for check *
                       </label>
                       <select
                         id="reason_for_check"
                         value={reasonForCheck}
                         onChange={(e) => setReasonForCheck(e.target.value as ReasonForCheck)}
-                        className="w-full h-10 rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15"
+                        className={`w-full h-10 rounded-lg border bg-[#f8fafc] px-3 text-[13px] outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/15 ${reasonForCheck ? 'text-[#1e293b] border-[#e2e8f0]' : 'text-[#94a3b8] border-[#e2e8f0]'}`}
                         required
                       >
+                        <option value="" disabled>Select a reason…</option>
                         {REASON_FOR_CHECK_OPTIONS.map((option) => (
                           <option key={option} value={option}>
                             {option}
@@ -341,7 +350,11 @@ export function ScreeningResultPage() {
   const personRerunEnabled = searchDetails.entityType === 'Person'
   const organizationRerunEnabled = searchDetails.entityType === 'Organization'
   const hasAdverseOutcome = Boolean(result['Is Sanctioned'] || result['Is PEP'])
-  const rerunEnabled = (personRerunEnabled || organizationRerunEnabled) && hasAdverseOutcome
+  const dobAlreadyProvided = Boolean(searchDetails.searchDob?.trim())
+  const countryAlreadyProvided = Boolean(searchDetails.searchCountry?.trim())
+  const rerunEnabled =
+    (personRerunEnabled && !dobAlreadyProvided && hasAdverseOutcome) ||
+    (organizationRerunEnabled && !countryAlreadyProvided && hasAdverseOutcome)
 
   const handleRerunWithDob = async () => {
     const dobTrim = rerunDob.trim()
@@ -424,7 +437,7 @@ export function ScreeningResultPage() {
             </CardHeader>
             <CardBody className="space-y-3">
               <p className="text-sm text-text-secondary">
-                Re-run this check with additional details and keep the same entity key record.
+                Adding {personRerunEnabled ? 'a date of birth' : 'a country'} can help confirm or rule out these candidates. The result will update the same entity record.
               </p>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
                 {personRerunEnabled ? (
@@ -670,7 +683,7 @@ export function ResultCard({
         </div>
         <div className="min-w-0 flex-1">
           <p className={`font-semibold text-[14px] leading-snug ${outcomeBar.text}`}>{outcome.heading}</p>
-          <p className={`text-xs mt-0.5 opacity-80 ${outcomeBar.text}`}>{outcome.detail}</p>
+          <p className={`text-[12.5px] mt-1 font-medium ${outcomeBar.text} ${outcome.semantic === 'error' ? '' : 'opacity-75'}`}>{outcome.detail}</p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {result.request_id && (

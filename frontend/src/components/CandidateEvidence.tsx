@@ -12,16 +12,32 @@ function formatIngestedDate(raw: string | undefined): string {
   }
 }
 
+function formatDisplayDob(raw: string | undefined): string {
+  if (!raw) return '—'
+  const ddmmyyyy = raw.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
+  if (ddmmyyyy) {
+    const d = new Date(parseInt(ddmmyyyy[3]), parseInt(ddmmyyyy[2]) - 1, parseInt(ddmmyyyy[1]))
+    if (!isNaN(d.getTime())) return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
+  const yyyymmdd = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (yyyymmdd) {
+    const d = new Date(parseInt(yyyymmdd[1]), parseInt(yyyymmdd[2]) - 1, parseInt(yyyymmdd[3]))
+    if (!isNaN(d.getTime())) return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
+  if (/^\d{4}$/.test(raw)) return raw
+  return raw
+}
+
 function DobBadge({ assessment }: { assessment: CandidateEvidenceItem['dob_assessment'] }) {
   const map = {
-    exact:          { label: 'Exact match',   cls: 'text-semantic-success border-semantic-success/25 bg-semantic-success/10' },
-    compatible:     { label: 'Compatible',    cls: 'text-semantic-warning border-semantic-warning/25 bg-semantic-warning/10' },
-    conflicting:    { label: 'Conflicting',   cls: 'text-semantic-error border-semantic-error/25 bg-semantic-error/10' },
-    unknown:        { label: 'Unknown',       cls: 'text-text-muted border-border bg-surface' },
-    not_applicable: { label: 'N/A',           cls: 'text-text-muted border-border bg-surface' },
+    exact:          { label: 'Exact match',   cls: 'text-semantic-success border-semantic-success/25 bg-semantic-success/10',  title: undefined },
+    compatible:     { label: 'Compatible',    cls: 'text-semantic-warning border-semantic-warning/25 bg-semantic-warning/10',  title: undefined },
+    conflicting:    { label: 'Conflicting',   cls: 'text-semantic-error border-semantic-error/25 bg-semantic-error/10',         title: undefined },
+    unknown:        { label: 'Unknown',       cls: 'text-text-muted border-border bg-surface',                                  title: 'The candidate record does not include a date of birth to compare against.' },
+    not_applicable: { label: 'N/A',           cls: 'text-text-muted border-border bg-surface',                                  title: undefined },
   }
-  const { label, cls } = map[assessment] ?? { label: assessment, cls: 'text-text-muted border-border bg-surface' }
-  return <span className={`rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${cls}`}>{label}</span>
+  const { label, cls, title } = map[assessment] ?? { label: assessment, cls: 'text-text-muted border-border bg-surface', title: undefined }
+  return <span className={`rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold cursor-default ${cls}`} title={title}>{label}</span>
 }
 
 function CountryBadge({ assessment }: { assessment: CandidateEvidenceItem['country_assessment'] }) {
@@ -97,6 +113,18 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
               {finding}
             </p>
             <p className="text-[12px] text-text-secondary mt-0.5 leading-snug">{nextAction}</p>
+            {hasMatch && evidence.length > 0 && (() => {
+              const highConf = evidence.filter(c => c.disposition === 'potential_match' && c.name_score >= 90).length
+              const lowConf = evidence.filter(c => c.disposition === 'potential_match' && c.name_score < 90).length
+              if (highConf === 0 && lowConf === 0) return null
+              return (
+                <p className="text-[11px] text-text-muted mt-1.5">
+                  {highConf > 0 && <span className="text-semantic-error font-medium">{highConf} high-confidence match{highConf !== 1 ? 'es' : ''} (≥90)</span>}
+                  {highConf > 0 && lowConf > 0 && <span className="mx-1">·</span>}
+                  {lowConf > 0 && <span>{lowConf} lower-confidence match{lowConf !== 1 ? 'es' : ''}</span>}
+                </p>
+              )
+            })()}
           </div>
           <div className="shrink-0 text-right">
             <p className="text-[11px] text-text-muted leading-relaxed">
@@ -123,11 +151,12 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
           <div className="space-y-2">
             {evidence.map((candidate, i) => {
               const isPotentialMatch = candidate.disposition === 'potential_match'
+              const isHighConfidence = isPotentialMatch && candidate.name_score >= 90
               return (
                 <details
                   key={`${candidate.record_id || candidate.name}-${candidate.entity_type}-${i}`}
                   className="group rounded-lg border border-border overflow-hidden"
-                  open={i === 0 && isPotentialMatch}
+                  open={i === 0 && isHighConfidence}
                 >
                   <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-app/60 [&::-webkit-details-marker]:hidden">
                     <span className={`h-2 w-2 shrink-0 rounded-full ${isPotentialMatch ? 'bg-semantic-error' : 'bg-text-muted'}`} />
@@ -157,8 +186,8 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                         </tr>
                         <tr>
                           <td className="py-1.5 text-text-muted">DOB</td>
-                          <td className="py-1.5 text-text-primary">{search.searchDob || '—'}</td>
-                          <td className="py-1.5 text-text-primary">{candidate.birth_date || '—'}</td>
+                          <td className="py-1.5 text-text-primary">{formatDisplayDob(search.searchDob)}</td>
+                          <td className="py-1.5 text-text-primary">{formatDisplayDob(candidate.birth_date ?? undefined)}</td>
                           <td className="py-1.5"><DobBadge assessment={candidate.dob_assessment} /></td>
                         </tr>
                         <tr>
