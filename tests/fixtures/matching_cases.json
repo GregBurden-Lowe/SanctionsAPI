@@ -20,7 +20,7 @@
   {
     "label": "diacritics",
     "query": "Jose Garcia",
-    "candidate": "Jos\u00e9 Garc\u00eda",
+    "candidate": "José García",
     "expected": true
   },
   {
@@ -84,6 +84,204 @@
     "label": "conflicting initial",
     "query": "R Smith",
     "candidate": "John Smith",
+    "expected": false
+  },
+  {
+    "label": "repeated candidate with unrelated second name",
+    "query": "Milo Winters",
+    "candidate": "Milo Milo",
+    "expected": false
+  },
+  {
+    "label": "repeated query with unrelated second name",
+    "query": "Milo Milo",
+    "candidate": "Milo Winters",
+    "expected": false
+  },
+  {
+    "label": "exact repeated name",
+    "query": "Milo Milo",
+    "candidate": "Milo Milo",
+    "expected": true
+  },
+  {
+    "label": "surname only candidate",
+    "query": "Evan Barlow",
+    "candidate": "Barlow",
+    "expected": false
+  },
+  {
+    "label": "conflicting given name same surname",
+    "query": "Evan Barlow",
+    "candidate": "Claire Barlow",
+    "expected": false
+  },
+  {
+    "label": "matching single name",
+    "query": "Barlow",
+    "candidate": "Barlow",
+    "expected": true
+  },
+  {
+    "label": "single query against full name",
+    "query": "Barlow",
+    "candidate": "Claire Barlow",
+    "expected": true
+  },
+  {
+    "label": "same name missing middle reversed",
+    "query": "Jane Elizabeth Smith",
+    "candidate": "Jane Smith",
+    "expected": true
+  },
+  {
+    "label": "transposed name reversed",
+    "query": "Petrov Mikhail",
+    "candidate": "Mikhail Petrov",
+    "expected": true
+  },
+  {
+    "label": "hyphenated name",
+    "query": "Mary-Jane Watson",
+    "candidate": "Mary Jane Watson",
+    "expected": true
+  },
+  {
+    "label": "punctuation",
+    "query": "Anne O Brien",
+    "candidate": "Anne O-Brien",
+    "expected": true
+  },
+  {
+    "label": "accent folding",
+    "query": "Soren Muller",
+    "candidate": "Søren Müller",
+    "expected": true
+  },
+  {
+    "label": "given name typo",
+    "query": "Jonathan Smith",
+    "candidate": "Jonathon Smith",
+    "expected": true
+  },
+  {
+    "label": "surname typo",
+    "query": "Sarah Johnson",
+    "candidate": "Sarah Jonson",
+    "expected": true
+  },
+  {
+    "label": "middle initial",
+    "query": "John P Smith",
+    "candidate": "John Peter Smith",
+    "expected": true
+  },
+  {
+    "label": "given initial",
+    "query": "M Patel",
+    "candidate": "Maya Patel",
+    "expected": true
+  },
+  {
+    "label": "surname first with initial",
+    "query": "Patel M",
+    "candidate": "Maya Patel",
+    "expected": true
+  },
+  {
+    "label": "different initial",
+    "query": "M Patel",
+    "candidate": "Raj Patel",
+    "expected": false
+  },
+  {
+    "label": "different shared given",
+    "query": "Sarah Johnson",
+    "candidate": "Sarah Williams",
+    "expected": false
+  },
+  {
+    "label": "different shared family",
+    "query": "Michael Johnson",
+    "candidate": "David Johnson",
+    "expected": false
+  },
+  {
+    "label": "same middle only",
+    "query": "Alice Marie Green",
+    "candidate": "Robert Marie Brown",
+    "expected": false
+  },
+  {
+    "label": "near surname different given",
+    "query": "John Smyth",
+    "candidate": "Robert Smith",
+    "expected": false
+  },
+  {
+    "label": "extra token not a match",
+    "query": "Evan Barlow",
+    "candidate": "Claire Barlow Jones",
+    "expected": false
+  },
+  {
+    "label": "two unrelated names",
+    "query": "Omar Hassan",
+    "candidate": "Peter Wilson",
+    "expected": false
+  },
+  {
+    "label": "repeated name extra middle",
+    "query": "Milo A Milo",
+    "candidate": "Milo Milo",
+    "expected": true
+  },
+  {
+    "label": "short names exact",
+    "query": "Li Wei",
+    "candidate": "Li Wei",
+    "expected": true
+  },
+  {
+    "label": "short names reversed",
+    "query": "Wei Li",
+    "candidate": "Li Wei",
+    "expected": true
+  },
+  {
+    "label": "short surname conflict",
+    "query": "Li Wei",
+    "candidate": "Li Wu",
+    "expected": false
+  },
+  {
+    "label": "shared family different given",
+    "query": "Maria Garcia",
+    "candidate": "Carlos Garcia",
+    "expected": false
+  },
+  {
+    "label": "same given different family",
+    "query": "Maria Garcia",
+    "candidate": "Maria Lopez",
+    "expected": false
+  },
+  {
+    "label": "multi surname exact",
+    "query": "Ana Maria Lopez Garcia",
+    "candidate": "Ana Maria Lopez Garcia",
+    "expected": true
+  },
+  {
+    "label": "word order multiple",
+    "query": "Garcia Ana Maria Lopez",
+    "candidate": "Ana Maria Lopez Garcia",
+    "expected": true
+  },
+  {
+    "label": "repeated surname no given overlap",
+    "query": "Evan Barlow",
+    "candidate": "Barlow Barlow",
     "expected": false
   }
 ]

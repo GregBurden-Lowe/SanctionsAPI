@@ -265,6 +265,13 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ScreeningUnavailableError):
                     await sync_watchlist_entities_postgres(conn, sanctions_csv_path=str(path), peps_csv_path=None, include_peps=True)
                 self.assertEqual(await conn.fetchval('SELECT count(*) FROM watchlist_entities'), 1)
+                malformed = [{**rows[0], 'aliases':'"unclosed;alias'}]
+                with path.open('w') as file:
+                    writer = csv.DictWriter(file, fieldnames=rows[0].keys()); writer.writeheader(); writer.writerows(malformed)
+                with self.assertRaises(ScreeningUnavailableError):
+                    await sync_watchlist_entities_postgres(conn, sanctions_csv_path=str(path), peps_csv_path=None, include_peps=False)
+                self.assertEqual(await conn.fetchval('SELECT count(*) FROM watchlist_entities'), 1)
+                self.assertEqual(await conn.fetchval("SELECT name FROM watchlist_entities"),'Jane Smith')
             # Schema filtering precedes the cap; conflicting DOBs remain visible.
             await conn.execute("INSERT INTO watchlist_entities SELECT source_type, 'subject-2', entity_schema, name, name_norm, birth_date, country, dataset, regime, raw_json FROM watchlist_entities")
             with self.assertRaises(ScreeningUnavailableError):

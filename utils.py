@@ -521,6 +521,10 @@ def refresh_opensanctions_data(include_peps: bool = True):
 
     df = pd.concat(parts, ignore_index=True)
 
+    # Do not publish a snapshot whose nested aliases cannot be interpreted.
+    for aliases in df['aliases']:
+        _parse_aliases(aliases)
+
     # Write compact parquet
     from source_assurance import build_manifest, require_current, METADATA_KEY
     manifest = build_manifest(sanc_csv, peps_csv if include_peps else None)
@@ -649,6 +653,10 @@ async def sync_watchlist_entities_postgres(
                 name_norm = _normalize_text(name)
                 if not name_norm:
                     continue
+
+                # This happens inside the refresh transaction, so a malformed
+                # nested value leaves the previous PostgreSQL snapshot intact.
+                _parse_aliases(row.get('aliases'))
 
                 birth_date = _parse_birth_date_for_db(_safe_str(row.get("birth_date")))
                 country = _normalize_country(_safe_str(row.get("countries")))
@@ -804,14 +812,14 @@ def screening_fingerprint(name, dob, country, entity_type, backend):
     # Preserve all name tokens; entity keys are only legacy grouping identifiers.
     payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),
                "country": _normalize_country(country), "entity_type": (entity_type or "Person").lower(),
-               "backend": backend, "rules_version": "evidence-v4", "matching_config": get_matching_config()}
+               "backend": backend, "rules_version": "evidence-v8", "matching_config": get_matching_config()}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def stamp_screening_result(result, name, dob, country, entity_type, backend):
     result["Screening Inputs"] = {"name": name, "dob": dob, "country": country, "entity_type": entity_type, "backend": backend}
     result["Screening Fingerprint"] = screening_fingerprint(name, dob, country, entity_type, backend)
-    result["Matching Rules Version"] = "evidence-v4"
+    result["Matching Rules Version"] = "evidence-v8"
     result["Matching Configuration"] = get_matching_config()
     from screening_guidance import enrich_result
     enrich_result(result)
@@ -917,7 +925,7 @@ def _score_person_candidate(
 ) -> Optional[int]:
     def preprocess(name):
         # Hyphens separate name tokens; preserve legacy entity-key normalization.
-        name = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name))
+        name = _normalize_text(re.sub(r"[-‐‑‒–—;]", " ", name))
         blacklist = {
             "the", "ltd", "llc", "inc", "co", "company", "corp", "plc", "limited",
             "real", "estate", "group", "services", "solutions", "hub", "global",
@@ -925,7 +933,7 @@ def _score_person_candidate(
             "network", "centre", "center", "international", "foundation", "institute", "bank",
         }
         tokens = [w for w in name.split() if w and w not in blacklist]
-        return " ".join(tokens), set(tokens)
+        return " ".join(tokens), tokens
 
     s_clean, s_tokens = preprocess(search_name)
     c_clean, c_tokens = preprocess(candidate_name)
@@ -942,16 +950,30 @@ def _score_person_candidate(
     score = int(fuzz.token_set_ratio(s_clean, c_clean))
     if score < effective_threshold:
         return None
-    overlap = len(s_tokens & c_tokens)
+    overlap = len(set(s_tokens) & set(c_tokens))
+
+    # The decision threshold is applied to the established token-set score.
+    # The reported score also reflects all original tokens, so a subset or a
+    # repeated word is not presented as an identical name.
+    full_search = _normalize_text(re.sub(r"[-‐‑‒–—;]", " ", search_name))
+    full_candidate = _normalize_text(re.sub(r"[-‐‑‒–—;]", " ", candidate_name))
+    def reported_score(decision_score):
+        if sorted(full_search.split()) == sorted(full_candidate.split()):
+            return decision_score
+        return min(99, int(round(0.75 * decision_score + 0.25 * fuzz.token_sort_ratio(full_search, full_candidate))))
 
     if len(s_tokens) <= 2 and s_clean == c_clean:
-        return score
+        return reported_score(score) if score >= effective_threshold else None
 
-    min_overlap = min(2, len(s_tokens), len(c_tokens))
+    # A multi-token search needs two distinct token occurrences, even when a
+    # source name or alias contains only one token. Otherwise a surname-only
+    # alias can explain away a conflicting given name.
+    min_overlap = min(2, len(s_tokens))
     # One-to-one token alignment permits spelling variation without letting one
     # common token explain an otherwise different name.
-    remaining = set(c_tokens)
+    remaining = list(c_tokens)
     aligned = 0
+    aligned_informative = 0
     for token in sorted(s_tokens, key=lambda t: (t not in c_tokens, -len(t), t)):
         if not remaining:
             break
@@ -960,10 +982,15 @@ def _score_person_candidate(
         initial_match = min(len(token), len(best)) == 1 and token[0] == best[0]
         if token == best or initial_match or (min(len(token), len(best)) >= 4 and similarity >= 80):
             aligned += 1
+            if token not in _PERSON_NAME_PARTICLES and best not in _PERSON_NAME_PARTICLES:
+                aligned_informative += 1
             remaining.remove(best)
     if aligned < min_overlap:
         return None
-    if any(len(token) == 1 for token in s_tokens | c_tokens):
+    informative_query = [t for t in s_tokens if t not in _PERSON_NAME_PARTICLES]
+    if aligned_informative < min(2, len(informative_query)):
+        return None
+    if any(len(token) == 1 for token in s_tokens + c_tokens):
         score = min(score, 85)
     if not overlap and fuzz.token_sort_ratio(s_clean, c_clean) < 90:
         return None
@@ -977,7 +1004,7 @@ def _score_person_candidate(
         score -= 20
     if score < effective_threshold:
         return None
-    return score
+    return reported_score(score)
 
 
 def _score_org_candidate(
@@ -1050,6 +1077,8 @@ def _score_org_candidate(
 
     if score < threshold:
         return None
+    if sorted(query['normalized'].split()) != sorted(candidate['normalized'].split()):
+        score = min(score, 99)
     return max(0, min(100, score))
 
 
@@ -1231,6 +1260,18 @@ def _identity_country_evidence(candidate, query):
     return "compatible" if _country_matches(candidate, query) else "conflicting"
 
 
+def _parse_aliases(value):
+    """OpenSanctions' multi-value cells are nested semicolon-delimited CSV."""
+    text = _safe_str(value)
+    if not text:
+        return []
+    try:
+        values = next(csv.reader([text], delimiter=';', strict=True))
+    except (csv.Error, StopIteration) as exc:
+        raise ScreeningUnavailableError('Watchlist alias data is malformed; screening cannot complete.') from exc
+    return [item.strip() for item in values if item.strip()]
+
+
 def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps):
     """One decision/evidence implementation shared by both storage backends."""
     if not _normalize_text(name):
@@ -1252,22 +1293,38 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             continue
         display_name = _safe_str(row.get("name"))
         aliases = _safe_str(raw.get("aliases") or row.get("aliases"))
-        names = list(dict.fromkeys([display_name] + [v.strip() for v in aliases.split(';') if v.strip()]))
+        names = list(dict.fromkeys([display_name] + _parse_aliases(aliases)))
         hits = get_best_name_matches(name, names, limit=len(names), threshold=75, has_dob=bool(_normalize_dob(dob)), entity_type=entity_type)
         suggestion_hits = get_best_name_matches(name, names, limit=1, threshold=60, strict_short_queries=False, entity_type=entity_type)
         if suggestion_hits:
             suggestions[display_name] = max(suggestions.get(display_name, 0), suggestion_hits[0][1])
-        if not hits:
-            continue
-        _, score, matched_index = hits[0]
         # New imports preserve original precision/multiple DOBs. Older PostgreSQL
         # rows contain only their stored DATE; no more precise evidence is invented.
         candidate_dob = _safe_str(raw.get("birth_date") if "birth_date" in raw else row.get("birth_date"))
         candidate_country = _safe_str(raw.get("countries") or row.get("countries") or row.get("country"))
         dob_status = _identity_dob_evidence(candidate_dob, dob) if et == "person" else "not_applicable"
         country_status = _identity_country_evidence(candidate_country, country)
+        weak_name_with_dob = False
+        if not hits and et == 'person' and dob_status == 'exact':
+            # A fragment is supporting evidence, never an identity conclusion.
+            # Require a full exact DOB and an exact whole token, not a fuzzy
+            # surname, initial, partial date, or merely compatible year.
+            query_tokens = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name)).split()
+            if len(query_tokens) >= 2:
+                for index, candidate_name in enumerate(names):
+                    tokens = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", candidate_name)).split()
+                    if len(tokens) == 1 and len(tokens[0]) > 1 and tokens[0] in query_tokens:
+                        matched_index = index
+                        score = min(69, int(fuzz.ratio(_normalize_text(name), _normalize_text(candidate_name))))
+                        weak_name_with_dob = True
+                        break
+        if hits:
+            _, score, matched_index = hits[0]
+        elif not weak_name_with_dob:
+            continue
         excluded = dob_status == "conflicting"
-        reasons = ["Name similarity passed the matching threshold."]
+        reasons = (["A single-word name or alias matched a search token and the full date of birth agrees; review required."]
+                   if weak_name_with_dob else ["Name comparison passed the decision rules; the displayed similarity also reflects the full name."])
         if matched_index:
             reasons.append("Matched a listed alias.")
         if dob_status == "conflicting":
@@ -1342,6 +1399,9 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
     # before LIMIT so unrelated schemas cannot crowd out eligible candidates.
     limit = max(1, min(2000, int(candidate_limit)))
     schemas = ['organization', 'company', 'legalentity'] if entity_type.lower() == 'organization' else ['person']
+    normalized_dob = _normalize_dob(dob)
+    full_dob = normalized_dob if normalized_dob and len(normalized_dob) == 10 and entity_type.lower() != 'organization' else None
+    query_tokens = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name)).split()
     rows = []
     for source_type in (['sanctions', 'peps'] if include_peps else ['sanctions']):
         candidates = await conn.fetch('''
@@ -1350,11 +1410,31 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
             FROM watchlist_entities
             WHERE source_type=$1 AND lower(entity_schema)=ANY($3::text[])
               AND (name_norm % $2 OR strpos(name_norm, $2)>0
-                   OR EXISTS (SELECT 1 FROM unnest(string_to_array(COALESCE(raw_json->>'aliases',''), ';')) alias
-                              WHERE similarity(lower(alias), $2)>=0.3 OR strpos(lower(alias), $2)>0))
+                   OR EXISTS (SELECT 1 FROM (
+                                  SELECT unnest(string_to_array(COALESCE(raw_json->>'aliases',''), ';')) AS alias
+                                  WHERE strpos(COALESCE(raw_json->>'aliases',''), '"') = 0
+                                  UNION ALL
+                                  SELECT replace(COALESCE(matched[3],matched[4]), '""', '"') AS alias
+                                  FROM regexp_matches(COALESCE(raw_json->>'aliases',''),
+                                      '(^|;)("((?:[^"]|"")*)"|([^;]*))', 'g') AS matched
+                                  WHERE strpos(COALESCE(raw_json->>'aliases',''), '"') > 0
+                              ) alias_values
+                              CROSS JOIN LATERAL (SELECT lower(trim(regexp_replace(
+                                  regexp_replace(normalize(replace(alias,';',' '), NFKD) COLLATE "C", '[^a-zA-Z0-9_[:space:]]', '', 'g'),
+                                  '[[:space:]]+', ' ', 'g'))) AS alias_norm) normalized
+                              WHERE similarity(lower(alias), $2)>=0.3 OR strpos(lower(alias), $2)>0
+                                 OR similarity(alias_norm, $2)>=0.3 OR strpos(alias_norm, $2)>0
+                                 OR ($5::text IS NOT NULL AND
+                                     (birth_date::text=$5 OR EXISTS (SELECT 1 FROM regexp_split_to_table(
+                                         COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE trim(source_dob)=$5)) AND
+                                     alias_norm=ANY($6::text[])))
+                   OR ($5::text IS NOT NULL AND
+                       (birth_date::text=$5 OR EXISTS (SELECT 1 FROM regexp_split_to_table(
+                           COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE trim(source_dob)=$5)) AND
+                       name_norm=ANY($6::text[])))
             ORDER BY similarity(name_norm, $2) DESC, entity_id
             LIMIT $4
-        ''', source_type, _normalize_text(name), schemas, limit + 1)
+        ''', source_type, _normalize_text(name), schemas, limit + 1, full_dob, query_tokens)
         if len(candidates) > limit:
             raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
         rows.extend(dict(r) for r in candidates)

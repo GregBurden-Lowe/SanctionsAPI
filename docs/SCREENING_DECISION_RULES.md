@@ -1,24 +1,26 @@
-# Screening decision rules — evidence-v4
+# Screening decision rules — evidence-v8
 
 This is the locally implemented matching stage following the history foundation. Production activation is a separate release step.
 
 ## Inputs and compatibility
 
-Names are Unicode folded, punctuation normalised and whitespace collapsed. Person matching retains the existing fuzzy thresholds (75 base; stricter short-name thresholds without DOB), but uses one-to-one token alignment so an anchored spelling variation or initial can be considered. Hyphens in person names are treated as token boundaries, without changing legacy entity-key normalization. Initial-based scores are capped at 85. Organisation generic-word controls remain in place.
+Names are Unicode folded, punctuation normalised and whitespace collapsed. Person matching retains the existing fuzzy thresholds (75 base; stricter short-name thresholds without DOB), but uses one-to-one token alignment so an anchored spelling variation or initial can be considered. Hyphens in person names are treated as token boundaries, without changing legacy entity-key normalization. Initial-based scores are capped at 85 except identical normalized short names. Decision thresholds use the established token-set score and alignment rules; the displayed score also reflects the full token sequence for nonidentical person names and can therefore be below the internal decision threshold. Only identical normalized full token multisets can score 100. Common name particles do not count as independent informative anchors. Organisation generic-word controls remain in place.
+
+Person matching preserves repeated token occurrences. A multiword search normally must align at least two occurrences with the same candidate name or alias; a surname-only source name or alias cannot alone trigger a match or suggestion. Single-word queries retain their existing behaviour. As a separate corroborated review path, an exact non-initial single-word source name or alias matching a search token can trigger a potential match when the full source and submitted dates of birth agree exactly. Its name score is capped below the normal threshold and its evidence explains why it was retained. A compatible year/month, missing DOB, fuzzy fragment, or country alone does not activate this path. This does not establish identity: people can share both a name fragment and a date of birth. It can still miss a genuine match when the source contains only a single word and no exact full DOB. Review this trade-off against independently labelled cases before release; a clearance is not proof that an incomplete source name is unrelated.
 
 DOB input supports YYYY, DD-MM-YYYY, DD/MM/YYYY and YYYY-MM-DD. Invalid/future values and incomplete dates other than year-only are rejected instead of being silently omitted or assigned invented date parts.
 
-The `evidence-v4` fingerprint invalidates cached results from previous matching/assurance rules. See [internal screening improvements](INTERNAL_SCREENING_IMPROVEMENTS.md) for the new source and review controls. Existing historical runs remain unchanged.
+The `evidence-v8` fingerprint invalidates cached results from previous matching/assurance rules, including the PostgreSQL alias retrieval correction. See [internal screening improvements](INTERNAL_SCREENING_IMPROVEMENTS.md) for the source and review controls. Existing historical runs remain unchanged.
 
 ## Shared execution policy
 
 Interactive PostgreSQL, interactive Parquet and background worker checks now use `screening_policy.py`. Each performs person and organisation sanctions checks. PEP checking is enabled only for a submitted Person whose name does not look company-like. The supplied DOB applies to the person check; country evidence is retained for both types. The submitted entity type remains unchanged and the result explains possible misclassification.
 
-Worker and interactive backend fingerprints remain separate conservatively; `evidence-v4` invalidates old cached decisions so unversioned results cannot bypass source assurance. Release API and worker together. The existing CSV compatibility log is appended once per successful execution; durable request/run history remains the audit record.
+Worker and interactive backend fingerprints remain separate conservatively; `evidence-v8` invalidates old cached decisions. Release API and worker together. The existing CSV compatibility log is appended once per successful execution; durable request/run history remains the audit record.
 
 ## Shared evaluator
 
-PostgreSQL and Parquet use the same candidate evaluator, including listed aliases. Each candidate records:
+PostgreSQL and Parquet use the same candidate evaluator. Multi-valued aliases are parsed as nested semicolon-delimited CSV, preserving quoted semicolons and escaped quotes; malformed alias values fail the affected screening instead of issuing a clearance. Refresh validates alias cells before publishing the new snapshot. Before deploying against an existing PostgreSQL watchlist, run the read-only alias preflight in [release rescreen](RELEASE_RESCREEN.md), since legacy data was ingested before this validation existed. Each candidate records:
 
 - provider record ID where available, listed name, matched name/alias, entity type and source;
 - name similarity score, original source DOB/country and evidence assessments;
@@ -51,6 +53,8 @@ All retrieved name matches are assessed before selecting outcomes. At most 50 ev
 
 PostgreSQL uses trigram candidate retrieval; Parquet scans the relevant schema. A shared evaluator does not guarantee identical retrieval for every spelling/transliteration. The local 100,000-row synthetic benchmark is recorded in [validation results](SCREENING_VALIDATION.md); representative production-volume testing remains necessary.
 
+PostgreSQL normalizes aliases with Unicode NFKD and ASCII folding before additional trigram, substring and exact-token checks, retaining the original raw alias checks as well. The shared evaluator decides whether a retrieved candidate matches. This requires a UTF-8 PostgreSQL database with Unicode normalization support; it does not guarantee parity for every name or transliteration. Tests cover accented and decomposed full and single-word aliases.
+
 ## API and presentation
 
 Legacy status/boolean fields remain for integrations: `Fail Sanction`, `Fail PEP`, `Cleared`, `Is Sanctioned`, `Is PEP`. These flags represent engine candidates, not confirmed identities. Sanctions takes primary precedence, while a PEP candidate found in another type check remains flagged.
@@ -65,6 +69,6 @@ Screening requires populated required source datasets. Refreshing an empty Postg
 
 ## Verification and limits
 
-`tests/fixtures/matching_cases.json` is a small labelled synthetic regression corpus covering spelling variation, diacritics, missing middle names, initials, word order and generic organisation false positives. Other tests cover identity precision, aliases, exclusion evidence, candidate caps, cross-backend evidence and refresh recovery.
+`tests/fixtures/matching_cases.json` is a labelled synthetic regression corpus covering spelling variation, diacritics, missing middle names, initials, word order, repeated names, single-word source names and generic organisation false positives. Other tests cover identity precision, aliases, exclusion evidence, candidate caps, cross-backend evidence and refresh recovery.
 
 The additional `policy_cases.json` corpus checks 28 scenarios through real PostgreSQL retrieval and the Parquet evaluator; a real worker test verifies the same cross-type outcome. These passing tests are not a measured real-world recall/precision claim. A larger reviewed operational corpus, production-volume performance testing and complete source-version publication remain release follow-ups. No model/AI component makes these matching decisions.

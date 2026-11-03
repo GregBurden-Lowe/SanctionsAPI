@@ -36,12 +36,13 @@ async def benchmark(size, repeats, concurrency):
         await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text,
             name text,name_norm text,birth_date date,dataset text,regime text,raw_json jsonb)''')
         rows=[]
-        for i in range(size-2):
+        for i in range(size-3):
             token=hashlib.sha256(str(i).encode()).hexdigest()[:24]
             rows.append(dict(id=str(i), name='Fixture '+token, aliases='Alias '+token, schema='Organization' if i%2 else 'Person',
                 source_type='peps' if i%5==0 else 'sanctions', dataset='Synthetic'))
         rows.extend([dict(id='target',name='Jane Smith',aliases='Jane Jones',schema='Person',source_type='sanctions',dataset='Synthetic',birth_date='1980'),
-            dict(id='company',name='Hyde & Partners Ltd',schema='Organization',source_type='sanctions',dataset='Synthetic')])
+            dict(id='company',name='Hyde & Partners Ltd',schema='Organization',source_type='sanctions',dataset='Synthetic'),
+            dict(id='weak',name='Claire Barlow',aliases='Barlow',schema='Person',source_type='peps',dataset='Synthetic',birth_date='1980-01-01')])
         await conn.copy_records_to_table('watchlist_entities',columns=['source_type','entity_id','entity_schema','name','name_norm','dataset','raw_json'],
             records=[(r['source_type'],r['id'],r['schema'],r['name'],_normalize_text(r['name']),r['dataset'],json.dumps(r)) for r in rows])
         await conn.execute('CREATE INDEX benchmark_name_trgm ON watchlist_entities USING gin(name_norm gin_trgm_ops)')
@@ -49,11 +50,12 @@ async def benchmark(size, repeats, concurrency):
         await conn.execute('ANALYZE watchlist_entities')
         report['postgres_version']=await conn.fetchval('SHOW server_version')
         df=pd.DataFrame(rows)
-        queries=[('exact', 'Jane Smith','Person', True), ('alias','Jane Jones','Person', True),
-                 ('no_match','Vladimir Petrov','Person',False), ('company','Hyde and Partners','Organization',True)]
+        queries=[('exact', 'Jane Smith','Person', None, True), ('alias','Jane Jones','Person', None, True),
+                 ('no_match','Vladimir Petrov','Person',None,False), ('company','Hyde and Partners','Organization',None,True),
+                 ('corroborated_fragment','Alexandertheodore Maximillian Barlow','Person','1980-01-01',True)]
         samples=[]
-        for label,name,kind,expected in queries:
-            args=dict(name=name,dob=None,country='UK',entity_type=kind)
+        for label,name,kind,dob,expected in queries:
+            args=dict(name=name,dob=dob,country='UK',entity_type=kind)
             timings={'postgres':[],'parquet_in_memory':[]}
             for _ in range(repeats):
                 start=time.perf_counter(); pg=await run_postgres_check(conn,**args)

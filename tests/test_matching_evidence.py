@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 import pandas as pd
 
-from utils import _evaluate_watchlist_rows, _identity_dob_evidence, _normalize_dob, perform_opensanctions_check
+from utils import _evaluate_watchlist_rows, _identity_dob_evidence, _normalize_dob, _parse_aliases, perform_opensanctions_check, ScreeningUnavailableError
 from api_server import _merge_dual_type_results
 
 
@@ -26,6 +26,23 @@ class MatchingEvidenceTests(unittest.TestCase):
                 item = row(case['candidate']); item['schema'] = kind
                 result = evaluate([item], case['query'], entity_type=kind)
                 self.assertEqual(result['Match Found'], case['expected'])
+
+    def test_generated_name_variants_and_conflicting_tokens(self):
+        # Synthetic metamorphic checks exercise multiple names, but are not
+        # independent identity labels or a production recall measurement.
+        names = [('Aisha', 'Rahman'), ('Marta', 'Nowak'), ('Wei', 'Zhang'),
+                 ('Daniel', 'Okafor'), ('Fatima', 'Hassan'), ('Olga', 'Petrova'),
+                 ('Mohamed', 'Khalil'), ('Lucia', 'Romero'), ('Arjun', 'Kapoor'),
+                 ('Sofia', 'Andersson'), ('Emeka', 'Nwosu'), ('Yuki', 'Tanaka')]
+        for given, family in names:
+            query = f'{given} {family}'
+            for candidate, expected in ((query, True), (f'{family} {given}', True),
+                                        (f'{given} Elizabeth {family}', True),
+                                        (f'{given} Unrelatedsurname', False),
+                                        (f'Unrelatedgiven {family}', False),
+                                        (f'{given} {given}', False)):
+                with self.subTest(query=query, candidate=candidate):
+                    self.assertEqual(evaluate([row(candidate)], query)['Match Found'], expected)
 
     def test_dob_precision_and_unknown(self):
         for candidate, query, expected in [
@@ -63,6 +80,77 @@ class MatchingEvidenceTests(unittest.TestCase):
         self.assertTrue(result['Match Found'])
         self.assertTrue(result['Candidate Evidence'][0]['matched_alias'])
         self.assertEqual(result['Candidate Evidence'][0]['birth_date'], '1980')
+
+    def test_incomplete_alias_does_not_override_conflicting_full_name(self):
+        item = row('Claire Barlow', aliases='C. Barlow;C.L. Barlow;Barlow;Barlow, C.')
+        for dob in (None, '1980-01-01'):
+            result = evaluate([item], name='Evan Barlow', dob=dob)
+            self.assertFalse(result['Match Found'])
+            self.assertEqual(result['Top Matches'], [])
+        self.assertTrue(evaluate([item], name='Claire Barlow')['Match Found'])
+
+    def test_complete_alias_is_still_used(self):
+        item = row('Claire Barlow', aliases='Barlow;Clara Barlow')
+        result = evaluate([item], name='Clara Barlow')
+        self.assertTrue(result['Match Found'])
+        self.assertEqual(result['Candidate Evidence'][0]['matched_name'], 'Clara Barlow')
+
+    def test_nested_csv_aliases_preserve_quoted_semicolons_and_quotes(self):
+        self.assertEqual(_parse_aliases('Other;"Mohammad; Eslami";"John ""Jack"" Smith"'),
+                         ['Other','Mohammad; Eslami','John "Jack" Smith'])
+        item = row('Unrelated Display', aliases='Other;"Mohammad; Eslami"')
+        result = evaluate([item], name='Mohammad Eslami')
+        self.assertTrue(result['Match Found'])
+        self.assertEqual(result['Candidate Evidence'][0]['matched_name'],'Mohammad; Eslami')
+        self.assertFalse(evaluate([item], name='Doctor Mohammad Example')['Match Found'])
+
+    def test_malformed_nested_csv_fails_incomplete(self):
+        with self.assertRaises(ScreeningUnavailableError):
+            evaluate([row('Unrelated Display',aliases='"unclosed;name')])
+
+    def test_perfect_score_requires_the_same_full_token_multiset(self):
+        for name,candidate in [('Jane Smith','Jane Elizabeth Smith'),
+                               ('Milo A Milo','Milo Milo'),
+                               ('J Smith','John Smith'),
+                               ('Jane Smith Group','Jane Smith')]:
+            with self.subTest(name=name,candidate=candidate):
+                result=evaluate([row(candidate)],name)
+                self.assertTrue(result['Match Found'])
+                self.assertLess(result['Score'],100)
+        self.assertEqual(evaluate([row('Smith Jane')],name='Jane Smith')['Score'],100)
+        self.assertFalse(evaluate([row('Omar Al-Zafir')],name='Omar Al-Omar')['Match Found'])
+        self.assertTrue(evaluate([row('Omar Omar')],name='Omar Al-Omar')['Match Found'])
+
+    def test_extra_title_and_surname_does_not_suppress_two_name_match(self):
+        result=evaluate([row('Aisha Rahman')],name='Mrs Aisha Rahman Hassan')
+        self.assertTrue(result['Match Found'])
+        self.assertLess(result['Score'],100)
+
+    def test_single_word_name_requires_exact_full_dob_to_support_review(self):
+        for candidate in (row('Claire Barlow', aliases='Barlow', birth_date='1980-01-01'),
+                          row('Barlow', birth_date='1980-01-01')):
+            for dob, expected in ((None, False), ('1980', False), ('1981-01-01', False), ('1980-01-01', True)):
+                with self.subTest(candidate=candidate['name'], dob=dob):
+                    result = evaluate([candidate], name='Evan Barlow', dob=dob)
+                    self.assertEqual(result['Match Found'], expected)
+                    if expected:
+                        evidence = result['Candidate Evidence'][0]
+                        self.assertEqual(evidence['matched_name'], 'Barlow')
+                        self.assertEqual(evidence['dob_assessment'], 'exact')
+                        self.assertLess(evidence['name_score'], 75)
+                        self.assertIn('single-word', evidence['reasons'][0])
+
+    def test_single_word_support_needs_exact_non_initial_token(self):
+        for alias in ('Crawfor', 'I'):
+            item = row('Claire Barlow', aliases=alias, birth_date='1980-01-01')
+            self.assertFalse(evaluate([item], name='Evan Barlow', dob='1980-01-01')['Match Found'])
+
+    def test_repeated_name_does_not_match_unrelated_second_token(self):
+        item = row('Milo Milo')
+        result = evaluate([item], name='Milo Winters')
+        self.assertFalse(result['Match Found'])
+        self.assertEqual(result['Top Matches'], [])
+        self.assertTrue(evaluate([item], name='Milo Milo')['Match Found'])
 
     def test_no_top_50_filter_before_identity_decision(self):
         items = [row(birth_date='1970-01-01') for _ in range(55)] + [row(birth_date='1980-02-01')]

@@ -1,30 +1,479 @@
 [
- {"label":"listed alias", "query":"Jane Smith", "row":{"name":"Jane Brown","aliases":"Jane Smith;J Smith"},"match":true},
- {"label":"accented alias", "query":"Jose Garcia", "row":{"name":"Unrelated Display","aliases":"José García"},"match":true},
- {"label":"initial and surname", "query":"J Smith", "row":{"name":"John Smith"},"match":true},
- {"label":"conflicting initial", "query":"R Smith", "row":{"name":"John Smith"},"match":false},
- {"label":"surname first", "query":"Smith Jane", "row":{"name":"Jane Smith"},"match":true},
- {"label":"hyphenated surname", "query":"Jane Smith Jones", "row":{"name":"Jane Smith-Jones"},"match":true},
- {"label":"apostrophe", "query":"Sean O Connor", "row":{"name":"Sean O'Connor"},"match":true},
- {"label":"transposed letters", "query":"Mikhail Petrov", "row":{"name":"Mikahil Petrov"},"match":true},
- {"label":"middle name missing", "query":"Jane Smith", "row":{"name":"Jane Elizabeth Smith"},"match":true},
- {"label":"different surname", "query":"Jane Smith", "row":{"name":"Jane Brown"},"match":false},
- {"label":"exact DOB", "query":"Jane Smith", "dob":"1980-06-15", "row":{"name":"Jane Smith","birth_date":"1980-06-15"},"match":true,"dob_assessment":"exact"},
- {"label":"partial candidate year", "query":"Jane Smith", "dob":"1980-06-15", "row":{"name":"Jane Smith","birth_date":"1980"},"match":true,"dob_assessment":"compatible"},
- {"label":"partial candidate month", "query":"Jane Smith", "dob":"1980-06-15", "row":{"name":"Jane Smith","birth_date":"1980-06"},"match":true,"dob_assessment":"compatible"},
- {"label":"partial submitted year", "query":"Jane Smith", "dob":"1980", "row":{"name":"Jane Smith","birth_date":"1980-06-15"},"match":true,"dob_assessment":"compatible"},
- {"label":"conflicting DOB", "query":"Jane Smith", "dob":"1980-06-15", "row":{"name":"Jane Smith","birth_date":"1970-06-15"},"match":false,"dob_assessment":"conflicting"},
- {"label":"missing DOB", "query":"Jane Smith", "dob":"1980", "row":{"name":"Jane Smith"},"match":true,"dob_assessment":"unknown"},
- {"label":"invalid source DOB", "query":"Jane Smith", "dob":"1980", "row":{"name":"Jane Smith","birth_date":"1980-02-30"},"match":true,"dob_assessment":"unknown"},
- {"label":"multiple source dates", "query":"Jane Smith", "dob":"1980", "row":{"name":"Jane Smith","birth_date":"1970;1980"},"match":true,"dob_assessment":"compatible"},
- {"label":"conflicting country remains match", "query":"Jane Smith", "country":"UK", "row":{"name":"Jane Smith","countries":"US"},"match":true,"country_assessment":"conflicting"},
- {"label":"compatible country", "query":"Jane Smith", "country":"UK", "row":{"name":"Jane Smith","countries":"UK;US"},"match":true,"country_assessment":"compatible"},
- {"label":"company suffix", "query":"Hyde and Partners", "type":"Organization", "row":{"name":"Hyde & Partners Ltd","schema":"Organization"},"match":true},
- {"label":"generic company overlap", "query":"BUZZ PROPERTY MANAGEMENT LTD", "type":"Organization", "row":{"name":"PRINCE PROPERTY CAMBODIA MANAGEMENT CO. LTD.","schema":"Organization"},"match":false},
- {"label":"company submitted as person", "query":"Hyde and Partners", "row":{"name":"Hyde & Partners Ltd","schema":"Organization"},"match":true},
- {"label":"person submitted as organisation", "query":"Jane Smith", "type":"Organization", "row":{"name":"Jane Smith"},"match":true},
- {"label":"person PEP enabled", "query":"Jane Smith", "row":{"name":"Jane Smith","source_type":"peps"},"match":true,"pep":true},
- {"label":"organisation PEP skipped", "query":"Jane Smith", "type":"Organization", "row":{"name":"Jane Smith","source_type":"peps"},"match":false},
- {"label":"company looking person skips PEP", "query":"Acme Trading Ltd", "row":{"name":"Acme Trading Ltd","source_type":"peps"},"match":false},
- {"label":"company DOB not used as exclusion", "query":"Acme Trading Ltd", "dob":"1980", "type":"Organization", "row":{"name":"Acme Trading Ltd","schema":"Organization","birth_date":"1970"},"match":true}
+  {
+    "label": "listed alias",
+    "query": "Jane Smith",
+    "row": {
+      "name": "Jane Brown",
+      "aliases": "Jane Smith;J Smith"
+    },
+    "match": true
+  },
+  {
+    "label": "accented alias",
+    "query": "Jose Garcia",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "José García"
+    },
+    "match": true
+  },
+  {
+    "label": "initial and surname",
+    "query": "J Smith",
+    "row": {
+      "name": "John Smith"
+    },
+    "match": true
+  },
+  {
+    "label": "conflicting initial",
+    "query": "R Smith",
+    "row": {
+      "name": "John Smith"
+    },
+    "match": false
+  },
+  {
+    "label": "surname first",
+    "query": "Smith Jane",
+    "row": {
+      "name": "Jane Smith"
+    },
+    "match": true
+  },
+  {
+    "label": "hyphenated surname",
+    "query": "Jane Smith Jones",
+    "row": {
+      "name": "Jane Smith-Jones"
+    },
+    "match": true
+  },
+  {
+    "label": "apostrophe",
+    "query": "Sean O Connor",
+    "row": {
+      "name": "Sean O'Connor"
+    },
+    "match": true
+  },
+  {
+    "label": "transposed letters",
+    "query": "Mikhail Petrov",
+    "row": {
+      "name": "Mikahil Petrov"
+    },
+    "match": true
+  },
+  {
+    "label": "middle name missing",
+    "query": "Jane Smith",
+    "row": {
+      "name": "Jane Elizabeth Smith"
+    },
+    "match": true
+  },
+  {
+    "label": "different surname",
+    "query": "Jane Smith",
+    "row": {
+      "name": "Jane Brown"
+    },
+    "match": false
+  },
+  {
+    "label": "exact DOB",
+    "query": "Jane Smith",
+    "dob": "1980-06-15",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1980-06-15"
+    },
+    "match": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "partial candidate year",
+    "query": "Jane Smith",
+    "dob": "1980-06-15",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1980"
+    },
+    "match": true,
+    "dob_assessment": "compatible"
+  },
+  {
+    "label": "partial candidate month",
+    "query": "Jane Smith",
+    "dob": "1980-06-15",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1980-06"
+    },
+    "match": true,
+    "dob_assessment": "compatible"
+  },
+  {
+    "label": "partial submitted year",
+    "query": "Jane Smith",
+    "dob": "1980",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1980-06-15"
+    },
+    "match": true,
+    "dob_assessment": "compatible"
+  },
+  {
+    "label": "conflicting DOB",
+    "query": "Jane Smith",
+    "dob": "1980-06-15",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1970-06-15"
+    },
+    "match": false,
+    "dob_assessment": "conflicting"
+  },
+  {
+    "label": "missing DOB",
+    "query": "Jane Smith",
+    "dob": "1980",
+    "row": {
+      "name": "Jane Smith"
+    },
+    "match": true,
+    "dob_assessment": "unknown"
+  },
+  {
+    "label": "invalid source DOB",
+    "query": "Jane Smith",
+    "dob": "1980",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1980-02-30"
+    },
+    "match": true,
+    "dob_assessment": "unknown"
+  },
+  {
+    "label": "multiple source dates",
+    "query": "Jane Smith",
+    "dob": "1980",
+    "row": {
+      "name": "Jane Smith",
+      "birth_date": "1970;1980"
+    },
+    "match": true,
+    "dob_assessment": "compatible"
+  },
+  {
+    "label": "conflicting country remains match",
+    "query": "Jane Smith",
+    "country": "UK",
+    "row": {
+      "name": "Jane Smith",
+      "countries": "US"
+    },
+    "match": true,
+    "country_assessment": "conflicting"
+  },
+  {
+    "label": "compatible country",
+    "query": "Jane Smith",
+    "country": "UK",
+    "row": {
+      "name": "Jane Smith",
+      "countries": "UK;US"
+    },
+    "match": true,
+    "country_assessment": "compatible"
+  },
+  {
+    "label": "company suffix",
+    "query": "Hyde and Partners",
+    "type": "Organization",
+    "row": {
+      "name": "Hyde & Partners Ltd",
+      "schema": "Organization"
+    },
+    "match": true
+  },
+  {
+    "label": "generic company overlap",
+    "query": "BUZZ PROPERTY MANAGEMENT LTD",
+    "type": "Organization",
+    "row": {
+      "name": "PRINCE PROPERTY CAMBODIA MANAGEMENT CO. LTD.",
+      "schema": "Organization"
+    },
+    "match": false
+  },
+  {
+    "label": "company submitted as person",
+    "query": "Hyde and Partners",
+    "row": {
+      "name": "Hyde & Partners Ltd",
+      "schema": "Organization"
+    },
+    "match": true
+  },
+  {
+    "label": "person submitted as organisation",
+    "query": "Jane Smith",
+    "type": "Organization",
+    "row": {
+      "name": "Jane Smith"
+    },
+    "match": true
+  },
+  {
+    "label": "person PEP enabled",
+    "query": "Jane Smith",
+    "row": {
+      "name": "Jane Smith",
+      "source_type": "peps"
+    },
+    "match": true,
+    "pep": true
+  },
+  {
+    "label": "organisation PEP skipped",
+    "query": "Jane Smith",
+    "type": "Organization",
+    "row": {
+      "name": "Jane Smith",
+      "source_type": "peps"
+    },
+    "match": false
+  },
+  {
+    "label": "company looking person skips PEP",
+    "query": "Acme Trading Ltd",
+    "row": {
+      "name": "Acme Trading Ltd",
+      "source_type": "peps"
+    },
+    "match": false
+  },
+  {
+    "label": "company DOB not used as exclusion",
+    "query": "Acme Trading Ltd",
+    "dob": "1980",
+    "type": "Organization",
+    "row": {
+      "name": "Acme Trading Ltd",
+      "schema": "Organization",
+      "birth_date": "1970"
+    },
+    "match": true
+  },
+  {
+    "label": "repeated name does not match unrelated second token",
+    "query": "Milo Winters",
+    "row": {
+      "name": "Milo Milo",
+      "source_type": "peps"
+    },
+    "match": false
+  },
+  {
+    "label": "weak alias alone does not match",
+    "query": "Evan Barlow",
+    "row": {
+      "name": "Claire Barlow",
+      "aliases": "Barlow",
+      "source_type": "peps",
+      "birth_date": "1980-01-01"
+    },
+    "match": false
+  },
+  {
+    "label": "weak alias with matching full DOB",
+    "query": "Evan Barlow",
+    "dob": "1980-01-01",
+    "row": {
+      "name": "Claire Barlow",
+      "aliases": "Barlow",
+      "source_type": "peps",
+      "birth_date": "1980-01-01"
+    },
+    "match": true,
+    "pep": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "weak alias with partial DOB",
+    "query": "Evan Barlow",
+    "dob": "1980",
+    "row": {
+      "name": "Claire Barlow",
+      "aliases": "Barlow",
+      "source_type": "peps",
+      "birth_date": "1980-01-01"
+    },
+    "match": false
+  },
+  {
+    "label": "single-word primary name with matching full DOB",
+    "query": "Evan Barlow",
+    "dob": "1980-01-01",
+    "row": {
+      "name": "Barlow",
+      "birth_date": "1980-01-01"
+    },
+    "match": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "complete alias remains detectable",
+    "query": "Clara Barlow",
+    "row": {
+      "name": "Claire Barlow",
+      "aliases": "Barlow;Clara Barlow",
+      "source_type": "peps"
+    },
+    "match": true,
+    "pep": true
+  },
+  {
+    "label": "long query retrieval using corroborated single word alias",
+    "query": "Alexandertheodore Maximillian Barlow",
+    "dob": "1980-01-01",
+    "row": {
+      "name": "Claire Barlow",
+      "aliases": "Barlow",
+      "source_type": "peps",
+      "birth_date": "1980-01-01"
+    },
+    "match": true,
+    "pep": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "accented full alias retrieval",
+    "query": "Aeiou Nuno",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Áéíóú Núñô"
+    },
+    "match": true
+  },
+  {
+    "label": "accented one-word alias with full DOB",
+    "query": "Alexandertheodore Maximillian Jose",
+    "dob": "1980-01-01",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Jósé",
+      "birth_date": "1980-01-01"
+    },
+    "match": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "decomposed accented alias with full DOB",
+    "query": "Alexandertheodore Maximillian Jose",
+    "dob": "1980-01-01",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "José",
+      "birth_date": "1980-01-01"
+    },
+    "match": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "accented alias with multiple precise source dates",
+    "query": "Alexandertheodore Maximillian Jose",
+    "dob": "1980-01-01",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Jósé",
+      "birth_date": "1971-01-01 | 1980-01-01"
+    },
+    "match": true,
+    "dob_assessment": "exact"
+  },
+  {
+    "label": "nested quoted alias with semicolon",
+    "query": "Mohammad Eslami",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Other;\"MOHAMMAD; ESLAMI\""
+    },
+    "match": true
+  },
+  {
+    "label": "nested quoted accented alias",
+    "query": "Jose Garcia",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Other;\"José; García\""
+    },
+    "match": true
+  },
+  {
+    "label": "nested quoted alias without spaces",
+    "query": "Mohammad Eslami",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Other;\"MOHAMMAD;ESLAMI\""
+    },
+    "match": true
+  },
+  {
+    "label": "nested quoted alias with escaped quote",
+    "query": "John Jack Smith",
+    "row": {
+      "name": "Unrelated Display",
+      "aliases": "Other;\"John \"\"Jack\"\"; Smith\""
+    },
+    "match": true
+  },
+  {
+    "label": "particle and repeated name must not score as different name",
+    "query": "Omar Al-Omar",
+    "row": {
+      "name": "Omar Al-Zafir"
+    },
+    "match": false
+  },
+  {
+    "label": "OFAC public example full listed name",
+    "query": "Moises Humberto Rivera Luna",
+    "row": {
+      "name": "Moises Humberto RIVERA-LUNA",
+      "aliases": "RIVERA-LUNA, Moises Humberto;SANTOS;VIEJO SANTOS"
+    },
+    "match": true
+  },
+  {
+    "label": "OFAC public example listed full alias",
+    "query": "Hayder Zaman",
+    "row": {
+      "name": "Abdul Qadeer Khan",
+      "aliases": "Abdul Qadeer Khan;Hayder ZAMAN;ZAMAN;ZAMAN, Hayder"
+    },
+    "match": true
+  },
+  {
+    "label": "OFAC public example listed alternate spelling",
+    "query": "Aleksei Belan",
+    "row": {
+      "name": "Aleksey Alekseyevich BELAN",
+      "aliases": "Aleksei BELAN;Anthony Anthony"
+    },
+    "match": true
+  },
+  {
+    "label": "OFAC public example exact repeated alias",
+    "query": "Anthony Anthony",
+    "row": {
+      "name": "Aleksey Alekseyevich BELAN",
+      "aliases": "Aleksei BELAN;Anthony Anthony"
+    },
+    "match": true
+  }
 ]

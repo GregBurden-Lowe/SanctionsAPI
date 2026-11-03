@@ -9,6 +9,24 @@ from utils import build_input_classification, detect_company_likeness, get_best_
 
 
 class MatchingLogicTests(unittest.TestCase):
+    def test_org_suggestion_does_not_claim_perfect_score_for_extra_word(self):
+        hits = get_best_name_matches('Foo Bar', ['Foo Bar Group'], threshold=60,
+                                     strict_short_queries=False, entity_type='Organization')
+        self.assertTrue(hits)
+        self.assertLess(hits[0][1], 100)
+
+    def test_partial_names_never_receive_a_perfect_score(self):
+        pairs = [('Jane Smith','Jane Elizabeth Smith'), ('Milo A Milo','Milo Milo'),
+                 ('Barlow','Claire Barlow'), ('Omar Al-Omar','Omar Al-Zafir'),
+                 ('Foo Bar','Foo Bar Group'), ('Acme','Acme Limited')]
+        for entity_type in ('Person', 'Organization'):
+            for query, candidate in pairs:
+                for strict in (True, False):
+                    with self.subTest(kind=entity_type,query=query,candidate=candidate,strict=strict):
+                        hits=get_best_name_matches(query,[candidate],threshold=60,
+                                                   strict_short_queries=strict,entity_type=entity_type)
+                        self.assertTrue(not hits or hits[0][1] < 100)
+
     def test_org_generic_words_do_not_drive_false_positive(self):
         hits = get_best_name_matches(
             "BUZZ PROPERTY MANAGEMENT LTD",
