@@ -51,8 +51,9 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
   const VerdictIcon = hasMatch ? BiXCircle : BiMinus
   const verdictColor = hasMatch ? 'text-semantic-error' : 'text-text-muted'
 
-  const finding = guidance?.finding
-    ?? (hasMatch ? `${potentialMatches} potential match${potentialMatches !== 1 ? 'es' : ''} — review required` : 'No potential match identified')
+  const finding = hasMatch
+    ? `${potentialMatches} potential match${potentialMatches !== 1 ? 'es' : ''} — review required`
+    : 'No potential match identified'
   const nextAction = guidance?.next_actions?.[0]
     ?? (hasMatch ? 'Review the candidate evidence and verify identity before proceeding.' : 'Apply normal business controls and retain this screening record.')
 
