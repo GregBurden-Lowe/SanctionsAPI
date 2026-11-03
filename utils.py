@@ -800,7 +800,9 @@ async def sync_own_watchlists_postgres(
             if not name_norm:
                 continue
 
-            _parse_aliases(row.get("aliases"))  # validate; aborts transaction on malformed input
+            # Sanitize aliases: replace bare double-quotes that would break the
+            # semicolon-delimited CSV alias parser at query time.
+            aliases_clean = _safe_str(row.get("aliases")).replace('"', "'")
 
             birth_date = _parse_birth_date_for_db(_safe_str(row.get("birth_date")))
             country = _normalize_country(_safe_str(row.get("countries")))
@@ -816,7 +818,7 @@ async def sync_own_watchlists_postgres(
 
             raw_json = json.dumps(
                 {
-                    "aliases": _safe_str(row.get("aliases")),
+                    "aliases": aliases_clean,
                     "birth_date": _safe_str(row.get("birth_date")),
                     "positions": _safe_str(row.get("positions")),
                     "program_ids": _safe_str(row.get("program_ids")),
