@@ -237,9 +237,11 @@ export function AdminPage() {
       if (!res.ok) {
         if (res.status === 429) {
           setRefreshError('Rate limit reached — please wait a minute before retrying.')
+        } else if (res.status === 409) {
+          setRefreshError('A refresh is already running — please wait for it to complete.')
         } else {
-          const body = data as { detail?: string; error?: string }
-          setRefreshError(body.detail ?? body.error ?? `Refresh failed (${res.status}).`)
+          const body = data as { detail?: string; error?: string; message?: string }
+          setRefreshError(body.detail ?? body.error ?? body.message ?? `Refresh failed (${res.status}).`)
         }
       } else {
         setRefreshMessage('Watchlist refresh completed successfully.')
