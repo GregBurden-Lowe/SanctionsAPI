@@ -19,6 +19,8 @@ The inventory captures a consistent cutoff and includes every recorded request i
 
 After investigating the inventory and completing the matching release acceptance gate, run the following **inside the verified new release runtime**, using its existing `DATABASE_URL` and `RELEASE_ID`. Use a writable, private host-mounted directory for the inventory and report so they survive container removal. Replace the placeholders with the exact inventory hash and verified runtime release ID. The drain flag attests that the old API and worker writers have stopped; it is not an automated check. Do not run against a mixed old/new writer deployment.
 
+The legacy single-stack Compose configuration does not itself set `RELEASE_ID`. After independently verifying the running container's image and release code, the operator must provide the verified identifier to the executor process, for example with `docker compose exec -e RELEASE_ID=VERIFIED_RELEASE_ID app ...`, and supply the same value to `--release-id`. This supplied value is an operator attestation, not independent proof of the image. The rolling configuration sets the value from its release image identity.
+
 ```sh
 python scripts/execute_release_rescreen.py \
   --inventory /secure/operator/path/release-rescreen-inventory.json \
