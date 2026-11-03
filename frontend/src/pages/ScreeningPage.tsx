@@ -690,7 +690,7 @@ export function ResultCard({
               {result.reused ? 'Reused record' : 'Permanent record'}
             </Link>
           )}
-          {sourceList.length > 0 && (
+          {(result['Source Coverage'] || sourceList.length > 0) && (
             <Button type="button" variant="ghost" size="sm" onClick={() => setShowSourcesModal(true)}>
               Sources
             </Button>
@@ -828,14 +828,85 @@ export function ResultCard({
           </Button>
         }
       >
-        <p className="text-text-muted text-xs mb-3">Sanction list labels matched for this result.</p>
-        <ul className="max-h-[60vh] overflow-y-auto space-y-1 text-text-secondary">
-          {sourceList.map((item, i) => (
-            <li key={i} className="py-1.5 border-b border-border last:border-0 text-[13px]">
-              {item}
-            </li>
-          ))}
-        </ul>
+        {(() => {
+          const coverage = result['Source Coverage']
+          const listCounts = coverage?.list_counts ?? {}
+          const listsSearched = coverage?.required_lists ?? []
+          const missingLists = coverage?.missing_lists ?? []
+
+          // Map of known list names to readable labels and scrape sources
+          const LIST_META: Record<string, { label: string; source: string }> = {
+            UK:   { label: 'UK (OFSI)',           source: 'HM Treasury / OFSI — gov.uk' },
+            UN:   { label: 'UN Security Council', source: 'United Nations — un.org' },
+            EU:   { label: 'EU Consolidated',     source: 'European Commission — eur-lex.europa.eu' },
+            OFAC: { label: 'OFAC SDN',            source: 'US Treasury / OFAC — ofac.treas.gov' },
+            PEP:  { label: 'Politically Exposed Persons', source: 'Wikidata / CIA World Leaders' },
+          }
+
+          return (
+            <div className="space-y-4">
+              {listsSearched.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-2">
+                    Lists searched at time of check
+                  </p>
+                  <ul className="space-y-0 divide-y divide-border">
+                    {listsSearched.map((list) => {
+                      const meta = LIST_META[list]
+                      const count = listCounts[list]
+                      const isMissing = missingLists.includes(list)
+                      return (
+                        <li key={list} className="flex items-start justify-between gap-4 py-2.5">
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-medium text-text-primary leading-snug">
+                              {meta?.label ?? list}
+                              {isMissing && (
+                                <span className="ml-2 text-[10.5px] font-semibold text-semantic-error border border-semantic-error/25 bg-semantic-error/10 rounded px-1.5 py-0.5">
+                                  Missing
+                                </span>
+                              )}
+                            </p>
+                            {meta?.source && (
+                              <p className="text-[11px] text-text-muted mt-0.5">{meta.source}</p>
+                            )}
+                          </div>
+                          {count != null && (
+                            <span className="shrink-0 text-[11px] tabular-nums text-text-muted">
+                              {count.toLocaleString()} records
+                            </span>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                  {coverage?.ingested_at && (
+                    <p className="text-[11px] text-text-muted mt-3">
+                      Data ingested {new Date(coverage.ingested_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+                      {coverage.status ? ` · ${coverage.status}` : ''}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {sourceList.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-2">
+                    Matched result labels
+                  </p>
+                  <ul className="space-y-0 divide-y divide-border">
+                    {sourceList.map((item, i) => (
+                      <li key={i} className="py-2 text-[13px] text-text-secondary">{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {listsSearched.length === 0 && sourceList.length === 0 && (
+                <p className="text-[13px] text-text-muted">No source information available for this result.</p>
+              )}
+            </div>
+          )
+        })()}
       </Modal>
     </div>
   )
