@@ -1,35 +1,205 @@
-import type { OpCheckResponse } from '@/types/api'
+import type { OpCheckResponse, CandidateEvidenceItem } from '@/types/api'
 import type { SearchDetails } from '@/utils/exportScreeningPdf'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components'
+import { BiCheckCircle, BiXCircle, BiMinus } from 'react-icons/bi'
+
+function formatIngestedDate(raw: string | undefined): string {
+  if (!raw) return 'Unknown'
+  try {
+    return new Date(raw).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  } catch {
+    return raw
+  }
+}
+
+function DobBadge({ assessment }: { assessment: CandidateEvidenceItem['dob_assessment'] }) {
+  const map = {
+    exact:          { label: 'Exact match',   cls: 'text-semantic-success border-semantic-success/25 bg-semantic-success/10' },
+    compatible:     { label: 'Compatible',    cls: 'text-semantic-warning border-semantic-warning/25 bg-semantic-warning/10' },
+    conflicting:    { label: 'Conflicting',   cls: 'text-semantic-error border-semantic-error/25 bg-semantic-error/10' },
+    unknown:        { label: 'Unknown',       cls: 'text-text-muted border-border bg-surface' },
+    not_applicable: { label: 'N/A',           cls: 'text-text-muted border-border bg-surface' },
+  }
+  const { label, cls } = map[assessment] ?? { label: assessment, cls: 'text-text-muted border-border bg-surface' }
+  return <span className={`rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${cls}`}>{label}</span>
+}
+
+function CountryBadge({ assessment }: { assessment: CandidateEvidenceItem['country_assessment'] }) {
+  const map = {
+    compatible: { label: 'Compatible', cls: 'text-semantic-success border-semantic-success/25 bg-semantic-success/10' },
+    conflicting: { label: 'Conflicting', cls: 'text-semantic-error border-semantic-error/25 bg-semantic-error/10' },
+    unknown: { label: 'Unknown', cls: 'text-text-muted border-border bg-surface' },
+  }
+  const { label, cls } = map[assessment] ?? { label: assessment, cls: 'text-text-muted border-border bg-surface' }
+  return <span className={`rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${cls}`}>{label}</span>
+}
 
 export function CandidateEvidence({ result, search }: { result: OpCheckResponse; search: SearchDetails }) {
   const evidence = result['Candidate Evidence']
   if (!evidence) return null
+
   const summary = result['Candidate Evidence Summary']
-  return <Card><CardHeader><CardTitle>Candidate evidence</CardTitle></CardHeader><CardBody className="space-y-4">
-    {result['Source Coverage'] && <div className="rounded-lg border border-border p-3 text-sm space-y-1">
-      <p className="font-medium">Source coverage at screening: {result['Source Coverage'].status}</p>
-      <p>Lists checked: {result['Source Coverage'].required_lists?.join(', ') || 'Not verified'}</p>
-      <p>Ingested: {result['Source Coverage'].ingested_at || 'Unknown'} · Source publication time: {result['Source Coverage'].source_published_at || 'Not verified'}</p>
-      <p className="break-all text-xs">Dataset version: {result['Source Coverage'].version || 'Not recorded'}</p>
-    </div>}
-    {result['Screening Guidance'] && <div className="text-sm"><p className="font-medium">Next actions</p><ul className="list-disc pl-5">{result['Screening Guidance'].next_actions.map(action => <li key={action}>{action}</li>)}</ul></div>}
-    {result['Monitoring Change'] && <p className="text-sm">{result['Monitoring Change'].message} New candidates: {result['Monitoring Change'].added_candidates.length}; changed: {result['Monitoring Change'].changed_candidates.length}; removed: {result['Monitoring Change'].removed_candidates.length}.</p>}
-    <p className="text-sm text-text-secondary">Name similarity is a matching score, not the probability that this is the same person or company. Missing details do not establish a mismatch.</p>
-    {summary && <p className="text-sm">{summary.potential_matches} potential matches · {summary.excluded} excluded by conflicting DOB evidence</p>}
-    {!evidence.length && <p className="text-sm">No candidate passed the name-matching rules.</p>}
-    {evidence.map((candidate, i) => <details key={`${candidate.record_id || candidate.name}-${candidate.entity_type}-${i}`} className="border border-border rounded-lg p-3" open={i === 0}>
-      <summary className="cursor-pointer text-sm font-medium">{candidate.name} · {candidate.source_type === 'peps' ? 'PEP' : 'Sanctions'} · {candidate.disposition === 'excluded' ? 'Excluded: DOB conflict' : 'Potential match'} · Name similarity {candidate.name_score}/100</summary>
-      <div className="overflow-x-auto mt-3"><table className="w-full text-sm text-left"><thead><tr><th className="p-2">Detail</th><th className="p-2">Submitted</th><th className="p-2">Candidate</th><th className="p-2">Assessment</th></tr></thead>
-        <tbody>
-          <tr><th className="p-2">Name</th><td className="p-2">{search.searchName}</td><td className="p-2">{candidate.matched_name}</td><td className="p-2">{candidate.matched_alias ? 'Listed alias' : 'Listed name'}</td></tr>
-          <tr><th className="p-2">DOB</th><td className="p-2">{search.searchDob || 'Not supplied'}</td><td className="p-2">{candidate.birth_date || 'Not available'}</td><td className="p-2">{candidate.dob_assessment.replace('_', ' ')}</td></tr>
-          <tr><th className="p-2">Country</th><td className="p-2">{search.searchCountry || 'Not supplied'}</td><td className="p-2">{candidate.country || 'Not available'}</td><td className="p-2">{candidate.country_assessment}</td></tr>
-        </tbody></table></div>
-      <p className="text-sm mt-3">Source: {candidate.dataset || 'Not specified'} · Type: {candidate.entity_type}</p>
-      {candidate.record_id && <p className="text-xs break-all mt-1">Source record: {candidate.record_id}</p>}
-      <ul className="list-disc pl-5 mt-3 text-sm space-y-1">{candidate.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
-    </details>)}
-    {summary?.display_truncated && <p className="text-sm">Showing the first 50 candidates. The decision includes all evaluated candidates.</p>}
-  </CardBody></Card>
+  const coverage = result['Source Coverage']
+  const guidance = result['Screening Guidance']
+  const monitoring = result['Monitoring Change']
+
+  const potentialMatches = summary?.potential_matches ?? 0
+  const excluded = summary?.excluded ?? 0
+  const evaluated = (summary?.evaluated_name_matches ?? evidence.length)
+
+  const hasMatch = potentialMatches > 0
+  const VerdictIcon = hasMatch ? BiXCircle : BiMinus
+  const verdictColor = hasMatch ? 'text-semantic-error' : 'text-text-muted'
+
+  const finding = guidance?.finding
+    ?? (hasMatch ? `${potentialMatches} potential match${potentialMatches !== 1 ? 'es' : ''} — review required` : 'No potential match identified')
+  const nextAction = guidance?.next_actions?.[0]
+    ?? (hasMatch ? 'Review the candidate evidence and verify identity before proceeding.' : 'Apply normal business controls and retain this screening record.')
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Candidate evidence</CardTitle>
+        {evaluated > 0 && (
+          <span className="ml-auto text-[11px] rounded-md border border-border bg-app px-2 py-0.5 text-text-muted">
+            {evaluated} evaluated
+          </span>
+        )}
+      </CardHeader>
+      <CardBody className="space-y-4">
+
+        {/* Source coverage */}
+        {coverage && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Lists checked</span>
+            <div className="flex flex-wrap gap-1.5">
+              {(coverage.required_lists ?? []).map((list) => (
+                <span
+                  key={list}
+                  className="rounded-md border border-border bg-app px-2 py-0.5 text-[11px] font-medium text-text-secondary"
+                >
+                  {list}
+                </span>
+              ))}
+            </div>
+            <span className="text-[11px] text-text-muted">
+              · Data {coverage.status} · {formatIngestedDate(coverage.ingested_at)}
+            </span>
+          </div>
+        )}
+
+        {/* Verdict row */}
+        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : 'border-border bg-app/60'}`}>
+          <VerdictIcon className={`mt-0.5 h-4 w-4 shrink-0 ${verdictColor}`} aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className={`text-[13px] font-semibold leading-snug ${hasMatch ? 'text-semantic-error' : 'text-text-primary'}`}>
+              {finding}
+            </p>
+            <p className="text-[12px] text-text-secondary mt-0.5 leading-snug">{nextAction}</p>
+          </div>
+          <div className="shrink-0 text-right">
+            <p className="text-[11px] text-text-muted leading-relaxed">
+              {potentialMatches} match{potentialMatches !== 1 ? 'es' : ''}
+            </p>
+            {excluded > 0 && (
+              <p className="text-[11px] text-text-muted leading-relaxed">{excluded} excluded</p>
+            )}
+          </div>
+        </div>
+
+        {/* Monitoring change */}
+        {monitoring && (
+          <div className="rounded-lg border border-border bg-app/60 px-4 py-3 text-[12px] text-text-secondary space-y-1">
+            <p className="font-medium text-text-primary">{monitoring.message}</p>
+            {(monitoring.added_candidates.length > 0 || monitoring.removed_candidates.length > 0 || monitoring.changed_candidates.length > 0) && (
+              <p>Added: {monitoring.added_candidates.length} · Removed: {monitoring.removed_candidates.length} · Changed: {monitoring.changed_candidates.length}</p>
+            )}
+          </div>
+        )}
+
+        {/* Candidate rows */}
+        {evidence.length > 0 && (
+          <div className="space-y-2">
+            {evidence.map((candidate, i) => {
+              const isPotentialMatch = candidate.disposition === 'potential_match'
+              return (
+                <details
+                  key={`${candidate.record_id || candidate.name}-${candidate.entity_type}-${i}`}
+                  className="group rounded-lg border border-border overflow-hidden"
+                  open={i === 0 && isPotentialMatch}
+                >
+                  <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-app/60 [&::-webkit-details-marker]:hidden">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${isPotentialMatch ? 'bg-semantic-error' : 'bg-text-muted'}`} />
+                    <span className="min-w-0 flex-1 text-[13px] font-medium text-text-primary truncate">{candidate.name}</span>
+                    <span className="shrink-0 text-[11px] text-text-muted">{candidate.source_type === 'peps' ? 'PEP' : 'Sanctions'}</span>
+                    <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${isPotentialMatch ? 'bg-semantic-error/10 text-semantic-error border-semantic-error/25' : 'bg-surface text-text-muted border-border'}`}>
+                      {isPotentialMatch ? 'Potential match' : 'Excluded'}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-text-muted tabular-nums">{candidate.name_score}/100</span>
+                  </summary>
+                  <div className="border-t border-border bg-app/40 px-4 py-3 space-y-3">
+                    <table className="w-full text-[12px]">
+                      <thead>
+                        <tr className="text-text-muted text-[10.5px] uppercase tracking-wider">
+                          <th className="pb-1.5 text-left font-semibold w-24">Field</th>
+                          <th className="pb-1.5 text-left font-semibold">Submitted</th>
+                          <th className="pb-1.5 text-left font-semibold">Candidate</th>
+                          <th className="pb-1.5 text-left font-semibold">Assessment</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        <tr>
+                          <td className="py-1.5 text-text-muted">Name</td>
+                          <td className="py-1.5 text-text-primary">{search.searchName}</td>
+                          <td className="py-1.5 text-text-primary">{candidate.matched_name}</td>
+                          <td className="py-1.5 text-text-secondary">{candidate.matched_alias ? 'Listed alias' : 'Listed name'}</td>
+                        </tr>
+                        <tr>
+                          <td className="py-1.5 text-text-muted">DOB</td>
+                          <td className="py-1.5 text-text-primary">{search.searchDob || '—'}</td>
+                          <td className="py-1.5 text-text-primary">{candidate.birth_date || '—'}</td>
+                          <td className="py-1.5"><DobBadge assessment={candidate.dob_assessment} /></td>
+                        </tr>
+                        <tr>
+                          <td className="py-1.5 text-text-muted">Country</td>
+                          <td className="py-1.5 text-text-primary">{search.searchCountry || '—'}</td>
+                          <td className="py-1.5 text-text-primary">{candidate.country || '—'}</td>
+                          <td className="py-1.5"><CountryBadge assessment={candidate.country_assessment} /></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-text-muted">
+                      <span>Source: <span className="text-text-secondary">{candidate.dataset || 'Not specified'}</span></span>
+                      <span>Type: <span className="text-text-secondary">{candidate.entity_type}</span></span>
+                      {candidate.record_id && (
+                        <span className="break-all">Record: <span className="font-mono text-text-secondary">{candidate.record_id}</span></span>
+                      )}
+                    </div>
+                    {candidate.reasons.length > 0 && (
+                      <ul className="space-y-1">
+                        {candidate.reasons.map((reason) => (
+                          <li key={reason} className="flex items-start gap-2 text-[11px] text-text-secondary">
+                            <BiCheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-muted" aria-hidden />
+                            {reason}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </details>
+              )
+            })}
+          </div>
+        )}
+
+        {summary?.display_truncated && (
+          <p className="text-[11px] text-text-muted">Showing first 50 candidates. The outcome includes all evaluated candidates.</p>
+        )}
+
+        <p className="text-[11px] text-text-muted leading-relaxed">
+          Name similarity is a matching score, not an identity confirmation. Missing details do not establish a mismatch.
+        </p>
+      </CardBody>
+    </Card>
+  )
 }
