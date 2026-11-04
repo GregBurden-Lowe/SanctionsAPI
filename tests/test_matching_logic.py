@@ -91,7 +91,6 @@ class MatchingLogicTests(unittest.TestCase):
             submitted_as="Person",
             person_result={"Match Found": False, "Score": 0},
             organization_result={"Match Found": True, "Score": 84},
-            pep_checked=False,
         )
         self.assertTrue(classification["likely_misclassified"])
         self.assertEqual(classification["inferred_as"], "Organization")
@@ -147,7 +146,6 @@ class ReviewRerunTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value={
                 "Check Summary": {"Status": "Fail Sanction", "Source": "Test", "Date": "2026-04-15 10:00:00"},
                 "Is Sanctioned": True,
-                "Is PEP": False,
                 "Score": 81,
             }),
         ) as check_mock:

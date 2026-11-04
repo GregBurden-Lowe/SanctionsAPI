@@ -19,7 +19,7 @@ def project_result(engine, decision=None, *, stale=False):
     result['Engine Result'] = decode(engine)
     result['Review Decision'] = {**decision, 'stale': bool(stale)}
     if not stale and decision.get('outcome', '').startswith('False Positive'):
-        result.update({'Is Sanctioned': False, 'Is PEP': False, 'Match Found': False,
+        result.update({'Is Sanctioned': False, 'Match Found': False,
                        'Risk Level': 'Cleared', 'Decision Explanation': 'An analyst resolved this run as a false positive. Original engine evidence is retained.'})
         if decision.get('decision_type') == 'ai_auto_clear':
             result['Decision Explanation'] = 'Automatically cleared from an AI recommendation. No human approval was performed. Original engine evidence is retained.'

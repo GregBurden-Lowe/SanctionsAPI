@@ -30,7 +30,7 @@ async def validate(conn):
             except ScreeningUnavailableError:
                 counts['malformed']+=1
         counts.setdefault('malformed',0)
-        ok=(counts['rows_sanctions']>0 and counts['rows_peps']>0 and counts['malformed']==0
+        ok=(counts['rows_sanctions']>0 and counts['malformed']==0
             and coverage.get('status')=='current' and version>=130000 and encoding=='UTF8' and trigrams)
         return {'status':'passed' if ok else 'needs_attention', 'counts':dict(counts),
                 'source_version':coverage.get('version'), 'source_status':coverage.get('status'),

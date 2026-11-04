@@ -37,6 +37,5 @@ class AcceptanceValidationTests(unittest.TestCase):
             inputs_for({'inputs':{'name':'Fixture','entity_type':'Vessel'}})
 
     def test_result_categories_are_potential_matches_not_confirmed_identity(self):
-        self.assertEqual(outcome({'Is Sanctioned':True,'Is PEP':True}),'potential_sanctions_match')
-        self.assertEqual(outcome({'Is Sanctioned':False,'Is PEP':True}),'potential_pep_match')
-        self.assertEqual(outcome({'Is Sanctioned':False,'Is PEP':False}),'no_potential_match')
+        self.assertEqual(outcome({'Is Sanctioned':True}),'potential_sanctions_match')
+        self.assertEqual(outcome({'Is Sanctioned':False}),'no_potential_match')

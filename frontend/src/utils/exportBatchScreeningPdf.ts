@@ -25,17 +25,16 @@ export function generateBatchScreeningPdf(rows: ScreenedEntity[], meta: BatchMet
   const createdAt = new Date().toISOString()
   const total = rows.length
   const sanctions = rows.filter((r) => Boolean(r.result_json?.['Is Sanctioned'])).length
-  const peps = rows.filter((r) => Boolean(r.result_json?.['Is PEP'])).length
-  const cleared = rows.filter((r) => !r.result_json?.['Is Sanctioned'] && !r.result_json?.['Is PEP']).length
+  const cleared = rows.filter((r) => !r.result_json?.['Is Sanctioned']).length
 
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(16)
-  doc.text('Sanctions & PEP Batch Screening Report', margin, margin + 2)
+  doc.text('Sanctions Batch Screening Report', margin, margin + 2)
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(10)
   doc.text(`Business reference: ${meta.businessReference}`, margin, margin + 10)
   doc.text(`Generated (UTC): ${createdAt}`, margin, margin + 16)
-  doc.text(`Total checks: ${total}  |  Cleared: ${cleared}  |  Sanctions: ${sanctions}  |  PEP: ${peps}`, margin, margin + 22)
+  doc.text(`Total checks: ${total}  |  Cleared: ${cleared}  |  Sanctions: ${sanctions}`, margin, margin + 22)
   doc.setDrawColor(180)
   doc.line(margin, margin + 25, pageW - margin, margin + 25)
 

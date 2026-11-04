@@ -286,7 +286,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Sanctions/PEP Screening API",
+    title="Sanctions Screening API",
     version="1.0.0",
     lifespan=lifespan,
     docs_url=None,
@@ -399,10 +399,6 @@ class OpCheckRequest(BaseModel):
     )
 
 class RefreshRequest(BaseModel):
-    include_peps: bool = Field(
-        True,
-        description="Include consolidated PEPs in refreshed data"
-    )
     sync_postgres: bool = Field(
         True,
         description="When true (default), rebuild watchlist_entities in PostgreSQL from refreshed CSV data"
@@ -484,7 +480,7 @@ class MatchingConfigUpdateRequest(BaseModel):
 
 
 class AiTriageRunRequest(BaseModel):
-    limit: int = Field(25, ge=1, le=250, description="Maximum number of outstanding sanctions or PEP matches to triage")
+    limit: int = Field(25, ge=1, le=250, description="Maximum number of outstanding sanctions matches to triage")
     retry_failed: bool = Field(False, description="Retry up to 25 unresolved current-run AI failures without the 24-hour cooldown; preserve all previous attempts")
 
 
@@ -704,8 +700,7 @@ async def readiness():
             async with pool.acquire() as conn:
                 await verify_schema(conn)
                 coverage = await conn.fetchval("""SELECT
-                    EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='sanctions')
-                    AND EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='peps')""")
+                    EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='sanctions')""")
                 if not coverage:
                     raise RuntimeError('Required watchlist coverage missing')
                 from source_assurance import require_current, postgres_manifest
@@ -1927,7 +1922,7 @@ async def check_opensanctions(request: Request, data: OpCheckRequest, payload: d
             entity_key = payload.get("entity_key")
             decision_lower = str(decision).strip().lower()
             rerun_cleared = decision_lower.startswith("cleared") or (
-                payload.get("Is Sanctioned") is False and payload.get("Is PEP") is False
+                payload.get("Is Sanctioned") is False
             )
             if data.rerun_entity_key and status_code < 400 and rerun_cleared:
                 auto_review_completed = await _auto_complete_review_after_rerun_if_cleared(
@@ -2009,7 +2004,7 @@ async def check_opensanctions_dataverse(request: Request, data: OpCheckRequest, 
             entity_key = payload.get("entity_key")
             decision_lower = str(decision).strip().lower()
             rerun_cleared = decision_lower.startswith("cleared") or (
-                payload.get("Is Sanctioned") is False and payload.get("Is PEP") is False
+                payload.get("Is Sanctioned") is False
             )
             if data.rerun_entity_key and status_code < 400 and rerun_cleared:
                 auto_review_completed = await _auto_complete_review_after_rerun_if_cleared(
@@ -2198,7 +2193,6 @@ async def export_mi_csv(
         "confidence",
         "score",
         "uk_sanctions_flag",
-        "pep_flag",
         "last_requestor",
         "business_reference",
         "reason_for_check",
@@ -2214,7 +2208,6 @@ async def export_mi_csv(
         "result_birth_date",
         "result_regime",
         "result_is_sanctioned",
-        "result_is_pep",
         "result_match_found",
         "result_risk_level",
         "result_confidence",
@@ -2228,10 +2221,6 @@ async def export_mi_csv(
         "organization_check_status",
         "organization_check_is_match",
         "organization_check_score",
-        "pep_check_checked",
-        "pep_check_status",
-        "pep_check_reason",
-        "pep_check_message",
         "input_submitted_as",
         "input_inferred_as",
         "input_likely_misclassified",
@@ -2904,24 +2893,21 @@ async def refresh_with_lock(body):
 
 async def _refresh_opensanctions_impl(body):
     """
-    Download latest consolidated sanctions (and optionally PEPs), write to parquet,
-    and (by default) rebuild PostgreSQL watchlist table from refreshed CSV data.
+    Download latest consolidated sanctions, write to parquet,
+    and (by default) rebuild PostgreSQL watchlist table from refreshed data.
     Requires admin JWT or REFRESH_OPENSANCTIONS_API_KEY (header X-Refresh-Opensanctions-Key or Authorization: Bearer <key>).
     """
     try:
-        await asyncio.to_thread(refresh_opensanctions_data, include_peps=body.include_peps)
+        await asyncio.to_thread(refresh_opensanctions_data)
         postgres_synced = False
-        postgres_rows = {"sanctions": 0, "peps": 0}
+        postgres_rows = {"sanctions": 0}
         refresh_run_info = None
         if body.sync_postgres:
             pool = await screening_db.get_pool()
             if pool is None:
                 raise RuntimeError("DATABASE_URL is required for sync_postgres=true")
             async with pool.acquire() as conn:
-                postgres_rows = await sync_own_watchlists_postgres(
-                    conn,
-                    include_peps=body.include_peps,
-                )
+                postgres_rows = await sync_own_watchlists_postgres(conn)
             postgres_synced = True
 
         # Delta-driven UK list monitoring and targeted re-screening.
@@ -2949,10 +2935,8 @@ async def _refresh_opensanctions_impl(body):
 
                 refresh_run_id = await screening_db.create_refresh_run(
                     conn,
-                    include_peps=body.include_peps,
                     postgres_synced=postgres_synced,
                     sanctions_rows=int(postgres_rows.get("sanctions", 0)),
-                    peps_rows=int(postgres_rows.get("peps", 0)),
                     uk_hash=uk_hash,
                     prev_uk_hash=previous_hash,
                     uk_changed=uk_changed,
@@ -3013,14 +2997,13 @@ async def _refresh_opensanctions_impl(body):
                     },
                 }
         monitoring = None
-        if pool is not None and body.include_peps:
+        if pool is not None:
             from screening_monitoring import tick
             async with pool.acquire() as conn:
                 monitoring = await tick(conn)
         return {
             "monitoring": monitoring,
             "status": "ok",
-            "include_peps": body.include_peps,
             "postgres_synced": postgres_synced,
             "postgres_rows": postgres_rows,
             "refresh_run": refresh_run_info,

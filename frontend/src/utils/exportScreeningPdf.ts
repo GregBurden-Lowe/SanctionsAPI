@@ -25,9 +25,6 @@ const C = {
   matchBg: '#fee2e2',
   matchText: '#991b1b',
   matchBorder: '#fca5a5',
-  pepBg: '#e0f2fe',
-  pepText: '#075985',
-  pepBorder: '#7dd3fc',
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -89,16 +86,9 @@ function outcomeMetaFor(result: OpCheckResponse): OutcomeMeta {
       bg: C.matchBg, text: C.matchText, border: C.matchBorder,
     }
   }
-  if (result['Is PEP']) {
-    return {
-      label: 'PEP INDICATOR — ENHANCED DUE DILIGENCE REQUIRED',
-      detail: 'Politically exposed person indicator found. Continue with enhanced due diligence.',
-      bg: C.pepBg, text: C.pepText, border: C.pepBorder,
-    }
-  }
   return {
     label: 'NO MATCH IDENTIFIED — CLEAR TO PROCEED',
-    detail: 'No potential sanctions or PEP match identified under current rules. This is not proof of identity.',
+    detail: 'No potential sanctions match identified under current rules. This is not proof of identity.',
     bg: C.clearBg, text: C.clearText, border: C.clearBorder,
   }
 }
@@ -152,7 +142,7 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
   const matchedName = result['Sanctions Name']
   const matchedDob = result['Birth Date']
   const matchedRegime = result.Regime
-  const hasAlert = !!(matchedName || matchedDob || matchedRegime || result['Is Sanctioned'] || result['Is PEP'])
+  const hasAlert = !!(matchedName || matchedDob || matchedRegime || result['Is Sanctioned'])
   const reviewDecision = result['Review Decision']
   const engineResult = result['Engine Result']
   const candidateEvidence = (result['Candidate Evidence'] ?? []).slice(0, 10)
@@ -174,19 +164,15 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
     ['Full name', safe(search.searchName)],
     ['Date of birth', safe(search.searchDob?.trim() ? search.searchDob : 'Not provided')],
     ['Country', safe(search.searchCountry?.trim() ? search.searchCountry : 'Not provided')],
-    ['PEP screening', result['PEP Check']?.checked === false
-      ? `Skipped — ${escapeHtml(result['PEP Check']?.message || 'not performed')}`
-      : 'Performed'],
   ])
 
   // ── Section 3: Lists and parameters ──
-  const coveredLists = sourceCoverage?.required_lists ?? ['UK', 'UN', 'EU', 'OFAC', 'PEP']
+  const coveredLists = sourceCoverage?.required_lists ?? ['UK', 'UN', 'EU', 'OFAC']
   const listTableRows: string[][] = [
     ['UK Sanctions List', 'FCDO / HM Treasury', coveredLists.includes('UK') ? '✓' : '—'],
     ['UN Security Council Consolidated List', 'United Nations', coveredLists.includes('UN') ? '✓' : '—'],
     ['EU Consolidated Financial Sanctions', 'European Commission', coveredLists.includes('EU') ? '✓' : '—'],
     ['Specially Designated Nationals (SDN)', 'US Treasury OFAC', coveredLists.includes('OFAC') ? '✓' : '—'],
-    ['PEP and related parties', 'Wikidata / CIA World Leaders', coveredLists.includes('PEP') ? '✓' : '—'],
   ]
   const listIngested = sourceCoverage?.ingested_at
     ? `Lists ingested: ${escapeHtml(sourceCoverage.ingested_at)}`
@@ -219,16 +205,6 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
         safe(String(result.Score ?? '—')),
         safe(result.Confidence || '—'),
         disposition,
-      ])
-    }
-    if (result['Is PEP'] && !result['Is Sanctioned']) {
-      alertRows.push([
-        String(alertRows.length + 1),
-        safe(result['Sanctions Name'] || search.searchName),
-        'PEP database',
-        safe(String(result.Score ?? '—')),
-        safe(result.Confidence || '—'),
-        '<span class="pep">PEP indicator</span>',
       ])
     }
     sec4 = sectionHeader(4, 'Alerts')
@@ -365,12 +341,14 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
 body { background: #fff; }
 .report {
   width: 794px;
-  font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  font-family: Arial, Helvetica, sans-serif;
   font-size: 12px;
   color: ${C.text};
   background: #fff;
   padding: 24px 28px 32px;
   line-height: 1.45;
+  word-spacing: normal;
+  letter-spacing: normal;
 }
 
 /* Page header */
@@ -383,7 +361,7 @@ body { background: #fff; }
   margin-bottom: 4px;
 }
 .company { font-size: 11px; font-weight: 600; color: ${C.navyDark}; }
-.conf { font-size: 11px; font-weight: 800; color: #c0392b; letter-spacing: .08em; }
+.conf { font-size: 11px; font-weight: 800; color: #c0392b; letter-spacing: 1px; word-spacing: 2px; }
 .sub-header {
   font-size: 9.5px;
   color: ${C.muted};
@@ -431,8 +409,9 @@ body { background: #fff; }
   font-weight: 700;
   padding: 5px 10px;
   border-radius: 4px 4px 0 0;
-  letter-spacing: .02em;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
+  word-spacing: 2px;
 }
 .sec-num {
   display: inline-flex;
@@ -490,8 +469,9 @@ body { background: #fff; }
   color: #fff;
   font-weight: 700;
   font-size: 10.5px;
-  letter-spacing: .04em;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
+  word-spacing: 2px;
   border-right: 1px solid rgba(255,255,255,.15);
 }
 .dt thead th:last-child { border-right: none; }
@@ -510,7 +490,7 @@ body { background: #fff; }
 .fp { color: ${C.fpText}; font-weight: 700; }
 .match { color: ${C.matchText}; font-weight: 700; }
 .clear { color: ${C.clearText}; font-weight: 700; }
-.pep { color: ${C.pepText}; font-weight: 700; }
+
 
 /* Notes and empty states */
 .none-msg {

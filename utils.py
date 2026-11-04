@@ -1,4 +1,4 @@
-# utils.py — lean, low-RAM OpenSanctions + PEPs utils
+# utils.py — lean, low-RAM sanctions watchlist utils
 
 import os
 import csv
@@ -25,12 +25,9 @@ OWN_PARQUET = os.path.join(DATA_DIR, "watchlists.parquet")       # self-scraped 
 OSN_PARQUET = OWN_PARQUET                                          # kept for backward compat
 MATCHING_CONFIG_PATH = os.path.join(DATA_DIR, "matching_config.json")
 
-# OpenSanctions URLs — kept for reference; no longer downloaded at runtime.
+# OpenSanctions URL — kept for reference; no longer downloaded at runtime.
 CONSOLIDATED_SANCTIONS_URL = (
     "https://data.opensanctions.org/datasets/latest/sanctions/targets.simple.csv"
-)
-CONSOLIDATED_PEPS_URL = (
-    "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
 )
 
 # We only keep these columns to reduce memory
@@ -45,7 +42,7 @@ OSN_COLS = [
     "program_ids",
     "dataset",      # dataset label/source
     "sanctions",    # long text; we’ll trim for a short label
-    "source_type",  # we add this: "sanctions" | "peps"
+    "source_type",  # we add this: always "sanctions"
 ]
 
 # Restrict sanctions data to these sources only (case-insensitive substring match)
@@ -297,7 +294,6 @@ def _empty_no_match_result(source_label: str = "OpenSanctions"):
         "Regime": None,
         "Position": None,
         "Topics": [],
-        "Is PEP": False,
         "Is Sanctioned": False,
         "Confidence": "Not assessed",  # no-match is not an identity-confidence estimate
         "Score": 0,
@@ -470,9 +466,9 @@ def compute_uk_snapshot_delta(
         "candidate_terms": sorted(terms),
     }
 
-def refresh_opensanctions_data(include_peps: bool = True):
+def refresh_opensanctions_data():
     """
-    Refresh watchlist data from all self-scraped sources (UN, OFAC, UK, EU + PEPs).
+    Refresh watchlist data from all self-scraped sources (UN, OFAC, UK, EU).
 
     Replaces the former OpenSanctions CSV download. Calls each scraper, merges
     the results into data/watchlists.parquet, and embeds a source manifest in
@@ -487,21 +483,17 @@ def refresh_opensanctions_data(include_peps: bool = True):
     from fetch_all_watchlists import fetch_all
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    df = fetch_all(include_peps=include_peps, output_path=OWN_PARQUET)
+    df = fetch_all(include_peps=False, output_path=OWN_PARQUET)
 
     if df.empty or "sanctions" not in set(df["source_type"].unique()):
         raise ScreeningUnavailableError(
             "Refresh did not provide sanctions data; existing watchlist retained."
         )
-    if include_peps and "peps" not in set(df["source_type"].unique()):
-        raise ScreeningUnavailableError(
-            "Refresh did not provide PEP data; existing watchlist retained."
-        )
 
     # Embed freshness manifest in parquet metadata for the parquet-based screening path.
     from source_assurance import build_own_manifest, require_current, METADATA_KEY
-    manifest = build_own_manifest(OWN_PARQUET, include_peps)
-    require_current(manifest, include_peps)
+    manifest = build_own_manifest(OWN_PARQUET)
+    require_current(manifest)
     table = pa.Table.from_pandas(df)
     table = table.replace_schema_metadata(
         {**(table.schema.metadata or {}), METADATA_KEY: json.dumps(manifest).encode()}
@@ -544,8 +536,8 @@ async def sync_watchlist_entities_postgres(
     conn,
     *,
     sanctions_csv_path: str,
-    peps_csv_path: Optional[str],
-    include_peps: bool = True,
+    peps_csv_path: Optional[str] = None,
+    include_peps: bool = False,
     batch_size: int = 2000,
 ) -> Dict[str, int]:
     """
@@ -697,37 +689,35 @@ async def sync_watchlist_entities_postgres(
         return inserted
 
     from source_assurance import build_manifest, require_current, parquet_manifest
-    manifest = build_manifest(sanctions_csv_path, peps_csv_path if include_peps else None)
+    manifest = build_manifest(sanctions_csv_path)
     published = parquet_manifest()
     if published.get('version') == manifest['version']:
         manifest = published
-    require_current(manifest, include_peps)
+    require_current(manifest)
     async with conn.transaction():
         await conn.execute("CREATE TABLE IF NOT EXISTS watchlist_source_state (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), manifest jsonb NOT NULL)")
         await conn.execute("TRUNCATE TABLE watchlist_entities")
         sanctions_count = await _ingest_csv(sanctions_csv_path, "sanctions")
-        peps_count = await _ingest_csv(peps_csv_path or "", "peps") if include_peps else 0
-        if not sanctions_count or (include_peps and not peps_count):
-            raise ScreeningUnavailableError("Refresh did not provide all required datasets; existing watchlist retained.")
+        if not sanctions_count:
+            raise ScreeningUnavailableError("Refresh did not provide sanctions data; existing watchlist retained.")
 
         await conn.execute("INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=EXCLUDED.manifest", json.dumps(manifest))
 
-    return {"sanctions": sanctions_count, "peps": peps_count}
+    return {"sanctions": sanctions_count}
 
 
 async def sync_own_watchlists_postgres(
     conn,
     *,
     watchlists_parquet_path: Optional[str] = None,
-    include_peps: bool = True,
+    include_peps: bool = False,
     batch_size: int = 2_000,
 ) -> Dict[str, int]:
     """
     Rebuild watchlist_entities from the self-scraped watchlists parquet.
 
     Drop-in replacement for sync_watchlist_entities_postgres using our own
-    scraped data (UN, OFAC, UK, EU, Wikidata PEPs, CIA World Leaders) instead
-    of an OpenSanctions CSV.
+    scraped data (UN, OFAC, UK, EU).
     """
     from source_assurance import build_own_manifest, require_current
 
@@ -737,8 +727,8 @@ async def sync_own_watchlists_postgres(
     if not exists:
         raise ScreeningUnavailableError("Watchlist data is unavailable")
 
-    manifest = build_own_manifest(parquet_path, include_peps)
-    require_current(manifest, include_peps)
+    manifest = build_own_manifest(parquet_path)
+    require_current(manifest)
 
     has_country_col = await conn.fetchval(
         """
@@ -776,8 +766,7 @@ async def sync_own_watchlists_postgres(
 
     df = pd.read_parquet(parquet_path)
     df = df.fillna("")
-    if not include_peps:
-        df = df[df["source_type"] != "peps"]
+    df = df[df["source_type"] != "peps"]
 
     counts: Dict[str, int] = {}
     batch: List[Tuple[Any, ...]] = []
@@ -847,10 +836,9 @@ async def sync_own_watchlists_postgres(
             batch.clear()
 
         sanctions_count = counts.get("sanctions", 0)
-        peps_count = counts.get("peps", 0)
-        if not sanctions_count or (include_peps and not peps_count):
+        if not sanctions_count:
             raise ScreeningUnavailableError(
-                "Refresh did not provide all required datasets; existing watchlist retained."
+                "Refresh did not provide sanctions data; existing watchlist retained."
             )
 
         await conn.execute(
@@ -1322,9 +1310,6 @@ def build_input_classification(
     elif person_match and (not org_match or person_score >= org_score + 8):
         inferred = "Person"
 
-    if pep_checked is False and base["looks_like_company"]:
-        signals.append("PEP screening was skipped because the input looked company-like")
-
     likely_misclassified = submitted != inferred and (
         base["looks_like_company"] or org_match or person_match
     )
@@ -1425,7 +1410,7 @@ def _parse_aliases(value):
     return [item.strip() for item in values if item.strip()]
 
 
-def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps):
+def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps=False):
     """One decision/evidence implementation shared by both storage backends."""
     if not _normalize_text(name):
         raise ScreeningUnavailableError("Enter a name containing supported letters or numbers.")
@@ -1442,7 +1427,7 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         if schema and schema not in ({"organization", "company", "legalentity"} if et == "organization" else {"person"}):
             continue
         source_type = row.get("source_type", "sanctions")
-        if source_type == "peps" and not include_peps:
+        if source_type == "peps":
             continue
         display_name = _safe_str(row.get("name"))
         aliases = _safe_str(raw.get("aliases") or row.get("aliases"))
@@ -1503,51 +1488,49 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             "dob_assessment": dob_status, "country_assessment": country_status,
             "disposition": "excluded" if excluded else "potential_match", "reasons": reasons,
         })
-    evidence.sort(key=lambda x: (x['disposition'] != 'potential_match', x['source_type'] != 'sanctions', -x['name_score'], x['name']))
+    evidence.sort(key=lambda x: (x['disposition'] != 'potential_match', -x['name_score'], x['name']))
     sanctions = [e for e in evidence if e['disposition'] == 'potential_match' and e['source_type'] == 'sanctions']
-    peps = [e for e in evidence if e['disposition'] == 'potential_match' and e['source_type'] == 'peps']
     result = _empty_no_match_result(source_label)
     result['Top Matches'] = sorted(suggestions.items(), key=lambda x: (-x[1], x[0]))[:5]
     result['Candidate Evidence'] = evidence[:50]
-    result['Candidate Evidence Summary'] = {'evaluated_name_matches': len(evidence), 'potential_matches': len(sanctions) + len(peps), 'excluded': sum(e['disposition'] == 'excluded' for e in evidence), 'display_truncated': len(evidence) > 50}
-    result['PEP Check'] = {'checked': bool(include_peps), 'status': 'checked' if include_peps else 'skipped'}
+    result['Candidate Evidence Summary'] = {'evaluated_name_matches': len(evidence), 'potential_matches': len(sanctions), 'excluded': sum(e['disposition'] == 'excluded' for e in evidence), 'display_truncated': len(evidence) > 50}
     result['Decision Explanation'] = 'No potential match identified under the current matching rules. This is not proof of identity.'
-    if sanctions or peps:
-        best = (sanctions or peps)[0]
+    if sanctions:
+        best = sanctions[0]
         score = best['name_score']
         result.update({'Sanctions Name': best['name'], 'Birth Date': best['birth_date'], 'Regime': best['regime'],
-                       'Is Sanctioned': bool(sanctions), 'Is PEP': bool(peps), 'Match Found': True,
+                       'Is Sanctioned': True, 'Match Found': True,
                        'Position': best['position'], 'Score': score, 'Confidence': 'High' if score >= 90 else 'Medium' if score >= 80 else 'Low',
-                       'Risk Level': 'High Risk' if sanctions else 'Medium Risk'})
-        result['Check Summary'].update(Status='Fail Sanction' if sanctions else 'Fail PEP', Source='; '.join(dict.fromkeys(e['dataset'] or source_label for e in sanctions + peps)))
-        result['Decision Explanation'] = 'Potential sanctions match; analyst verification is required.' if sanctions else 'Potential PEP match; review the identity evidence and record the decision.'
+                       'Risk Level': 'High Risk'})
+        result['Check Summary'].update(Status='Fail Sanction', Source='; '.join(dict.fromkeys(e['dataset'] or source_label for e in sanctions)))
+        result['Decision Explanation'] = 'Potential sanctions match; analyst verification is required.'
     return result
 
 
 def perform_opensanctions_check(name, dob, country=None, entity_type="Person", parquet_path=OSN_PARQUET,
-                               requestor=None, log_search=True, include_peps=True, dataframe=None):
+                               requestor=None, log_search=True, include_peps=False, dataframe=None):
     df = dataframe if dataframe is not None else get_opensanctions_df(parquet_path)
     sources = set(df.get("source_type", pd.Series(dtype=str)).astype(str).str.lower())
-    if df.empty or "sanctions" not in sources or (include_peps and "peps" not in sources):
-        raise ScreeningUnavailableError("Required sanctions or PEP data is unavailable.")
+    if df.empty or "sanctions" not in sources:
+        raise ScreeningUnavailableError("Sanctions data is unavailable.")
     # Filter before conversion to avoid duplicating the entire watchlist in memory.
     schemas = df['schema'].fillna('').astype(str).str.lower()
     allowed = ['organization', 'company', 'legalentity'] if entity_type.lower() == 'organization' else ['person']
     selected = df[schemas.isin(allowed)]
-    result = _evaluate_watchlist_rows(name, dob, country, entity_type, (dict(zip(selected.columns, values)) for values in selected.itertuples(index=False, name=None)), 'OpenSanctions', include_peps)
+    result = _evaluate_watchlist_rows(name, dob, country, entity_type, (dict(zip(selected.columns, values)) for values in selected.itertuples(index=False, name=None)), 'OpenSanctions')
     if log_search:
         _append_search_to_csv(name, result['Check Summary'])
     return result
 
 
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
-                                          candidate_limit=400, log_search=True, include_peps=True):
+                                          candidate_limit=400, log_search=True, include_peps=False):
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
         raise ScreeningUnavailableError("Watchlist data is unavailable.")
     sources = await conn.fetch("SELECT DISTINCT source_type FROM watchlist_entities")
     available = {r['source_type'] for r in sources}
-    if 'sanctions' not in available or (include_peps and 'peps' not in available):
-        raise ScreeningUnavailableError("Required sanctions or PEP data is unavailable.")
+    if 'sanctions' not in available:
+        raise ScreeningUnavailableError("Sanctions data is unavailable.")
     # Retrieval must not suppress missing/conflicting identity evidence. Apply type
     # before LIMIT so unrelated schemas cannot crowd out eligible candidates.
     limit = max(1, min(2000, int(candidate_limit)))
@@ -1556,7 +1539,7 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
     full_dob = normalized_dob if normalized_dob and len(normalized_dob) == 10 and entity_type.lower() != 'organization' else None
     query_tokens = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name)).split()
     rows = []
-    for source_type in (['sanctions', 'peps'] if include_peps else ['sanctions']):
+    for source_type in ['sanctions']:
         candidates = await conn.fetch('''
             SELECT entity_id, name, birth_date::text AS birth_date, dataset, regime,
                    entity_schema, raw_json, source_type
@@ -1591,7 +1574,7 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
         if len(candidates) > limit:
             raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
         rows.extend(dict(r) for r in candidates)
-    result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist', include_peps)
+    result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist')
     if log_search:
         _append_search_to_csv(name, result['Check Summary'])
     return result

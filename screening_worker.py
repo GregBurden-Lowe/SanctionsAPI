@@ -53,8 +53,8 @@ def main(stop_event=None):
         asyncio.run(verify())
         from utils import get_opensanctions_df
         data = get_opensanctions_df()
-        if data.empty or not {'sanctions', 'peps'}.issubset(set(data['source_type'])):
-            raise RuntimeError('Worker requires populated sanctions and PEP Parquet data')
+        if data.empty or 'sanctions' not in set(data['source_type']):
+            raise RuntimeError('Worker requires populated sanctions Parquet data')
         Path('/tmp/screening-worker-ready').write_text(os.environ.get('RELEASE_ID', ''))
 
     poll_interval = max(2, int(os.environ.get("SCREENING_WORKER_POLL_SECONDS", "5")))
@@ -156,7 +156,7 @@ def main(stop_event=None):
                 if existing_valid:
                     from source_assurance import parquet_manifest, assess, decode
                     cached_engine = decode(existing_valid['result_json'])
-                    coverage = assess(parquet_manifest(), cached_engine.get('PEP Check', {}).get('checked', True))
+                    coverage = assess(parquet_manifest())
                     if coverage['status'] != 'current' or coverage.get('version') != cached_engine.get('Source Coverage', {}).get('version'):
                         existing_valid = None
                 if existing_valid and not force_rescreen:
@@ -230,7 +230,7 @@ def main(stop_event=None):
                 risk_level = result.get("Risk Level") or ""
                 confidence = result.get("Confidence") or ""
                 score = float(result.get("Score") or 0)
-                pep_flag = bool(result.get("Is PEP"))
+                pep_flag = False
                 result_status = (result.get("Check Summary") or {}).get("Status") or "Unknown"
                 transition = "new_result"
                 if previous_status and result_status:

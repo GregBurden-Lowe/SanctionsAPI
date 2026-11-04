@@ -1,4 +1,4 @@
-"""Additive analyst guidance. Legacy finding fields remain unchanged."""
+"""Additive analyst guidance."""
 import hashlib
 import json
 
@@ -22,14 +22,10 @@ def enrich_result(result):
             actions.append('Confirm the company registration number and review relevant directors and ownership relationships.')
         if result.get('Is Sanctioned'):
             actions.append('Escalate unresolved sanctions candidates to Compliance before making a clearance decision.')
-        if result.get('Is PEP'):
-            actions.append('Verify the public role and relevant relationships; a PEP match is not a sanctions finding.')
     else:
         actions.append('No potential match under these rules. Apply your normal business controls and retain this screening record.')
-    if not result.get('PEP Check', {}).get('checked', True):
-        actions.append('PEP screening was not performed for this submitted entity; screen connected individuals separately.')
     result['Screening Guidance'] = {
-        'finding': 'potential_sanctions_match' if result.get('Is Sanctioned') else 'potential_pep_match' if result.get('Is PEP') else 'no_potential_match',
+        'finding': 'potential_sanctions_match' if result.get('Is Sanctioned') else 'no_potential_match',
         'identity_confirmed': False, 'next_actions': actions,
         'limitations': ['Name similarity is not an identity probability.', 'Missing information is not conflicting evidence.'],
     }

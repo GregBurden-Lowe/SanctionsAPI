@@ -3,7 +3,7 @@ from collections import Counter
 from datetime import date
 import math
 
-VALID_OUTCOMES = {'no_potential_match', 'potential_sanctions_match', 'potential_pep_match'}
+VALID_OUTCOMES = {'no_potential_match', 'potential_sanctions_match'}
 
 
 def score_cases(cases, backend='postgres'):

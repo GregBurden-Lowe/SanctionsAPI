@@ -106,7 +106,7 @@ export function AppShell() {
       <main className={mainClass}>
         <header className={topBarClass}>
           <div>
-            <h1 className="text-[14.5px] font-bold text-white">Sanctions & PEP Screening</h1>
+            <h1 className="text-[14.5px] font-bold text-white">Sanctions Screening</h1>
           </div>
           <div ref={menuRef} className="relative">
             <button

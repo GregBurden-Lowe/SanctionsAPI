@@ -18,39 +18,32 @@ def decode(value):
     return json.loads(value) if isinstance(value, (str, bytes)) else dict(value or {})
 
 
-def build_manifest(sanctions_path, peps_path=None):
+def build_manifest(sanctions_path):
     from utils import _dataset_allowed
     counts = {name: 0 for name in LIST_LABELS}
-    counts['PEP'] = 0
     hashes = {}
     datasets = set()
-    for kind, path in [('sanctions', sanctions_path), ('peps', peps_path)]:
-        if not path:
-            continue
-        with open(path, 'rb') as stream:
-            hashes[kind] = hashlib.file_digest(stream, 'sha256').hexdigest()
-        with open(path, encoding='utf-8', newline='') as stream:
-            for row in csv.DictReader(stream):
-                label = row.get('dataset', '')
-                if not row.get('name') or (kind == 'sanctions' and not _dataset_allowed(label)):
-                    continue
-                datasets.add(label)
-                if kind == 'peps':
-                    counts['PEP'] += 1
-                else:
-                    for name, labels in LIST_LABELS.items():
-                        if any(part in label.lower() for part in labels):
-                            counts[name] += 1
+    with open(sanctions_path, 'rb') as stream:
+        hashes['sanctions'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+    with open(sanctions_path, encoding='utf-8', newline='') as stream:
+        for row in csv.DictReader(stream):
+            label = row.get('dataset', '')
+            if not row.get('name') or not _dataset_allowed(label):
+                continue
+            datasets.add(label)
+            for name, labels in LIST_LABELS.items():
+                if any(part in label.lower() for part in labels):
+                    counts[name] += 1
     version = hashlib.sha256(json.dumps({'files': hashes, 'lists': LIST_LABELS, 'format': 2}, sort_keys=True).encode()).hexdigest()
     return {'version': version, 'ingested_at': datetime.now(timezone.utc).isoformat(),
             'source_published_at': None, 'publication_time_verified': False,
             'file_hashes': hashes, 'list_counts': counts, 'datasets': sorted(datasets),
-            'scope': 'Configured sanctions lists and PEP collection; not identity verification or complete ownership research.'}
+            'scope': 'Configured sanctions lists; not identity verification or complete ownership research.'}
 
 
-def assess(manifest, include_peps=True, now=None):
+def assess(manifest, now=None):
     manifest = decode(manifest)
-    required = ['UK', 'UN', 'EU', 'OFAC'] + (['PEP'] if include_peps else [])
+    required = ['UK', 'UN', 'EU', 'OFAC']
     missing = [name for name in required if not manifest.get('list_counts', {}).get(name)]
     now = now or datetime.now(timezone.utc)
     try:
@@ -64,9 +57,9 @@ def assess(manifest, include_peps=True, now=None):
             'age_hours': round(age, 2) if age is not None else None, 'maximum_age_hours': max_age}
 
 
-def require_current(manifest, include_peps=True):
+def require_current(manifest):
     from utils import ScreeningUnavailableError
-    coverage = assess(manifest, include_peps)
+    coverage = assess(manifest)
     if coverage['status'] != 'current':
         raise ScreeningUnavailableError('Source coverage is ' + coverage['status'] +
             (': ' + ', '.join(coverage['missing_lists']) if coverage['missing_lists'] else '') +
@@ -89,7 +82,7 @@ def parquet_manifest(path=None):
         return {}
 
 
-def build_own_manifest(watchlists_parquet_path: str, include_peps: bool = True) -> dict:
+def build_own_manifest(watchlists_parquet_path: str) -> dict:
     """Build a source manifest from our self-scraped watchlists parquet file."""
     import hashlib as _hl
     import pandas as pd
@@ -101,18 +94,12 @@ def build_own_manifest(watchlists_parquet_path: str, include_peps: bool = True) 
 
     df = df.fillna("")
     df = df[df["name"].str.strip() != ""]
+    df = df[df["source_type"] != "peps"]
 
     counts = {name: 0 for name in LIST_LABELS}
-    counts["PEP"] = 0
     datasets: set = set()
 
-    pep_mask = df["source_type"] == "peps"
-    counts["PEP"] = int(pep_mask.sum())
-    for ds in df.loc[pep_mask, "dataset"].unique():
-        datasets.add(str(ds))
-
-    sanc_df = df[~pep_mask]
-    for label, grp in sanc_df.groupby("dataset", sort=False):
+    for label, grp in df.groupby("dataset", sort=False):
         label = str(label)
         datasets.add(label)
         for list_name, label_patterns in LIST_LABELS.items():
@@ -131,10 +118,6 @@ def build_own_manifest(watchlists_parquet_path: str, include_peps: bool = True) 
         pass
 
     hashes = {"all": file_hash}
-    # Version is derived from data content (counts + datasets), not the file hash.
-    # The file hash changes when parquet metadata is embedded after the initial write,
-    # which would otherwise cause a spurious version mismatch between the parquet and
-    # postgres manifests on every refresh.
     version = _hl.sha256(
         json.dumps({"list_counts": counts, "datasets": sorted(datasets), "format": 3}, sort_keys=True).encode()
     ).hexdigest()
@@ -147,8 +130,5 @@ def build_own_manifest(watchlists_parquet_path: str, include_peps: bool = True) 
         "file_hashes": hashes,
         "list_counts": counts,
         "datasets": sorted(datasets),
-        "scope": (
-            "Self-scraped sanctions lists (UN, OFAC, UK, EU) "
-            "and PEP collections (Wikidata, CIA World Leaders)."
-        ),
+        "scope": "Self-scraped sanctions lists (UN, OFAC, UK, EU).",
     }

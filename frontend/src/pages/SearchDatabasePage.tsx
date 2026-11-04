@@ -83,7 +83,7 @@ export function SearchDatabasePage() {
   const handleMarkFalsePositive = async () => {
     if (!detailRow) return
     const result = detailRow.result_json ?? {}
-    const canOverride = Boolean(result['Is Sanctioned'] || result['Is PEP'])
+    const canOverride = Boolean(result['Is Sanctioned'])
     if (!canOverride) return
     const confirmed = window.confirm(
       'Mark this screening result as a false positive and clear the sanction outcome?',
@@ -156,7 +156,7 @@ export function SearchDatabasePage() {
   const handleRerunCheck = async () => {
     if (!detailRow) return
     const result = detailRow.result_json ?? {}
-    const canRerun = Boolean(result['Is Sanctioned'] || result['Is PEP'])
+    const canRerun = Boolean(result['Is Sanctioned'])
     if (!canRerun) return
 
     const isPerson = detailRow.entity_type === 'Person'
@@ -346,7 +346,7 @@ export function SearchDatabasePage() {
           detailRow ? (
             <div className="flex items-center gap-2">
               {user?.is_admin &&
-                Boolean(detailRow.result_json?.['Is Sanctioned'] || detailRow.result_json?.['Is PEP']) && (
+                Boolean(detailRow.result_json?.['Is Sanctioned']) && (
                 <Button
                   variant="secondary"
                   onClick={() => void handleMarkFalsePositive()}
@@ -368,7 +368,7 @@ export function SearchDatabasePage() {
             {overrideSuccess && (
               <p className="text-sm text-semantic-success">{overrideSuccess}</p>
             )}
-            {Boolean(detailRow.result_json?.['Is Sanctioned'] || detailRow.result_json?.['Is PEP']) && (
+            {Boolean(detailRow.result_json?.['Is Sanctioned']) && (
               <Card>
                 <CardHeader>
                   <CardTitle>{detailRow.entity_type === 'Person' ? 'Refine with date of birth' : 'Refine with country'}</CardTitle>

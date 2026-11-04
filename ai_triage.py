@@ -507,7 +507,7 @@ async def auto_clear_task(conn, triage_id):
             await conn.execute("""UPDATE ai_triage_recommendations SET effective_recommended_action='INVESTIGATE',
                 guardrail_overridden=true,guardrail_reasons=$2::jsonb,updated_at=now() WHERE triage_id=$1::uuid""",triage_id,json.dumps(reasons or ['Existing guardrail override']))
             return False
-        if not (engine.get('Is Sanctioned') or engine.get('Is PEP')):
+        if not engine.get('Is Sanctioned'):
             await conn.execute("UPDATE ai_triage_recommendations SET status='SUPERSEDED',updated_at=now() WHERE triage_id=$1::uuid",triage_id)
             return False
         note = (f"Automatically approved CLEAR recommendation {triage_id}. "

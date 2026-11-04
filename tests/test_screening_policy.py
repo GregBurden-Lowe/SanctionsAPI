@@ -16,8 +16,7 @@ CASES = json.loads((Path(__file__).parent / 'fixtures/policy_cases.json').read_t
 
 def fixture(case):
     return [{**dict(id='target', schema='Person', source_type='sanctions', dataset='OFAC'), **case['row']},
-            dict(id='coverage-sanctions', name='Zzyzx Remote Subject', schema='Person', source_type='sanctions', dataset='OFAC'),
-            dict(id='coverage-peps', name='Zzyzx Remote Official', schema='Person', source_type='peps', dataset='PEP')]
+            dict(id='coverage-sanctions', name='Zzyzx Remote Subject', schema='Person', source_type='sanctions', dataset='OFAC')]
 
 
 def arguments(case):
@@ -26,7 +25,6 @@ def arguments(case):
 
 def assert_outcome(test, result, case):
     test.assertEqual(result['Match Found'], case['match'], case['label'])
-    test.assertEqual(result['Is PEP'], case.get('pep', False), case['label'])
     for key in ('dob_assessment','country_assessment'):
         if key in case:
             test.assertEqual(result['Candidate Evidence'][0][key], case[key], case['label'])
@@ -73,7 +71,7 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
                 assert_outcome(self, pg, case)
                 with patch('utils.get_opensanctions_df', return_value=pd.DataFrame(rows)):
                     parquet = run_parquet_check(**arguments(case))
-                for key in ('Match Found','Is Sanctioned','Is PEP','Candidate Evidence','Candidate Evidence Summary','PEP Check','Entity Type Checks','Input Classification'):
+                for key in ('Match Found','Is Sanctioned','Candidate Evidence','Candidate Evidence Summary','Entity Type Checks','Input Classification'):
                     self.assertEqual(pg[key], parquet[key], key)
 
     async def test_statement_timeout_propagates_as_incomplete(self):

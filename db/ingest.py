@@ -13,9 +13,8 @@ Usage (from a script):
     counts = await load_watchlist_records(
         conn,
         watchlists_parquet_path="data/watchlists.parquet",
-        include_peps=True,
     )
-    print(counts)  # e.g. {"sanctions": 34000, "peps": 22000}
+    print(counts)  # e.g. {"sanctions": 34000}
 """
 import sys
 from pathlib import Path

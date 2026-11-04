@@ -25,6 +25,12 @@ function recommendationTone(value: string): string {
   return 'bg-[rgba(245,158,11,0.12)] border-[rgba(245,158,11,0.25)] text-[#d97706]'
 }
 
+function screeningResultLabel(status: string | null): string {
+  const normalized = (status ?? '').trim().toLowerCase()
+  if (normalized.startsWith('fail sanction')) return 'Potential sanctions match'
+  return 'Unavailable'
+}
+
 function RecommendationBadge({ value }: { value: string }) {
   return (
     <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${recommendationTone(value)}`}>
@@ -325,6 +331,7 @@ export function AiTriagePage() {
                 <CardBody className="space-y-2 text-sm text-text-secondary">
                   <p><span className="font-semibold text-text-primary">Name:</span> {selected.matched_name ?? '—'}</p>
                   <p><span className="font-semibold text-text-primary">Type:</span> {selected.matched_entity_type ?? '—'}</p>
+                  <p><span className="font-semibold text-text-primary">Screening result:</span> {screeningResultLabel(selected.screening_status)}</p>
                   <p><span className="font-semibold text-text-primary">Country:</span> {selected.matched_country ?? '—'}</p>
                   <p><span className="font-semibold text-text-primary">Source:</span> {selected.source_label ?? '—'}</p>
                 </CardBody>

@@ -107,7 +107,6 @@ export interface OpCheckResponse {
   Regime: string | null;
   Position: unknown;
   Topics: unknown[];
-  'Is PEP': boolean;
   'Is Sanctioned': boolean;
   Confidence: string;
   Score: number;
@@ -118,12 +117,6 @@ export interface OpCheckResponse {
   'Entity Type Checks'?: {
     Person?: { status?: string; is_match?: boolean; score?: number }
     Organization?: { status?: string; is_match?: boolean; score?: number }
-  };
-  'PEP Check'?: {
-    checked?: boolean
-    status?: string
-    reason?: string | null
-    message?: string
   };
   'Input Classification'?: {
     submitted_as?: string
@@ -152,7 +145,6 @@ export interface ScreenedEntity {
   confidence: string;
   score: number;
   uk_sanctions_flag: boolean;
-  pep_flag: boolean;
   result_json: OpCheckResponse;
   last_requestor: string | null;
   review_status: string | null;
@@ -187,17 +179,14 @@ export interface ReviewQueueItem {
 }
 
 export interface RefreshRequest {
-  include_peps: boolean
   sync_postgres?: boolean
 }
 
 export interface RefreshResponse {
   status: 'ok'
-  include_peps: boolean
   postgres_synced: boolean
   postgres_rows: {
     sanctions: number
-    peps: number
   }
   refresh_run?: {
     refresh_run_id: string
@@ -252,10 +241,8 @@ export interface ScreeningJob {
 export interface RefreshRunRecord {
   refresh_run_id: string
   ran_at: string
-  include_peps: boolean
   postgres_synced: boolean
   sanctions_rows: number
-  peps_rows: number
   uk_hash: string | null
   prev_uk_hash: string | null
   uk_changed: boolean

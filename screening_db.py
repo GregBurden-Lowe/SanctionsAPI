@@ -376,7 +376,7 @@ async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] 
         from source_assurance import postgres_manifest, parquet_manifest, assess
         backend = result.get('Screening Inputs', {}).get('backend')
         current = await postgres_manifest(conn) if backend == 'postgres_beta' else parquet_manifest()
-        coverage = assess(current, result.get('PEP Check', {}).get('checked', True))
+        coverage = assess(current)
         if coverage['status'] != 'current' or coverage.get('version') != result['Source Coverage'].get('version'):
             return None
     result = project_result(result, row['review_decision'], stale=row['manual_override_stale'])
@@ -434,7 +434,6 @@ async def upsert_screening(
     risk_level = result.get("Risk Level") or ""
     confidence = result.get("Confidence") or ""
     score = float(result.get("Score") or 0)
-    pep_flag = bool(result.get("Is PEP"))
     uk_flag = _uk_sanctions_from_result(result)
     dob_date = None
     if date_of_birth:
@@ -495,7 +494,7 @@ async def upsert_screening(
             confidence,
             score,
             uk_flag,
-            pep_flag,
+            False,
             json.dumps(result),
             requestor,
             business_reference_clean,
@@ -650,10 +649,10 @@ async def get_latest_uk_hash(conn) -> Dict[str, Optional[str]]:
 async def create_refresh_run(
     conn,
     *,
-    include_peps: bool,
+    include_peps: bool = False,
     postgres_synced: bool,
     sanctions_rows: int,
-    peps_rows: int,
+    peps_rows: int = 0,
     uk_hash: str,
     prev_uk_hash: Optional[str],
     uk_changed: bool,
@@ -672,10 +671,10 @@ async def create_refresh_run(
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING refresh_run_id
         """,
-        include_peps,
+        False,
         postgres_synced,
         int(sanctions_rows or 0),
-        int(peps_rows or 0),
+        0,
         uk_hash or "",
         prev_uk_hash,
         bool(uk_changed),
@@ -907,9 +906,7 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25, retry_failed: bool
         WHERE status NOT ILIKE 'Cleared%'
           AND (
             status ILIKE 'Fail Sanction%'
-            OR status ILIKE 'Fail PEP%'
             OR COALESCE((result_json->>'Is Sanctioned')::boolean, FALSE) = TRUE
-            OR COALESCE((result_json->>'Is PEP')::boolean, FALSE) = TRUE
           )
           AND COALESCE(review_status, 'UNREVIEWED') <> 'COMPLETED'
           AND NOT EXISTS (
@@ -1192,7 +1189,7 @@ async def mark_manual_overrides_stale(conn, *, latest_uk_hash: str) -> int:
             status = CASE WHEN review_decision IS NOT NULL THEN COALESCE(result_json->'Check Summary'->>'Status', status) ELSE status END,
             risk_level = CASE WHEN review_decision IS NOT NULL THEN COALESCE(result_json->>'Risk Level', risk_level) ELSE risk_level END,
             uk_sanctions_flag = CASE WHEN review_decision IS NOT NULL THEN COALESCE((result_json->>'Is Sanctioned')::boolean, false) ELSE uk_sanctions_flag END,
-            pep_flag = CASE WHEN review_decision IS NOT NULL THEN COALESCE((result_json->>'Is PEP')::boolean, false) ELSE pep_flag END,
+            pep_flag = FALSE,
             review_status = NULL,
             review_claimed_by = NULL, review_claimed_at = NULL, review_claimed_run_id = NULL,
             updated_at = NOW()
@@ -1271,11 +1268,11 @@ async def get_dashboard_summary(conn) -> Dict[str, Any]:
             )::int AS aged_reviews_over_72h,
             COUNT(*) FILTER (
                 WHERE last_screened_at >= NOW() - INTERVAL '24 hours'
-                  AND (uk_sanctions_flag = TRUE OR pep_flag = TRUE)
+                  AND uk_sanctions_flag = TRUE
             )::int AS new_matches_24h,
             COUNT(*) FILTER (
                 WHERE last_screened_at >= NOW() - INTERVAL '7 days'
-                  AND (uk_sanctions_flag = TRUE OR pep_flag = TRUE)
+                  AND uk_sanctions_flag = TRUE
             )::int AS new_matches_7d,
             COUNT(*) FILTER (
                 WHERE review_claimed_at >= DATE_TRUNC('day', NOW())
@@ -1512,7 +1509,6 @@ async def export_screened_entities_for_mi(
             result_json->>'Birth Date' AS result_birth_date,
             result_json->>'Regime' AS result_regime,
             COALESCE((result_json->>'Is Sanctioned')::boolean, FALSE) AS result_is_sanctioned,
-            COALESCE((result_json->>'Is PEP')::boolean, FALSE) AS result_is_pep,
             COALESCE((result_json->>'Match Found')::boolean, FALSE) AS result_match_found,
             result_json->>'Risk Level' AS result_risk_level,
             result_json->>'Confidence' AS result_confidence,
@@ -1526,10 +1522,6 @@ async def export_screened_entities_for_mi(
             result_json->'Entity Type Checks'->'Organization'->>'status' AS organization_check_status,
             COALESCE((result_json->'Entity Type Checks'->'Organization'->>'is_match')::boolean, FALSE) AS organization_check_is_match,
             result_json->'Entity Type Checks'->'Organization'->>'score' AS organization_check_score,
-            COALESCE((result_json->'PEP Check'->>'checked')::boolean, FALSE) AS pep_check_checked,
-            result_json->'PEP Check'->>'status' AS pep_check_status,
-            result_json->'PEP Check'->>'reason' AS pep_check_reason,
-            result_json->'PEP Check'->>'message' AS pep_check_message,
             result_json->'Input Classification'->>'submitted_as' AS input_submitted_as,
             result_json->'Input Classification'->>'inferred_as' AS input_inferred_as,
             COALESCE((result_json->'Input Classification'->>'likely_misclassified')::boolean, FALSE) AS input_likely_misclassified,
@@ -2075,7 +2067,7 @@ async def mark_false_positive(conn, *, entity_key, actor, reason=None, expected_
         engine = row['result_json']
         if isinstance(engine, str):
             engine = json.loads(engine)
-        if not (engine.get('Is Sanctioned') or engine.get('Is PEP')):
+        if not engine.get('Is Sanctioned'):
             raise ReviewConflict('This run has no potential match to resolve.')
         return await write_decision(conn, row, actor, 'False Positive - Proceeded', notes)
 

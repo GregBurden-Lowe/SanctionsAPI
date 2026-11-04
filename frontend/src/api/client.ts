@@ -84,11 +84,11 @@ export async function opcheck(params: OpCheckParams, idempotencyKey?: string): P
   })
 }
 
-export async function refreshOpensanctions(include_peps: boolean, sync_postgres = true): Promise<Response> {
+export async function refreshOpensanctions(sync_postgres = true): Promise<Response> {
   return authFetch(resolve('/refresh_opensanctions'), {
     method: 'POST',
     headers: defaultHeaders(),
-    body: JSON.stringify({ include_peps, sync_postgres }),
+    body: JSON.stringify({ sync_postgres }),
   })
 }
 

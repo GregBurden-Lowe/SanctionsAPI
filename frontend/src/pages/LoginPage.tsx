@@ -63,7 +63,7 @@ export function LoginPage() {
         <div className="grid lg:grid-cols-[1.05fr_1fr]">
           <div className="hidden lg:flex flex-col justify-between bg-[#0f1f2b] p-10 text-white">
             <div>
-              <h1 className="text-3xl font-semibold leading-tight">Sanctions &amp; PEP Screening</h1>
+              <h1 className="text-3xl font-semibold leading-tight">Sanctions Screening</h1>
             </div>
           </div>
           <div className="p-6 lg:p-10">
@@ -127,7 +127,7 @@ export function LoginPage() {
                   </CardHeader>
                   <CardBody>
               <p className="text-sm text-text-secondary mb-4">
-                Sign in to use Sanctions &amp; PEP Screening.
+                Sign in to use Sanctions Screening.
               </p>
               <form onSubmit={handleSubmit} className="space-y-4">
                 <Input

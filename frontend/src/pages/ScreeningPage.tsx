@@ -533,18 +533,9 @@ function getOutcome(result: OpCheckResponse): {
       semantic: 'error',
     }
   }
-  if (result['Is PEP'] && !result['Is Sanctioned']) {
-    return {
-      heading: 'Cleared — no sanctions match',
-      detail: 'No sanctions match identified. PEP details are recorded below for reference.',
-      semantic: 'success',
-    }
-  }
   return {
-    heading: 'Cleared — no sanctions or PEP match',
-    detail: result['PEP Check']?.checked === false
-      ? 'No potential sanctions match identified. PEP screening was not performed.'
-      : 'No potential sanctions or PEP match under current rules. This is not proof of identity.',
+    heading: 'Cleared — no sanctions match',
+    detail: 'No potential sanctions match under current rules. This is not proof of identity.',
     semantic: 'success',
   }
 }
@@ -558,7 +549,6 @@ export function ResultCard({
 }) {
   const summary = result['Check Summary']
   const outcome = getOutcome(result)
-  const isPepOnly = Boolean(result['Is PEP'] && !result['Is Sanctioned'])
   const { list: sourceList } = parseSourceList(summary?.Source)
   const [showSourcesModal, setShowSourcesModal] = useState(false)
   const [pdfError, setPdfError] = useState<string | null>(null)
@@ -590,13 +580,6 @@ export function ResultCard({
       tone: result['Is Sanctioned'] ? 'fail' : 'pass',
     },
     {
-      title: 'PEP status',
-      subtitle: result['PEP Check']?.checked === false ? 'PEP screening not performed' : result['Is PEP'] ? 'Potential PEP indicator found' : result['Engine Result']?.['Is PEP'] ? 'Engine indicator resolved by analyst' : 'No PEP indicator found',
-      badge: result['PEP Check']?.checked === false ? 'Skipped' : result['Is PEP'] ? 'Match found' : result['Engine Result']?.['Is PEP'] ? 'Resolved' : 'Clear',
-      icon: result['PEP Check']?.checked === false ? BiMinus : result['Is PEP'] ? BiXCircle : BiCheckCircle,
-      tone: result['PEP Check']?.checked === false ? 'neutral' : result['Is PEP'] ? 'fail' : 'pass',
-    },
-    {
       title: 'Person list',
       subtitle: result['Entity Type Checks']?.Person?.status ? `Person list: ${result['Entity Type Checks'].Person.status}` : 'Person list result unavailable',
       badge: result['Entity Type Checks']?.Person?.is_match === true ? 'Match' : result['Entity Type Checks']?.Person?.is_match === false ? 'Clear' : 'N/A',
@@ -609,13 +592,6 @@ export function ResultCard({
       badge: result['Entity Type Checks']?.Organization?.is_match === true ? 'Match' : result['Entity Type Checks']?.Organization?.is_match === false ? 'Clear' : 'N/A',
       icon: result['Entity Type Checks']?.Organization?.is_match === true ? BiXCircle : result['Entity Type Checks']?.Organization?.is_match === false ? BiCheckCircle : BiMinus,
       tone: result['Entity Type Checks']?.Organization?.is_match === true ? 'fail' : result['Entity Type Checks']?.Organization?.is_match === false ? 'pass' : 'neutral',
-    },
-    {
-      title: 'PEP processing',
-      subtitle: result['PEP Check']?.message ?? (result['PEP Check']?.checked === false ? 'PEP screening was not performed.' : 'PEP screening executed.'),
-      badge: result['PEP Check']?.checked === false ? 'Skipped' : 'Done',
-      icon: result['PEP Check']?.checked === false ? BiMinus : BiCheckCircle,
-      tone: result['PEP Check']?.checked === false ? 'neutral' : 'pass',
     },
     {
       title: 'Entity type',
@@ -708,40 +684,10 @@ export function ResultCard({
 
       {pdfError && <p className="text-xs text-semantic-error" role="alert">{pdfError}</p>}
 
-      {/* PEP FYI card */}
-      {isPepOnly && (() => {
-        const pepCandidates = (result['Candidate Evidence'] ?? []).filter(c => c.source_type === 'peps' && c.disposition === 'potential_match')
-        if (pepCandidates.length === 0) return null
-        return (
-          <div className="rounded-[13px] border border-semantic-info/25 bg-semantic-info/5 px-5 py-4 space-y-3">
-            <div className="flex items-start gap-3">
-              <BiInfoCircle className="mt-0.5 h-5 w-5 shrink-0 text-semantic-info" aria-hidden />
-              <div className="min-w-0 flex-1">
-                <p className="font-semibold text-[13px] text-semantic-info leading-snug">For your information — PEP indicator</p>
-                <p className="text-[12px] mt-0.5 text-semantic-info opacity-80">This individual appears on a PEP list. No sanctions match was found — no further action required.</p>
-              </div>
-            </div>
-            {pepCandidates.map((c, i) => (
-              <div key={i} className="rounded-lg border border-semantic-info/15 bg-app/60 px-4 py-3">
-                <p className="text-[13px] font-semibold text-text-primary">{c.matched_name || c.name}</p>
-                {c.reasons.length > 0 && (
-                  <ul className="mt-1.5 space-y-0.5">
-                    {c.reasons.map((r, j) => (
-                      <li key={j} className="text-[11.5px] text-text-secondary">{r}</li>
-                    ))}
-                  </ul>
-                )}
-                {c.country && <p className="text-[11px] text-text-muted mt-1">Country: {c.country}</p>}
-              </div>
-            ))}
-          </div>
-        )
-      })()}
-
       {/* Meta tiles */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {([
-          ...(!isPepOnly ? [['Risk level', result['Risk Level'] || '—']] : []),
+          ['Risk level', result['Risk Level'] || '—'],
           ['Match score', `${result.Score} / 100`],
           ['Similarity band', result.Confidence || 'Not assessed'],
           ['Checked at', summary?.Date ?? '—'],
@@ -760,7 +706,7 @@ export function ResultCard({
         </p>
       )}
 
-      <CandidateEvidence result={result} search={searchDetails} isPepOnly={isPepOnly} />
+      <CandidateEvidence result={result} search={searchDetails} />
 
       {/* Checks + detail */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -875,7 +821,6 @@ export function ResultCard({
             UN:   { label: 'UN Security Council', source: 'United Nations — un.org' },
             EU:   { label: 'EU Consolidated',     source: 'European Commission — eur-lex.europa.eu' },
             OFAC: { label: 'OFAC SDN',            source: 'US Treasury / OFAC — ofac.treas.gov' },
-            PEP:  { label: 'Politically Exposed Persons', source: 'Wikidata / CIA World Leaders' },
           }
 
           return (

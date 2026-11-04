@@ -67,8 +67,6 @@ def inputs_for(case):
 def outcome(result):
     if result.get('Is Sanctioned'):
         return 'potential_sanctions_match'
-    if result.get('Is PEP'):
-        return 'potential_pep_match'
     return 'no_potential_match'
 
 

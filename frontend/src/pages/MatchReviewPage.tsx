@@ -22,7 +22,7 @@ const REVIEW_OUTCOME_OPTIONS: ReviewOutcome[] = [
   'Cancelled / No Action Required',
 ]
 
-const FILTER_CHIPS = ['All', 'PEP', 'Sanctions', 'Adverse Media', 'Watchlist'] as const
+const FILTER_CHIPS = ['All', 'Sanctions', 'Adverse Media', 'Watchlist'] as const
 type FilterChip = (typeof FILTER_CHIPS)[number]
 
 function formatDate(iso: string | null): string {
@@ -106,7 +106,6 @@ export function MatchReviewPage() {
     const searchOk = !needle || haystack.includes(needle)
     const decision = (item.decision || '').toLowerCase()
     let chipOk = true
-    if (activeChip === 'PEP') chipOk = decision.includes('pep')
     if (activeChip === 'Sanctions') chipOk = decision.includes('sanction')
     if (activeChip === 'Adverse Media') chipOk = decision.includes('adverse media')
     if (activeChip === 'Watchlist') chipOk = decision.includes('watchlist')
