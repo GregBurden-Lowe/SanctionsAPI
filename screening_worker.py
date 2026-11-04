@@ -230,7 +230,6 @@ def main(stop_event=None):
                 risk_level = result.get("Risk Level") or ""
                 confidence = result.get("Confidence") or ""
                 score = float(result.get("Score") or 0)
-                pep_flag = False
                 result_status = (result.get("Check Summary") or {}).get("Status") or "Unknown"
                 transition = "new_result"
                 if previous_status and result_status:
@@ -269,11 +268,11 @@ def main(stop_event=None):
                         INSERT INTO screened_entities (
                             entity_key, display_name, normalized_name, date_of_birth, country_input, entity_type,
                             last_screened_at, screening_valid_until,
-                            status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
+                            status, risk_level, confidence, score, uk_sanctions_flag,
                             result_json, last_requestor, business_reference, reason_for_check, updated_at,
                             screened_against_uk_hash, screened_against_refresh_run_id,
                             manual_override_uk_hash, manual_override_stale
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, NULL, FALSE)
                         ON CONFLICT (entity_key) DO UPDATE SET
                             display_name = EXCLUDED.display_name,
                             normalized_name = EXCLUDED.normalized_name,
@@ -287,7 +286,6 @@ def main(stop_event=None):
                             confidence = EXCLUDED.confidence,
                             score = EXCLUDED.score,
                             uk_sanctions_flag = EXCLUDED.uk_sanctions_flag,
-                            pep_flag = EXCLUDED.pep_flag,
                             result_json = EXCLUDED.result_json,
                             last_requestor = EXCLUDED.last_requestor,
                             business_reference = EXCLUDED.business_reference,
@@ -312,7 +310,6 @@ def main(stop_event=None):
                             confidence,
                             score,
                             uk_flag,
-                            pep_flag,
                             json.dumps(result),
                             requestor,
                             business_reference,

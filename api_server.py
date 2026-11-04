@@ -2616,13 +2616,16 @@ async def approve_ai_triage_task(
                     reason_parts.append(f"AI note: {ai_note}")
                 if body.reviewer_notes:
                     reason_parts.append(f"Reviewer note: {body.reviewer_notes.strip()}")
-                cleared = await screening_db.mark_false_positive(
-                    conn,
-                    entity_key=str(task.get("entity_key") or ""),
-                    actor=actor,
-                    reason=" ".join(part for part in reason_parts if part).strip(),
-                    expected_run_id=(task.get('result_snapshot_json') or {}).get('run_id'),
-                )
+                snapshot = task.get('result_snapshot_json') or {}
+                cleared = None
+                if snapshot.get('Is Sanctioned'):
+                    cleared = await screening_db.mark_false_positive(
+                        conn,
+                        entity_key=str(task.get("entity_key") or ""),
+                        actor=actor,
+                        reason=" ".join(part for part in reason_parts if part).strip(),
+                        expected_run_id=snapshot.get('run_id'),
+                    )
                 if cleared is not None:
                     summary = cleared.get("Check Summary") if isinstance(cleared.get("Check Summary"), dict) else {}
                     final_screening_outcome = summary.get("Status") or "Cleared - False Positive"

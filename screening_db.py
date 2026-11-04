@@ -91,7 +91,6 @@ async def ensure_schema(conn) -> None:
             confidence      TEXT NOT NULL,
             score           NUMERIC(5,2) NOT NULL,
             uk_sanctions_flag BOOLEAN NOT NULL DEFAULT FALSE,
-            pep_flag        BOOLEAN NOT NULL DEFAULT FALSE,
             result_json     JSONB NOT NULL,
             last_requestor  TEXT,
             business_reference TEXT,
@@ -452,11 +451,11 @@ async def upsert_screening(
             INSERT INTO screened_entities (
                 entity_key, display_name, normalized_name, date_of_birth, country_input, entity_type,
                 last_screened_at, screening_valid_until,
-                status, risk_level, confidence, score, uk_sanctions_flag, pep_flag,
+                status, risk_level, confidence, score, uk_sanctions_flag,
                 result_json, last_requestor, business_reference, reason_for_check, updated_at,
                 screened_against_uk_hash, screened_against_refresh_run_id,
                 manual_override_uk_hash, manual_override_stale
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::uuid, NULL, FALSE)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::uuid, NULL, FALSE)
             ON CONFLICT (entity_key) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
                 normalized_name = EXCLUDED.normalized_name,
@@ -470,7 +469,6 @@ async def upsert_screening(
                 confidence = EXCLUDED.confidence,
                 score = EXCLUDED.score,
                 uk_sanctions_flag = EXCLUDED.uk_sanctions_flag,
-                pep_flag = EXCLUDED.pep_flag,
                 result_json = EXCLUDED.result_json,
                 last_requestor = EXCLUDED.last_requestor,
                 business_reference = EXCLUDED.business_reference,
@@ -494,7 +492,6 @@ async def upsert_screening(
             confidence,
             score,
             uk_flag,
-            False,
             json.dumps(result),
             requestor,
             business_reference_clean,
@@ -1189,7 +1186,6 @@ async def mark_manual_overrides_stale(conn, *, latest_uk_hash: str) -> int:
             status = CASE WHEN review_decision IS NOT NULL THEN COALESCE(result_json->'Check Summary'->>'Status', status) ELSE status END,
             risk_level = CASE WHEN review_decision IS NOT NULL THEN COALESCE(result_json->>'Risk Level', risk_level) ELSE risk_level END,
             uk_sanctions_flag = CASE WHEN review_decision IS NOT NULL THEN COALESCE((result_json->>'Is Sanctioned')::boolean, false) ELSE uk_sanctions_flag END,
-            pep_flag = FALSE,
             review_status = NULL,
             review_claimed_by = NULL, review_claimed_at = NULL, review_claimed_run_id = NULL,
             updated_at = NOW()
@@ -1406,7 +1402,7 @@ async def search_screened_entities(
     query = f"""
         SELECT entity_key, display_name, normalized_name, date_of_birth, entity_type,
                last_screened_at, screening_valid_until, status, risk_level, confidence, score,
-               uk_sanctions_flag, pep_flag, result_json, last_requestor, business_reference, reason_for_check, country_input,
+               uk_sanctions_flag, result_json, last_requestor, business_reference, reason_for_check, country_input,
                review_status, review_claimed_by, review_claimed_at, review_outcome, review_notes, review_completed_by, review_completed_at, current_run_id, review_decision, manual_override_stale,
                updated_at
         FROM screened_entities
@@ -1493,7 +1489,6 @@ async def export_screened_entities_for_mi(
             confidence,
             score,
             uk_sanctions_flag,
-            pep_flag,
             last_requestor,
             business_reference,
             reason_for_check,
