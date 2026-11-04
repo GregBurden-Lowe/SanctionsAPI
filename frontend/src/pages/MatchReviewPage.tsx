@@ -22,8 +22,6 @@ const REVIEW_OUTCOME_OPTIONS: ReviewOutcome[] = [
   'Cancelled / No Action Required',
 ]
 
-const FILTER_CHIPS = ['All', 'Sanctions', 'Adverse Media', 'Watchlist'] as const
-type FilterChip = (typeof FILTER_CHIPS)[number]
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
@@ -64,7 +62,6 @@ export function MatchReviewPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
-  const [activeChip, setActiveChip] = useState<FilterChip>('All')
   const [selected, setSelected] = useState<ReviewQueueItem | null>(null)
   const [reviewOutcome, setReviewOutcome] = useState<ReviewOutcome>(REVIEW_OUTCOME_OPTIONS[0])
   const [reviewNotes, setReviewNotes] = useState('')
@@ -103,13 +100,7 @@ export function MatchReviewPage() {
   const matchesViewFilters = (item: ReviewQueueItem): boolean => {
     const needle = searchTerm.trim().toLowerCase()
     const haystack = `${item.entity_name || ''} ${item.business_reference || ''} ${item.screening_user || ''}`.toLowerCase()
-    const searchOk = !needle || haystack.includes(needle)
-    const decision = (item.decision || '').toLowerCase()
-    let chipOk = true
-    if (activeChip === 'Sanctions') chipOk = decision.includes('sanction')
-    if (activeChip === 'Adverse Media') chipOk = decision.includes('adverse media')
-    if (activeChip === 'Watchlist') chipOk = decision.includes('watchlist')
-    return searchOk && chipOk
+    return !needle || haystack.includes(needle)
   }
   const myClaimedDisplay = myClaimedItems.filter(matchesViewFilters)
   const unclaimedDisplay = unclaimedItems.filter(matchesViewFilters)
@@ -260,8 +251,8 @@ export function MatchReviewPage() {
                 key={stat.label}
                 className="bg-white rounded-[11px] border border-[#e2e8f0] px-4 py-[10px] min-w-[72px] text-center"
               >
-                <div className="font-mono text-[20px] leading-none font-extrabold" style={{ color: stat.color }}>
-                  {stat.value}
+                <div className="font-mono text-[20px] leading-none font-extrabold" style={{ color: loading ? '#cbd5e1' : stat.color }}>
+                  {loading ? '—' : stat.value}
                 </div>
                 <div className="mt-[3px] text-[10.5px] uppercase tracking-[0.03em] text-[#94a3b8]">{stat.label}</div>
               </div>
@@ -279,25 +270,6 @@ export function MatchReviewPage() {
                 placeholder="Search by name or reference…"
                 className="w-full h-[35px] rounded-lg border border-[#e2e8f0] bg-[#f8fafc] pl-8 pr-2.5 text-[12.5px] text-[#1e293b] outline-none transition focus:border-[#3b82f6]"
               />
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {FILTER_CHIPS.map((chip) => {
-                const active = chip === activeChip
-                return (
-                  <button
-                    key={chip}
-                    type="button"
-                    onClick={() => setActiveChip(chip)}
-                    className={`rounded-[20px] px-3 py-1 text-xs font-semibold transition ${
-                      active
-                        ? 'bg-[#eff6ff] text-[#2563eb] border border-[#3b82f6]'
-                        : 'bg-transparent text-[#64748b] border border-[#e2e8f0] hover:bg-[#f8fafc]'
-                    }`}
-                  >
-                    {chip}
-                  </button>
-                )
-              })}
             </div>
           </div>
         </Card>
