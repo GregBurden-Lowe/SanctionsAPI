@@ -106,14 +106,14 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
         )}
 
         {/* Verdict row */}
-        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${isPepOnly ? 'border-semantic-info/25 bg-semantic-info/5' : hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : 'border-border bg-app/60'}`}>
+        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : 'border-border bg-app/60'}`}>
           <VerdictIcon className={`mt-0.5 h-4 w-4 shrink-0 ${verdictColor}`} aria-hidden />
           <div className="min-w-0 flex-1">
-            <p className={`text-[13px] font-semibold leading-snug ${isPepOnly ? 'text-semantic-info' : hasMatch ? 'text-semantic-error' : 'text-text-primary'}`}>
+            <p className={`text-[13px] font-semibold leading-snug ${hasMatch ? 'text-semantic-error' : 'text-text-primary'}`}>
               {finding}
             </p>
             <p className="text-[12px] text-text-secondary mt-0.5 leading-snug">{nextAction}</p>
-            {hasMatch && !isPepOnly && evidence.length > 0 && (() => {
+            {hasMatch && evidence.length > 0 && (() => {
               const highConf = evidence.filter(c => c.disposition === 'potential_match' && c.name_score >= 90).length
               const lowConf = evidence.filter(c => c.disposition === 'potential_match' && c.name_score < 90).length
               if (highConf === 0 && lowConf === 0) return null
