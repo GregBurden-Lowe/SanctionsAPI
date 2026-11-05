@@ -5,6 +5,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+from source_assurance import LIST_LABELS
+
 import requests
 from rapidfuzz import fuzz
 
@@ -21,12 +23,8 @@ PROMPT_MAX_FIELD_CHARS = 200
 MODEL_CONTEXT_TOKENS = 4096
 MODEL_MAX_OUTPUT_TOKENS = 160
 
-HIGH_RISK_DATASET_PATTERNS = (
-    "ofac",
-    "united nations",
-    "hm treasury",
-    "ofsi",
-)
+# Every required list, from the labels coverage uses, so source renames cannot silently drop one.
+HIGH_RISK_DATASET_PATTERNS = tuple(pattern for patterns in LIST_LABELS.values() for pattern in patterns)
 PERSON_NAME_STOPWORDS = {
     "mr",
     "mrs",

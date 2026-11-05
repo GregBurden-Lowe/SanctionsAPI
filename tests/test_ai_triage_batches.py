@@ -65,6 +65,30 @@ class PromptTests(unittest.TestCase):
             ai_triage._call_ollama_json('prompt')
 
 
+class HighRiskListTests(unittest.TestCase):
+    CURRENT_LISTS=('UK Sanctions List (FCDO)','UN Security Council Consolidated List',
+                   'EU Consolidated Financial Sanctions List','OFAC SDN List','OFAC Consolidated Sanctions List')
+
+    def test_every_current_list_is_high_risk(self):
+        for dataset in self.CURRENT_LISTS:
+            with self.subTest(dataset=dataset):
+                self.assertTrue(ai_triage._is_high_risk_source(dataset))
+
+    def test_a_spelling_variant_cannot_be_cleared_on_any_current_list(self):
+        for dataset in self.CURRENT_LISTS:
+            evidence=[{'name':'Arkady Romanovich ROTENBERG','matched_name':'Arkady Romanovich ROTENBERG','name_score':88,
+                       'dataset':dataset,'disposition':'potential_match'}]
+            candidate={'display_name':'Arkadii Rotinberg','matched_name':evidence[0]['name'],'score':88,'source_label':dataset,
+                       'result_json':{'Candidate Evidence':evidence,'Candidate Evidence Summary':{'potential_matches':1}}}
+            with self.subTest(dataset=dataset):
+                self.assertEqual(ai_triage.apply_guardrails(candidate,'CLEAR')[0],'INVESTIGATE')
+
+    def test_a_secondary_candidate_on_a_listed_source_blocks_clear(self):
+        candidate=many_candidates(2)
+        candidate['result_json']['Candidate Evidence'][1]['dataset']='UK Sanctions List (FCDO)'
+        self.assertEqual(ai_triage.apply_guardrails(candidate,'CLEAR')[0],'INVESTIGATE')
+
+
 class GuardrailTests(unittest.TestCase):
     def test_generation_is_bounded_and_complete_response_is_accepted(self):
         answer = {'recommended_action': 'CLEAR', 'confidence': .85, 'rationale_short': 'Names differ.'}
