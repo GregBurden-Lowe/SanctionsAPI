@@ -343,6 +343,7 @@ async def ensure_schema(conn) -> None:
         await conn.execute((Path(__file__).parent / "migrations/004_request_recovery.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/005_internal_screening.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/006_ai_auto_clear.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/007_name_token_index.sql").read_text())
 
 
 async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] = None) -> Optional[Dict[str, Any]]:

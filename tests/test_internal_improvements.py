@@ -203,7 +203,7 @@ class InternalDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_postgres_manifest_and_rows_cannot_change_between_type_passes(self):
         from source_assurance import postgres_manifest
-        await self.conn.execute('CREATE EXTENSION pg_trgm')
+        await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
         await self.conn.execute('''CREATE TABLE watchlist_entities(source_type text,entity_id text,entity_schema text,
             name text,name_norm text,birth_date date,dataset text,regime text,raw_json jsonb)''')
         await self.conn.execute("INSERT INTO watchlist_entities VALUES('sanctions','s','Person','Jane Smith','jane smith',NULL,'OFAC',NULL,'{}'),('peps','p','Person','Other','other',NULL,'PEP',NULL,'{}')")
@@ -232,7 +232,7 @@ class InternalDatabaseTests(unittest.IsolatedAsyncioTestCase):
         import httpx
         import api_server
         from tests.test_api_contract import OPCHECK_KEYS
-        await self.conn.execute('CREATE EXTENSION pg_trgm')
+        await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
         await self.conn.execute('''CREATE TABLE watchlist_entities(source_type text,entity_id text,entity_schema text,
             name text,name_norm text,birth_date date,dataset text,regime text,raw_json jsonb)''')
         await self.conn.execute("INSERT INTO watchlist_entities VALUES('sanctions','s','Person','Jane Smith','jane smith',NULL,'OFAC',NULL,'{}'),('peps','p','Person','Other','other',NULL,'PEP',NULL,'{}')")
