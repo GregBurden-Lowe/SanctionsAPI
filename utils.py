@@ -781,6 +781,7 @@ async def sync_own_watchlists_postgres(
     counts: Dict[str, int] = {}
     batch: List[Tuple[Any, ...]] = []
     token_rows: Set[Tuple[str, str, str]] = set()
+    name_rows: Set[Tuple[str, str, str]] = set()
     token_frequency: Dict[str, int] = {}
 
     async with conn.transaction():
@@ -819,7 +820,9 @@ async def sync_own_watchlists_postgres(
             ).hexdigest()
             if source_type == "sanctions":
                 entity_kind = "person" if entity_schema.lower() == "person" else "organization"
-                for token in name_tokens([name] + _parse_aliases(aliases_clean)):
+                all_names = [name] + _parse_aliases(aliases_clean)
+                name_rows.update((norm, entity_kind, entity_id) for norm in map(_normalize_text, all_names) if norm)
+                for token in name_tokens(all_names):
                     token_rows.add((token, entity_kind, entity_id))
                     token_frequency[token] = token_frequency.get(token, 0) + 1
 
@@ -860,7 +863,9 @@ async def sync_own_watchlists_postgres(
             )
 
         if await conn.fetchval("SELECT to_regclass('public.watchlist_name_tokens') IS NOT NULL"):
-            await conn.execute("TRUNCATE TABLE watchlist_name_tokens, watchlist_tokens")
+            await conn.execute("TRUNCATE TABLE watchlist_name_tokens, watchlist_tokens, watchlist_names")
+            await conn.copy_records_to_table("watchlist_names", records=list(name_rows),
+                                             columns=["name_norm", "entity_kind", "entity_id"])
             await conn.copy_records_to_table("watchlist_tokens", records=list(token_frequency.items()),
                                              columns=["token", "doc_frequency"])
             await conn.copy_records_to_table("watchlist_name_tokens", records=list(token_rows),
@@ -1582,7 +1587,7 @@ def perform_opensanctions_check(name, dob, country=None, entity_type="Person", p
 
 async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
     """Fetch rows sharing enough similar words with the query, plus the query's word statistics."""
-    from name_matching import RETRIEVAL_UNCOMMON_DOC_FREQUENCY, TokenStats, retrieval_plan, similar_tokens
+    from name_matching import TokenStats, retrieval_plan, similar_tokens
 
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_tokens') IS NOT NULL") or \
             not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM watchlist_tokens)"):
@@ -1595,36 +1600,41 @@ async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
     stats = TokenStats(frequencies, total)
     if not plan.query_tokens:
         return [], stats
-    matched_tokens, matched_positions, matched_uncommon = [], [], []
+    matched_tokens, matched_positions = [], []
     for position in plan.informative:
         token = plan.query_tokens[position]
         nearby = await conn.fetch(
-            """SELECT token, doc_frequency FROM watchlist_tokens WHERE token = $1 OR (length($1) >= 4 AND (token % $1 OR
+            """SELECT token FROM watchlist_tokens WHERE token = $1 OR (length($1) >= 4 AND (token % $1 OR
                (left(token, 1) = left($1, 1) AND length(token) BETWEEN length($1) - 2 AND length($1) + 2)))""", token)
-        frequency = {r["token"]: r["doc_frequency"] for r in nearby}
-        for match in similar_tokens(token, frequency):
+        for match in similar_tokens(token, [r["token"] for r in nearby]):
             matched_tokens.append(match)
             matched_positions.append(position)
-            matched_uncommon.append(frequency[match] <= RETRIEVAL_UNCOMMON_DOC_FREQUENCY)
-    candidate_ids = [r["entity_id"] for r in await conn.fetch(
+    # Whole-name similarity is what v1 retrieves on, so v2 keeps every candidate v1
+    # would find; the word index then adds variations similarity alone misses.
+    candidate_ids = {r["entity_id"] for r in await conn.fetch(
         """SELECT t.entity_id FROM watchlist_name_tokens t
-           JOIN unnest($1::text[], $2::int[], $3::boolean[]) AS q(token, position, uncommon) USING (token)
-           WHERE t.entity_kind = $4 GROUP BY t.entity_id
-           HAVING count(DISTINCT q.position) >= $5 OR bool_or(q.uncommon) LIMIT $6""",
-        matched_tokens, matched_positions, matched_uncommon, kind, plan.required_matches, limit + 1)]
+           JOIN unnest($1::text[], $2::int[]) AS q(token, position) USING (token)
+           WHERE t.entity_kind = $3 GROUP BY t.entity_id
+           HAVING count(DISTINCT q.position) >= $4 LIMIT $5""",
+        matched_tokens, matched_positions, kind, plan.required_matches, limit + 1)}
+    query_norm = _normalize_text(name)
+    candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+        """SELECT DISTINCT entity_id FROM watchlist_names
+           WHERE entity_kind = $1 AND (name_norm % $2 OR strpos(name_norm, $2) > 0) LIMIT $3""",
+        kind, query_norm, limit + 1)} if query_norm else set()
     if len(candidate_ids) > limit:
         raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
     if full_dob and kind == "person":
         # A single listed word plus an exact date of birth stays reviewable.
-        candidate_ids += [r["entity_id"] for r in await conn.fetch(
+        candidate_ids |= {r["entity_id"] for r in await conn.fetch(
             """SELECT e.entity_id FROM watchlist_entities e
                JOIN watchlist_name_tokens t ON t.entity_id = e.entity_id AND t.entity_kind = 'person'
                WHERE t.token = ANY($1::text[]) AND strpos(COALESCE(e.raw_json->>'birth_date', ''), $2) > 0""",
-            plan.query_tokens, full_dob)]
+            plan.query_tokens, full_dob)}
     rows = await conn.fetch(
         """SELECT entity_id, name, birth_date::text AS birth_date, dataset, regime, entity_schema, raw_json, source_type
            FROM watchlist_entities WHERE source_type = 'sanctions' AND entity_id = ANY($1::text[])""",
-        list(set(candidate_ids)))
+        list(candidate_ids))
     return [dict(r) for r in rows], stats
 
 

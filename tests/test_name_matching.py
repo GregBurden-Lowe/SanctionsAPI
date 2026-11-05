@@ -173,16 +173,12 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.check(name, entity_type)
                 self.assertIn(expected, [item['record_id'] for item in result['Candidate Evidence']])
 
-    async def test_one_uncommon_shared_word_is_enough_to_retrieve_a_candidate(self):
-        await self.load(self.FIXTURE)
-        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Tatiana Rotenberg', 'Person', None, 2000)
-        self.assertEqual([row['entity_id'] for row in rows], ['person'])
-
-    async def test_a_common_word_alone_does_not_retrieve_a_candidate(self):
-        await self.load(self.FIXTURE)
-        await self.conn.execute("UPDATE watchlist_tokens SET doc_frequency=5000 WHERE token='rotenberg'")
-        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Tatiana Rotenberg', 'Person', None, 2000)
-        self.assertEqual(rows, [])
+    async def test_whole_name_similarity_retrieves_a_shorter_listed_name(self):
+        short = dict(self.FIXTURE[2], id='short', name='Zorbex')
+        alias = dict(self.FIXTURE[2], id='alias', name='Unrelated Display', aliases='Zorbex Trading Partners')
+        await self.load(self.FIXTURE + [short, alias])
+        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Zorbex Marlowe', 'Organization', None, 2000)
+        self.assertEqual({row['entity_id'] for row in rows}, {'short', 'alias'})
 
     async def test_a_reload_replaces_the_index(self):
         await self.load(self.FIXTURE)
@@ -191,7 +187,7 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_empty_index_refuses_rather_than_clears(self):
         await self.load(self.FIXTURE)
-        await self.conn.execute('TRUNCATE watchlist_name_tokens, watchlist_tokens')
+        await self.conn.execute('TRUNCATE watchlist_name_tokens, watchlist_tokens, watchlist_names')
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}), self.assertRaises(ScreeningUnavailableError):
             await self.check('Arkady ROTENBERG')
 

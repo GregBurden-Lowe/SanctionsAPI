@@ -19,7 +19,7 @@ Set `SCREENING_MATCHER_VERSION=v2` to enable it. The default is `v1`, and any ot
 | Distinctive word disagrees | Can still alert | Unchanged: v2 only adds matches |
 | Company legal forms and hyphens | Partly handled | Removed before comparing distinctive words |
 | Common words | Equal weight | Weighted by how often they appear on the lists |
-| Retrieval | Trigrams and alias expansion per row | Word index, with fuzzy word lookup |
+| Retrieval | Trigrams and alias expansion per row | Indexed names and aliases with the same similarity test, plus a word index |
 | Non-Latin searches | "Too many candidates" | "Enter a name containing supported letters" |
 
 Date-of-birth conflicts still exclude a candidate, as in v1. Results show `match_rule` as `standard` or `token_alignment`, and aligned matches say so in their reasons.
