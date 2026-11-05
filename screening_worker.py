@@ -2,14 +2,14 @@
 """
 Background worker: claims one screening job at a time, runs the check, upserts screened_entities.
 Run 1–2 instances (e.g. systemd or Docker) to keep concurrency low.
-Requires: DATABASE_URL, same codebase as API (utils, parquet data optional for first run).
+Requires: DATABASE_URL, same codebase as API. SCREENING_WORKER_BACKEND selects parquet (default) or postgres.
 """
 import os
 import sys
 import json
 import logging
 from review_decisions import project_result
-from screening_policy import run_parquet_check
+from screening_policy import run_parquet_check, run_postgres_check
 import time
 from uuid import uuid4
 from job_recovery import Heartbeat, claim_lease, recover_expired, lock_owned_job, LostJobLease
@@ -26,17 +26,47 @@ REASON_FOR_CHECK_ALLOWED = frozenset({
     "Ad-Hoc Compliance Review",
 })
 
+def run_postgres_job(url, **check):
+    """Run one check through the same PostgreSQL path as interactive screening."""
+    import asyncio
+    import asyncpg
+
+    async def run():
+        connection = await asyncpg.connect(url, timeout=10, command_timeout=30)
+        try:
+            return await run_postgres_check(connection, **check)
+        finally:
+            await connection.close()
+    return asyncio.run(run())
+
+
+def current_postgres_manifest(url):
+    import asyncio
+    import asyncpg
+    from source_assurance import postgres_manifest
+
+    async def read():
+        connection = await asyncpg.connect(url, timeout=10, command_timeout=30)
+        try:
+            return await postgres_manifest(connection)
+        finally:
+            await connection.close()
+    return asyncio.run(read())
+
+
 def main(stop_event=None):
     import threading
     stop_event = stop_event or threading.Event()
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result
+    from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result, worker_backend
 
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
         logger.error("DATABASE_URL not set")
         sys.exit(1)
+    backend = worker_backend()
+    use_postgres = backend == "postgres_beta"
 
     if os.environ.get('SANCTIONS_SCHEMA_MODE') == 'verify':
         import asyncio
@@ -48,21 +78,25 @@ def main(stop_event=None):
             connection = await asyncpg.connect(url, timeout=5)
             try:
                 await verify_schema(connection)
+                if use_postgres and not await connection.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='sanctions')"):
+                    raise RuntimeError('Worker requires populated sanctions PostgreSQL data')
             finally:
                 await connection.close()
         asyncio.run(verify())
-        from utils import get_opensanctions_df
-        data = get_opensanctions_df()
-        if data.empty or 'sanctions' not in set(data['source_type']):
-            raise RuntimeError('Worker requires populated sanctions Parquet data')
+        if not use_postgres:
+            from utils import get_opensanctions_df
+            data = get_opensanctions_df()
+            if data.empty or 'sanctions' not in set(data['source_type']):
+                raise RuntimeError('Worker requires populated sanctions Parquet data')
         Path('/tmp/screening-worker-ready').write_text(os.environ.get('RELEASE_ID', ''))
 
     poll_interval = max(2, int(os.environ.get("SCREENING_WORKER_POLL_SECONDS", "5")))
     retention_days = max(1, int(os.environ.get("SCREENING_JOBS_RETENTION_DAYS", "7")))
     screened_retention_months = int(os.environ.get("SCREENED_ENTITIES_RETENTION_MONTHS", "0"))
     cleanup_every_n = max(1, int(os.environ.get("SCREENING_CLEANUP_EVERY_N_LOOPS", "50")))
-    logger.info("Starting worker (poll every %s s, job retention %s days, screened_entities retention %s months, cleanup every %s loops)",
-                poll_interval, retention_days, screened_retention_months or "off", cleanup_every_n)
+    logger.info("Starting worker (backend %s, poll every %s s, job retention %s days, screened_entities retention %s months, cleanup every %s loops)",
+                backend, poll_interval, retention_days, screened_retention_months or "off", cleanup_every_n)
 
     lease_seconds = max(15, int(os.environ.get("SCREENING_JOB_LEASE_SECONDS", "60")))
     max_runtime = max(lease_seconds, int(os.environ.get("SCREENING_JOB_MAX_RUNTIME_SECONDS", "600")))
@@ -150,13 +184,13 @@ def main(stop_event=None):
                         AND result_json->>'Screening Fingerprint' = %s
                         AND (result_json ? 'Source Coverage' OR screened_against_refresh_run_id IS NOT DISTINCT FROM
                             (SELECT refresh_run_id FROM watchlist_refresh_runs ORDER BY ran_at DESC LIMIT 1))""",
-                        (entity_key, screening_fingerprint(name, dob, country, entity_type, 'worker-original')),
+                        (entity_key, screening_fingerprint(name, dob, country, entity_type, backend)),
                     )
                     existing_valid = cur.fetchone()
                 if existing_valid:
                     from source_assurance import parquet_manifest, assess, decode
                     cached_engine = decode(existing_valid['result_json'])
-                    coverage = assess(parquet_manifest())
+                    coverage = assess(current_postgres_manifest(url) if use_postgres else parquet_manifest())
                     if coverage['status'] != 'current' or coverage.get('version') != cached_engine.get('Source Coverage', {}).get('version'):
                         existing_valid = None
                 if existing_valid and not force_rescreen:
@@ -202,17 +236,11 @@ def main(stop_event=None):
 
                 # Run screening (sync)
                 logger.info("Job %s: running check for %s", job_id, name[:50])
-                result = run_parquet_check(
-                    name=name,
-                    dob=dob,
-                    country=country,
-                    entity_type=entity_type,
-                    requestor=requestor,
-                    log_search=False,
-                    require_assurance=True,
-                )
+                check = dict(name=name, dob=dob, country=country, entity_type=entity_type,
+                             requestor=requestor, log_search=False, require_assurance=True)
+                result = run_postgres_job(url, **check) if use_postgres else run_parquet_check(**check)
 
-                stamp_screening_result(result, name, dob, country, entity_type, 'worker-original')
+                stamp_screening_result(result, name, dob, country, entity_type, backend)
                 result['Review Business Reference'] = business_reference
                 if reason in ('all_sources_reconciliation', 'uk_delta_rescreen'):
                     from screening_guidance import describe_change
