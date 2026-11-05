@@ -2217,7 +2217,14 @@ async def get_review_queue(
                 limit=limit,
                 offset=offset,
             )
-        return {"items": items}
+            total = await screening_db.count_review_queue(
+                conn,
+                review_status=(review_status or "").strip() or None,
+                business_reference=(business_reference or "").strip() or None,
+                reason_for_check=(reason_for_check or "").strip() or None,
+                include_cleared=bool(include_cleared),
+            )
+        return {"items": items, "total": total}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 from uuid import UUID
 from pathlib import Path
 import screening_history
@@ -344,6 +344,7 @@ async def ensure_schema(conn) -> None:
         await conn.execute((Path(__file__).parent / "migrations/005_internal_screening.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/006_ai_auto_clear.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/007_name_token_index.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/008_review_queue_indexes.sql").read_text())
 
 
 async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -1553,20 +1554,12 @@ async def export_screened_entities_for_mi(
     return out
 
 
-async def list_review_queue(
-    conn,
-    *,
-    review_status: Optional[str] = None,
-    business_reference: Optional[str] = None,
-    reason_for_check: Optional[str] = None,
-    include_cleared: bool = False,
-    limit: int = 100,
-    offset: int = 0,
-) -> List[Dict[str, Any]]:
-    """
-    Review queue for potential matches.
-    By default excludes Cleared decisions unless include_cleared is explicitly true.
-    """
+def _review_queue_filter(
+    review_status: Optional[str],
+    business_reference: Optional[str],
+    reason_for_check: Optional[str],
+    include_cleared: bool,
+) -> Tuple[str, List[Any]]:
     conditions: List[str] = []
     args: List[Any] = []
     n = 0
@@ -1594,7 +1587,37 @@ async def list_review_queue(
         n += 1
         conditions.append(f"reason_for_check = ${n}")
         args.append(reason_for_check_clean)
-    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    return (f"WHERE {' AND '.join(conditions)}" if conditions else ""), args
+
+
+async def count_review_queue(
+    conn,
+    *,
+    review_status: Optional[str] = None,
+    business_reference: Optional[str] = None,
+    reason_for_check: Optional[str] = None,
+    include_cleared: bool = False,
+) -> int:
+    """Total matching the queue filters, so a page can show when items are missing."""
+    where_sql, args = _review_queue_filter(review_status, business_reference, reason_for_check, include_cleared)
+    return await conn.fetchval(f"SELECT count(*) FROM screened_entities {where_sql}", *args)
+
+
+async def list_review_queue(
+    conn,
+    *,
+    review_status: Optional[str] = None,
+    business_reference: Optional[str] = None,
+    reason_for_check: Optional[str] = None,
+    include_cleared: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """
+    Review queue for potential matches.
+    By default excludes Cleared decisions unless include_cleared is explicitly true.
+    """
+    where_sql, args = _review_queue_filter(review_status, business_reference, reason_for_check, include_cleared)
     limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
     args.extend([limit, offset])
@@ -1623,7 +1646,7 @@ async def list_review_queue(
             COALESCE((result_json->'Input Classification'->>'likely_misclassified')::boolean, FALSE) AS likely_misclassified
         FROM screened_entities
         {where_sql}
-        ORDER BY last_screened_at DESC
+        ORDER BY last_screened_at DESC, entity_key
         LIMIT ${idx_limit} OFFSET ${idx_offset}
         """,
         *args,

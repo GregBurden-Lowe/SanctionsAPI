@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BiCheckCircle, BiRefresh, BiSearch, BiShow } from 'react-icons/bi'
 import { Button, Card, ErrorBox, Input, Modal } from '@/components'
 import {
@@ -56,6 +56,10 @@ function sectionDotTone(section: 'claimed' | 'unclaimed'): string {
   return '#f59e0b'
 }
 
+// The API's maximum page size.
+const REVIEW_PAGE_SIZE = 500
+const REVIEW_MAX_PAGES = 40
+
 export function MatchReviewPage() {
   const { user } = useAuth()
   const [items, setItems] = useState<ReviewQueueItem[]>([])
@@ -76,7 +80,9 @@ export function MatchReviewPage() {
   const [idModalKey, setIdModalKey] = useState<string | null>(null)
   const [detailItem, setDetailItem] = useState<ReviewQueueItem | null>(null)
   const [toast, setToast] = useState<string | null>(null)
-  const [unclaimedCollapsed, setUnclaimedCollapsed] = useState(true)
+  const [unclaimedCollapsed, setUnclaimedCollapsed] = useState(false)
+  const [queueTotal, setQueueTotal] = useState<number | null>(null)
+  const latestLoad = useRef(0)
 
   const currentUsername = (user?.username || '').trim().toLowerCase()
   const scopedItems = items.filter((item) => item.review_status !== 'COMPLETED')
@@ -105,23 +111,42 @@ export function MatchReviewPage() {
   const myClaimedDisplay = myClaimedItems.filter(matchesViewFilters)
   const unclaimedDisplay = unclaimedItems.filter(matchesViewFilters)
 
-  const load = async () => {
-    setLoading(true)
+  // Background refreshes keep the current list on screen and on failure.
+  const load = async ({ background = false }: { background?: boolean } = {}) => {
+    const loadId = ++latestLoad.current
+    if (!background) setLoading(true)
     setError(null)
     try {
-      const res = await getReviewQueue({ include_cleared: false, limit: 300 })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setError((data as { detail?: string }).detail ?? 'Failed to load review queue.')
-        setItems([])
-        return
+      // Re-screening reorders the queue while pages load, so merge by key and compare with the total.
+      const merged = new Map<string, ReviewQueueItem>()
+      let total: number | null = null
+      for (let page = 0; page < REVIEW_MAX_PAGES; page += 1) {
+        const res = await getReviewQueue({
+          include_cleared: false,
+          limit: REVIEW_PAGE_SIZE,
+          offset: page * REVIEW_PAGE_SIZE,
+        })
+        const data = await res.json().catch(() => ({}))
+        if (loadId !== latestLoad.current) return
+        if (!res.ok) {
+          setError((data as { detail?: string }).detail ?? 'Failed to load review queue.')
+          if (!background) setItems([])
+          return
+        }
+        const body = data as { items?: ReviewQueueItem[]; total?: number }
+        const pageItems = body.items ?? []
+        total = body.total ?? null
+        pageItems.forEach((item) => merged.set(item.entity_key, item))
+        if (pageItems.length < REVIEW_PAGE_SIZE) break
       }
-      setItems(((data as { items?: ReviewQueueItem[] }).items ?? []) as ReviewQueueItem[])
+      setItems(Array.from(merged.values()))
+      setQueueTotal(total)
     } catch (err) {
+      if (loadId !== latestLoad.current) return
       setError(err instanceof Error ? err.message : 'Failed to load review queue.')
-      setItems([])
+      if (!background) setItems([])
     } finally {
-      setLoading(false)
+      if (loadId === latestLoad.current) setLoading(false)
     }
   }
 
@@ -139,8 +164,16 @@ export function MatchReviewPage() {
         setActionError((data as { detail?: string }).detail ?? 'Failed to claim review.')
         return
       }
-      await load()
+      const claimedBy = (data as { item?: { review_claimed_by?: string } }).item?.review_claimed_by ?? user?.username
+      setItems((current) =>
+        current.map((item) =>
+          item.entity_key === row.entity_key
+            ? { ...item, review_status: 'IN_REVIEW', review_claimed_by: claimedBy ?? null }
+            : item,
+        ),
+      )
       showToast(`Claimed review for ${row.entity_name}`)
+      void load({ background: true })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to claim review.')
     } finally {
@@ -169,11 +202,15 @@ export function MatchReviewPage() {
         return
       }
       const completedName = selected.entity_name
+      const completedKey = selected.entity_key
+      setItems((current) =>
+        current.map((item) => (item.entity_key === completedKey ? { ...item, review_status: 'COMPLETED' } : item)),
+      )
       setSelected(null)
       setReviewNotes('')
       setReviewOutcome(REVIEW_OUTCOME_OPTIONS[0])
-      await load()
       showToast(`Review completed for ${completedName}`)
+      void load({ background: true })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to complete review.')
     } finally {
@@ -225,7 +262,7 @@ export function MatchReviewPage() {
           ? `Re-run decision: ${data.decision ?? 'Unknown'}.${correctionMessage} Match was auto-completed as reviewed.`
           : `Re-run decision: ${data.decision ?? 'Unknown'}.${correctionMessage}`,
       )
-      await load()
+      void load({ background: true })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Re-run failed.')
     } finally {
@@ -276,6 +313,11 @@ export function MatchReviewPage() {
 
         {error && <ErrorBox message={error} />}
         {actionError && <ErrorBox message={actionError} />}
+        {queueTotal !== null && items.length < queueTotal && (
+          <ErrorBox
+            message={`Showing ${items.length} of ${queueTotal} review items. The queue changed while loading, so reload before relying on it.`}
+          />
+        )}
 
         <Card className="p-0 overflow-hidden">
           <div className="px-5 py-[13px] border-b border-[#f1f5f9] flex items-center justify-between">

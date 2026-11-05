@@ -411,6 +411,29 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved['sanctions_rows'], 33588)
         self.assertFalse({'include_peps', 'peps_rows'} & set(saved.keys()))
 
+    async def test_review_queue_total_and_paging_cover_every_item(self):
+        result = {**sample(), 'Is Sanctioned': True, 'Match Found': True}
+        result['Check Summary'] = {**result['Check Summary'], 'Status': 'Fail Sanction'}
+        async with self.pool.acquire() as conn:
+            for index in range(5):
+                await screening_db.upsert_screening(conn, f'queue-{index}', f'Queue Subject {index}', f'queue subject {index}', None, None,
+                                                    'Person', 'tester', f'REF-{index}', 'Client Onboarding', dict(result))
+            await conn.execute("UPDATE screened_entities SET last_screened_at='2026-01-01' WHERE entity_key LIKE 'queue-%'")
+            self.assertEqual(await screening_db.count_review_queue(conn), 5)
+            keys = []
+            for offset in (0, 2, 4):
+                keys += [row['entity_key'] for row in await screening_db.list_review_queue(conn, limit=2, offset=offset)]
+            self.assertEqual(keys, sorted(f'queue-{index}' for index in range(5)))
+            self.assertEqual(await screening_db.count_review_queue(conn, review_status='IN_REVIEW'), 0)
+            await conn.execute("UPDATE screened_entities SET status='Cleared' WHERE entity_key='queue-0'")
+            self.assertEqual(await screening_db.count_review_queue(conn), 4)
+            self.assertEqual(await screening_db.count_review_queue(conn, include_cleared=True), 5)
+
+    async def test_review_queue_indexes_exist(self):
+        async with self.pool.acquire() as conn:
+            names = {row['indexname'] for row in await conn.fetch('SELECT indexname FROM pg_indexes')}
+        self.assertLessEqual({'screening_requests_run_idx', 'screened_entities_review_queue_idx'}, names)
+
     async def test_real_worker_and_interactive_policy_find_wrong_type_match(self):
         import screening_worker
         from screening_policy import run_postgres_check
