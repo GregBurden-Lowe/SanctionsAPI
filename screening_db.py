@@ -142,10 +142,8 @@ async def ensure_schema(conn) -> None:
         CREATE TABLE IF NOT EXISTS watchlist_refresh_runs (
             refresh_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            include_peps BOOLEAN NOT NULL DEFAULT TRUE,
             postgres_synced BOOLEAN NOT NULL DEFAULT FALSE,
             sanctions_rows INTEGER NOT NULL DEFAULT 0,
-            peps_rows INTEGER NOT NULL DEFAULT 0,
             uk_hash TEXT,
             prev_uk_hash TEXT,
             uk_changed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -646,10 +644,8 @@ async def get_latest_uk_hash(conn) -> Dict[str, Optional[str]]:
 async def create_refresh_run(
     conn,
     *,
-    include_peps: bool = False,
     postgres_synced: bool,
     sanctions_rows: int,
-    peps_rows: int = 0,
     uk_hash: str,
     prev_uk_hash: Optional[str],
     uk_changed: bool,
@@ -661,17 +657,15 @@ async def create_refresh_run(
     row = await conn.fetchrow(
         """
         INSERT INTO watchlist_refresh_runs (
-            include_peps, postgres_synced, sanctions_rows, peps_rows,
+            postgres_synced, sanctions_rows,
             uk_hash, prev_uk_hash, uk_changed, uk_row_count,
             delta_added, delta_removed, delta_changed
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING refresh_run_id
         """,
-        False,
         postgres_synced,
         int(sanctions_rows or 0),
-        0,
         uk_hash or "",
         prev_uk_hash,
         bool(uk_changed),

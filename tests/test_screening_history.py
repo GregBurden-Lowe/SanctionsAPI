@@ -417,6 +417,14 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 request = await conn.fetchrow('SELECT status,response_json FROM screening_requests WHERE job_id=$1::uuid',job)
                 self.assertEqual(request['status'], 'queued' if expected=='running' else 'failed')
 
+    async def test_refresh_run_records_without_pep_columns(self):
+        async with self.pool.acquire() as conn:
+            run_id = await screening_db.create_refresh_run(conn, postgres_synced=True, sanctions_rows=33588, uk_hash='hash',
+                prev_uk_hash=None, uk_changed=False, uk_row_count=6420, delta_added=0, delta_removed=0, delta_changed=0)
+            saved = await conn.fetchrow('SELECT * FROM watchlist_refresh_runs WHERE refresh_run_id=$1::uuid', run_id)
+        self.assertEqual(saved['sanctions_rows'], 33588)
+        self.assertFalse({'include_peps', 'peps_rows'} & set(saved.keys()))
+
     async def test_real_worker_and_interactive_policy_find_wrong_type_match(self):
         import screening_worker
         from screening_policy import run_parquet_check
