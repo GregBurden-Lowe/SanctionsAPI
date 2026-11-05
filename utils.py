@@ -1538,7 +1538,7 @@ def perform_opensanctions_check(name, dob, country=None, entity_type="Person", p
 
 
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
-                                          candidate_limit=400, log_search=True, include_peps=False):
+                                          candidate_limit=2000, log_search=True, include_peps=False):
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
         raise ScreeningUnavailableError("Watchlist data is unavailable.")
     sources = await conn.fetch("SELECT DISTINCT source_type FROM watchlist_entities")

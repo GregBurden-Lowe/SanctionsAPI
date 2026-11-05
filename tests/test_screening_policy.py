@@ -110,6 +110,19 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ScreeningUnavailableError):
             await perform_postgres_watchlist_check(self.conn, 'Ho Gyu Kim', None, candidate_limit=1)
 
+    async def test_default_candidate_limit_completes_large_sets_and_still_fails_closed(self):
+        async def add(start, count):
+            await self.conn.executemany('''INSERT INTO watchlist_entities
+                (source_type,entity_id,entity_schema,name,name_norm,dataset,raw_json) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)''',
+                [('sanctions', f'row-{i}', 'Person', 'Jane Smith', 'jane smith', 'Fixture', '{}') for i in range(start, start + count)])
+        await add(0, 401)
+        result = await perform_postgres_watchlist_check(self.conn, 'Jane Smith', None, log_search=False)
+        self.assertTrue(result['Is Sanctioned'])
+        self.assertEqual(result['Candidate Evidence Summary']['potential_matches'], 401)
+        await add(401, 1600)
+        with self.assertRaises(ScreeningUnavailableError):
+            await perform_postgres_watchlist_check(self.conn, 'Jane Smith', None, log_search=False)
+
     async def test_missing_postgres_sources_never_clear(self):
         with self.assertRaises(ScreeningUnavailableError):
             await run_postgres_check(self.conn, name='Jane Smith', dob=None, country=None, entity_type='Person')
