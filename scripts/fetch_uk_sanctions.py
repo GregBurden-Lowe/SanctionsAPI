@@ -25,6 +25,11 @@ import defusedxml.ElementTree as ET
 import pandas as pd
 import requests
 
+try:
+    from .alias_encoding import encode_aliases
+except ImportError:
+    from alias_encoding import encode_aliases
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -172,7 +177,7 @@ def _parse_designation(desig_el: ET.Element) -> dict:
         "id": f"uk-{unique_id}",
         "schema": schema,
         "name": canonical_name,
-        "aliases": ";".join(aliases),
+        "aliases": encode_aliases(aliases),
         "birth_date": dob,
         "positions": ";".join(titles + positions),
         "countries": ";".join(dict.fromkeys(countries)),

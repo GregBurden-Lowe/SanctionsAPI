@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.validate_acceptance import load_pack, inputs_for, outcome
+from scripts.validate_acceptance import load_pack, inputs_for, outcome, compare_backends
 
 
 class AcceptanceValidationTests(unittest.TestCase):
@@ -39,3 +39,25 @@ class AcceptanceValidationTests(unittest.TestCase):
     def test_result_categories_are_potential_matches_not_confirmed_identity(self):
         self.assertEqual(outcome({'Is Sanctioned':True}),'potential_sanctions_match')
         self.assertEqual(outcome({'Is Sanctioned':False}),'no_potential_match')
+
+    def test_candidate_comparison_finds_misses_even_when_both_flag(self):
+        def candidate(source_hash, name):
+            return {'source_evidence_hash': source_hash, 'entity_type': 'Person',
+                    'disposition': 'potential_match', 'matched_name': name, 'name_score': 90}
+        def result(items):
+            return {'outcome': 'potential_sanctions_match', 'result': {
+                'Candidate Evidence': items, 'Candidate Evidence Summary': {'display_truncated': False}}}
+        a, b = candidate('a', 'First Name'), candidate('b', 'Second Name')
+        comparison = compare_backends(result([a]), result([a, b]))
+        self.assertEqual(comparison['status'], 'different')
+        self.assertTrue(comparison['outcomes_agree'])
+        self.assertEqual(comparison['parquet_only'][0]['identity'], 'b')
+        self.assertEqual(compare_backends(result([a]), result([a]))['status'], 'agree')
+
+    def test_incomplete_and_truncated_results_are_not_parity(self):
+        complete = {'outcome': 'no_potential_match', 'result': {'Candidate Evidence': [],
+                    'Candidate Evidence Summary': {'display_truncated': False}}}
+        self.assertEqual(compare_backends(complete, {'outcome': 'incomplete'})['status'], 'incomplete')
+        truncated = {'outcome': 'no_potential_match', 'result': {'Candidate Evidence': [],
+                     'Candidate Evidence Summary': {'display_truncated': True}}}
+        self.assertEqual(compare_backends(complete, truncated)['status'], 'incomplete')

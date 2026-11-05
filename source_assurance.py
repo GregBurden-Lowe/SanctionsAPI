@@ -118,8 +118,12 @@ def build_own_manifest(watchlists_parquet_path: str) -> dict:
         pass
 
     hashes = {"all": file_hash}
+    # Counts alone do not identify a snapshot: an alias can change without
+    # changing any source's row count. Cache reuse and archived snapshots must
+    # follow the actual staged file content.
     version = _hl.sha256(
-        json.dumps({"list_counts": counts, "datasets": sorted(datasets), "format": 3}, sort_keys=True).encode()
+        json.dumps({"list_counts": counts, "datasets": sorted(datasets),
+                    "file_hashes": hashes, "format": 4}, sort_keys=True).encode()
     ).hexdigest()
 
     return {

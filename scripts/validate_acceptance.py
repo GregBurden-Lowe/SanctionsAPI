@@ -70,6 +70,39 @@ def outcome(result):
     return 'no_potential_match'
 
 
+def compare_backends(postgres, parquet):
+    """Compare complete displayed candidates, not just the overall outcome.
+
+    Use provider IDs when available and source evidence hashes for snapshots
+    without IDs. The replay's synthetic IDs are not provider IDs.
+    """
+    if postgres.get('outcome') == 'incomplete' or parquet.get('outcome') == 'incomplete':
+        return {'status': 'incomplete', 'reason': 'At least one backend did not complete.'}
+    results = [postgres.get('result', {}), parquet.get('result', {})]
+    if any(r.get('Candidate Evidence Summary', {}).get('display_truncated') for r in results):
+        return {'status': 'incomplete', 'reason': 'Displayed candidate evidence was truncated.'}
+    def candidates(result):
+        items = result.get('Candidate Evidence', [])
+        if any((not item.get('record_id') or str(item['record_id']).startswith('snapshot-row-'))
+               and not item.get('source_evidence_hash') for item in items):
+            return None
+        def key(item):
+            record_id = str(item.get('record_id') or '')
+            identity = ('id', record_id) if record_id and not record_id.startswith('snapshot-row-') else ('hash', item.get('source_evidence_hash'))
+            return (identity, item.get('entity_type'), item.get('disposition'), item.get('matched_name'), item.get('name_score'))
+        return Counter(map(key, items))
+    pg, pq = map(candidates, results)
+    if pg is None or pq is None:
+        return {'status': 'incomplete', 'reason': 'A candidate lacks a usable identity.'}
+    def entries(counter):
+        return [dict(identity_type=k[0][0], identity=k[0][1], entity_type=k[1], disposition=k[2],
+                     matched_name=k[3], name_score=k[4], count=count)
+                for k, count in sorted(counter.items(), key=lambda item: repr(item[0]))]
+    return {'status': 'agree' if pg == pq and postgres['outcome'] == parquet['outcome'] else 'different',
+            'postgres_only': entries(pg - pq), 'parquet_only': entries(pq - pg),
+            'outcomes_agree': postgres['outcome'] == parquet['outcome']}
+
+
 async def replay(pack, snapshot, output, parquet_count, only_new_against=None):
     if output.resolve().is_relative_to(ROOT):
         raise ValueError('Private case reports must be outside the repository')
@@ -156,7 +189,7 @@ async def replay(pack, snapshot, output, parquet_count, only_new_against=None):
         selected = [r for r in results if r['postgres']['outcome']=='incomplete' or
                     (r['category']=='cleared_unreviewed' and r['postgres']['outcome']!='no_potential_match')]
         remainder = [r for r in results if r not in selected]
-        groups = [[r for r in remainder if r['category']==group] for group in ('false_positive','cleared_unreviewed')]
+        groups = [[r for r in remainder if r['category']==group] for group in sorted({r['category'] for r in remainder})]
         while any(groups):
             for group in groups:
                 if group:
@@ -177,11 +210,13 @@ async def replay(pack, snapshot, output, parquet_count, only_new_against=None):
             except Exception as exc:
                 entry['parquet'] = {'outcome':'incomplete','error_type':type(exc).__name__,'message':str(exc)}
             entry['parquet']['seconds'] = round(time.perf_counter()-started,3)
+            entry['candidate_comparison'] = compare_backends(entry['postgres'], entry['parquet'])
             write_json(output/'results.json',results)
             print(f'Parquet {index}/{len(selected)}: {entry["parquet"]["outcome"]}',flush=True)
         summary['postgres_by_category'] = {category:dict(Counter(r['postgres']['outcome'] for r in results if r['category']==category)) for category in actual_counts}
         summary['parquet_replayed'] = len(selected)
         summary['backend_disagreements'] = sum(r.get('backend_outcomes_agree') is False for r in results)
+        summary['candidate_comparisons'] = dict(Counter(r['candidate_comparison']['status'] for r in selected))
         from acceptance_metrics import score_cases
         summary['quality_metrics'] = {backend:score_cases(results, backend) for backend in ('postgres','parquet')}
         summary['status'] = 'diagnostic_replay_complete'

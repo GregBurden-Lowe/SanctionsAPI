@@ -483,17 +483,24 @@ def refresh_opensanctions_data():
     from fetch_all_watchlists import fetch_all
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    df = fetch_all(include_peps=False, output_path=OWN_PARQUET)
-
-    if df.empty or "sanctions" not in set(df["source_type"].unique()):
-        raise ScreeningUnavailableError(
-            "Refresh did not provide sanctions data; existing watchlist retained."
-        )
-
-    # Embed freshness manifest in parquet metadata for the parquet-based screening path.
-    from source_assurance import build_own_manifest, require_current, METADATA_KEY
-    manifest = build_own_manifest(OWN_PARQUET)
-    require_current(manifest)
+    # Fetch into a staging file: validation failure must not replace the
+    # currently published combined snapshot.
+    with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix='.parquet', delete=False) as staged:
+        staged_path = staged.name
+    try:
+        df = fetch_all(include_peps=False, output_path=staged_path)
+        if df.empty or "sanctions" not in set(df["source_type"].unique()):
+            raise ScreeningUnavailableError(
+                "Refresh did not provide sanctions data; existing watchlist retained."
+            )
+        for aliases in df['aliases']:
+            _parse_aliases(aliases)
+        from source_assurance import build_own_manifest, require_current, METADATA_KEY
+        manifest = build_own_manifest(staged_path)
+        require_current(manifest)
+    finally:
+        if os.path.exists(staged_path):
+            os.unlink(staged_path)
     table = pa.Table.from_pandas(df)
     table = table.replace_schema_metadata(
         {**(table.schema.metadata or {}), METADATA_KEY: json.dumps(manifest).encode()}
@@ -719,7 +726,7 @@ async def sync_own_watchlists_postgres(
     Drop-in replacement for sync_watchlist_entities_postgres using our own
     scraped data (UN, OFAC, UK, EU).
     """
-    from source_assurance import build_own_manifest, require_current
+    from source_assurance import parquet_manifest, require_current
 
     parquet_path = watchlists_parquet_path or OWN_PARQUET
 
@@ -727,7 +734,9 @@ async def sync_own_watchlists_postgres(
     if not exists:
         raise ScreeningUnavailableError("Watchlist data is unavailable")
 
-    manifest = build_own_manifest(parquet_path)
+    # The published file carries the manifest created from the staged source.
+    # Re-hashing the metadata-bearing file would give a different version.
+    manifest = parquet_manifest(parquet_path)
     require_current(manifest)
 
     has_country_col = await conn.fetchval(
@@ -789,9 +798,10 @@ async def sync_own_watchlists_postgres(
             if not name_norm:
                 continue
 
-            # Sanitize aliases: replace bare double-quotes that would break the
-            # semicolon-delimited CSV alias parser at query time.
-            aliases_clean = _safe_str(row.get("aliases")).replace('"', "'")
+            # Reject malformed legacy data instead of changing alias boundaries.
+            # Newly scraped aliases are encoded as semicolon-delimited CSV.
+            aliases_clean = _safe_str(row.get("aliases"))
+            _parse_aliases(aliases_clean)
 
             birth_date = _parse_birth_date_for_db(_safe_str(row.get("birth_date")))
             country = _normalize_country(_safe_str(row.get("countries")))
@@ -1464,7 +1474,9 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         reasons = (["A single-word name or alias matched a search token and the full date of birth agrees; review required."]
                    if weak_name_with_dob else ["Name comparison passed the decision rules; the displayed similarity also reflects the full name."])
         if matched_index:
-            reasons.append("Matched a listed alias.")
+            reasons.append(f'Matched a listed alias: “{names[matched_index]}”.')
+            if len(names) > 5:
+                reasons.append(f'This entity has {len(names) - 1} listed aliases; short or common name components may appear in the alias set.')
         if dob_status == "conflicting":
             reasons.append("Known dates of birth conflict; excluded from the decision.")
         elif dob_status == "unknown":
@@ -1485,6 +1497,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             "dataset": _safe_str(row.get("dataset")), "regime": _safe_str(row.get("regime") or _derive_regime_like_row(row)),
             "position": _safe_str(raw.get("positions") or row.get("positions")) or None,
             "name_score": score, "birth_date": candidate_dob or None, "country": candidate_country or None,
+            "all_birth_dates": [d.strip() for d in re.split(r'[;|]', candidate_dob) if d.strip()] if candidate_dob else [],
+            "alias_count": len(names) - 1,
             "dob_assessment": dob_status, "country_assessment": country_status,
             "disposition": "excluded" if excluded else "potential_match", "reasons": reasons,
         })
@@ -1546,6 +1560,13 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
             FROM watchlist_entities
             WHERE source_type=$1 AND lower(entity_schema)=ANY($3::text[])
               AND (name_norm % $2 OR strpos(name_norm, $2)>0
+                   OR ($7::boolean AND cardinality(ARRAY(
+                       SELECT DISTINCT token FROM regexp_split_to_table(
+                           lower(trim(regexp_replace(regexp_replace(normalize(
+                               regexp_replace(name, '[-‐‑‒–—;]', ' ', 'g'), NFKD) COLLATE "C",
+                               '[^a-zA-Z0-9_[:space:]]', '', 'g'), '[[:space:]]+', ' ', 'g'))), ' ') AS token
+                       WHERE token = ANY($6::text[]) AND token <> ''
+                   )) >= 2)
                    OR EXISTS (SELECT 1 FROM (
                                   SELECT unnest(string_to_array(COALESCE(raw_json->>'aliases',''), ';')) AS alias
                                   WHERE strpos(COALESCE(raw_json->>'aliases',''), '"') = 0
@@ -1560,6 +1581,13 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
                                   '[[:space:]]+', ' ', 'g'))) AS alias_norm) normalized
                               WHERE similarity(lower(alias), $2)>=0.3 OR strpos(lower(alias), $2)>0
                                  OR similarity(alias_norm, $2)>=0.3 OR strpos(alias_norm, $2)>0
+                                 OR ($7::boolean AND cardinality(ARRAY(
+                                     SELECT DISTINCT token FROM regexp_split_to_table(
+                                         lower(trim(regexp_replace(regexp_replace(normalize(
+                                             regexp_replace(alias, '[-‐‑‒–—;]', ' ', 'g'), NFKD) COLLATE "C",
+                                             '[^a-zA-Z0-9_[:space:]]', '', 'g'), '[[:space:]]+', ' ', 'g'))), ' ') AS token
+                                     WHERE token = ANY($6::text[]) AND token <> ''
+                                 )) >= 2)
                                  OR ($5::text IS NOT NULL AND
                                      (birth_date::text=$5 OR EXISTS (SELECT 1 FROM regexp_split_to_table(
                                          COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE trim(source_dob)=$5)) AND
@@ -1570,7 +1598,8 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
                        name_norm=ANY($6::text[])))
             ORDER BY similarity(name_norm, $2) DESC, entity_id
             LIMIT $4
-        ''', source_type, _normalize_text(name), schemas, limit + 1, full_dob, query_tokens)
+        ''', source_type, _normalize_text(name), schemas, limit + 1, full_dob, query_tokens,
+            entity_type.lower() != 'organization' and len(set(query_tokens)) >= 2)
         if len(candidates) > limit:
             raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
         rows.extend(dict(r) for r in candidates)

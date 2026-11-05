@@ -9,7 +9,7 @@ from uuid import uuid4
 import asyncpg
 import pandas as pd
 from screening_policy import run_parquet_check, run_postgres_check
-from utils import _normalize_text, ScreeningUnavailableError
+from utils import _normalize_text, ScreeningUnavailableError, perform_postgres_watchlist_check
 
 CASES = json.loads((Path(__file__).parent / 'fixtures/policy_cases.json').read_text())
 
@@ -87,6 +87,22 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
             await self.conn.execute('RESET statement_timeout')
             await tx.rollback()
             await locker.close()
+
+    async def test_two_shared_tokens_retrieve_hyphenated_candidate(self):
+        rows = [dict(id='primary', name='Ho Gyu Kim', schema='Person', source_type='sanctions', dataset='Fixture'),
+                dict(id='other', name='Kim Tong-Ho', schema='Person', source_type='sanctions', dataset='Fixture'),
+                dict(id='alias', name='Unrelated Display', aliases='Kim Tong-Ho', schema='Person', source_type='sanctions', dataset='Fixture')]
+        await self.conn.executemany('''INSERT INTO watchlist_entities
+            (source_type,entity_id,entity_schema,name,name_norm,dataset,raw_json) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)''',
+            [(r['source_type'], r['id'], r['schema'], r['name'], _normalize_text(r['name']), r['dataset'], json.dumps(r)) for r in rows])
+        args = dict(name='Ho Gyu Kim', dob=None, country=None, entity_type='Person')
+        pg = await run_postgres_check(self.conn, **args)
+        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame(rows)):
+            parquet = run_parquet_check(**args)
+        self.assertEqual({c['record_id'] for c in pg['Candidate Evidence']}, {'primary', 'other', 'alias'})
+        self.assertEqual(pg['Candidate Evidence'], parquet['Candidate Evidence'])
+        with self.assertRaises(ScreeningUnavailableError):
+            await perform_postgres_watchlist_check(self.conn, 'Ho Gyu Kim', None, candidate_limit=1)
 
     async def test_missing_postgres_sources_never_clear(self):
         with self.assertRaises(ScreeningUnavailableError):

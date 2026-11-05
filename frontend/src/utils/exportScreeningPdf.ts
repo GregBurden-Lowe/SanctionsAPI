@@ -198,9 +198,12 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
       const disposition = summary?.Status?.includes('False Positive') ? '<span class="fp">False positive</span>'
         : result['Is Sanctioned'] ? '<span class="match">Potential match</span>'
         : '—'
+      const topCandidate = candidateEvidence.find(c => c.disposition === 'potential_match')
+      const topAliasLabel = topCandidate?.matched_alias && topCandidate.matched_name
+        ? `<br><small>Alias: ${safe(topCandidate.matched_name)}</small>` : ''
       alertRows.push([
         '1',
-        `${safe(matchedName || search.searchName)}<br><small>${safe(matchedDob || '')} ${safe(matchedRegime || '')}</small>`,
+        `${safe(matchedName || search.searchName)}${topAliasLabel}<br><small>${safe(matchedDob || '')} ${safe(matchedRegime || '')}</small>`,
         safe(sources),
         safe(String(result.Score ?? '—')),
         safe(result.Confidence || '—'),
@@ -237,10 +240,17 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
       const disp = c.disposition === 'potential_match'
         ? '<span class="match">Potential match</span>'
         : '<span class="clear">Excluded</span>'
+      const aliasLabel = c.matched_alias && c.matched_name
+        ? `<br><small>Alias: ${safe(c.matched_name)}</small>` : ''
+      const aliasCountLabel = c.alias_count && c.alias_count > 1
+        ? `<br><small>${c.alias_count} aliases listed</small>` : ''
+      const dobDisplay = c.all_birth_dates && c.all_birth_dates.length > 1
+        ? safe(c.all_birth_dates.join('; '))
+        : safe(c.birth_date || '—')
       sec5Rows.push([
-        `${safe(c.name)}<br><small>${safe(c.dataset)}</small>`,
+        `${safe(c.name)}${aliasLabel}${aliasCountLabel}<br><small>${safe(c.dataset)}</small>`,
         safe(String(c.name_score) + '/100'),
-        safe(c.birth_date || '—') + `<br><small>${dobMatch}</small>`,
+        dobDisplay + `<br><small>${dobMatch}</small>`,
         safe(c.country || '—') + `<br><small>${ctryMatch}</small>`,
         disp,
       ])

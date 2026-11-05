@@ -59,6 +59,8 @@ export interface CandidateEvidenceItem {
   dataset: string
   name_score: number
   birth_date: string | null
+  all_birth_dates?: string[]
+  alias_count?: number
   country: string | null
   dob_assessment: 'exact' | 'compatible' | 'conflicting' | 'unknown' | 'not_applicable'
   country_assessment: 'compatible' | 'conflicting' | 'unknown'

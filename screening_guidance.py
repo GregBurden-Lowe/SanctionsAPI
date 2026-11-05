@@ -14,7 +14,26 @@ def enrich_result(result):
     inputs = result.get('Screening Inputs', {})
     if potential:
         actions.append('Review each potential candidate and record identity evidence and a reason for the decision.')
-        if inputs.get('entity_type', '').lower() == 'person' and not inputs.get('dob'):
+        is_person = inputs.get('entity_type', '').lower() == 'person'
+        no_dob = not inputs.get('dob')
+        no_country = not inputs.get('country')
+        alias_only = potential and all(item.get('matched_alias') for item in potential)
+        all_unconfirmed = all(
+            item.get('dob_assessment') == 'unknown' and item.get('country_assessment') == 'unknown'
+            for item in potential
+        )
+        if is_person and alias_only and all_unconfirmed and no_dob and no_country:
+            actions.append(
+                'This match was triggered by a listed alias, not the primary name. '
+                'Identity cannot be confirmed or ruled out from a name alone.'
+            )
+            actions.append(
+                'If you can obtain a date of birth or country of origin: rescreen with that information.'
+            )
+            actions.append(
+                'If a secondary identifier cannot be obtained: escalate to Compliance for enhanced due diligence before proceeding.'
+            )
+        elif is_person and no_dob:
             actions.append('Obtain a date of birth; a name match alone does not establish identity.')
         elif any(item.get('dob_assessment') in ('compatible', 'unknown') for item in potential if item.get('entity_type') == 'Person'):
             actions.append('Resolve missing or partial date-of-birth evidence where available.')

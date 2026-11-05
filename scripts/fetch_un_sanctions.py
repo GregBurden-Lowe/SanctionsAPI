@@ -24,6 +24,11 @@ from typing import Optional
 import pandas as pd
 import requests
 
+try:
+    from .alias_encoding import encode_aliases
+except ImportError:
+    from alias_encoding import encode_aliases
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -98,7 +103,7 @@ def _parse_individual(el: ET.Element) -> dict:
         "id": entity_id,
         "schema": "Person",
         "name": canonical_name,
-        "aliases": ";".join(alias_names),
+        "aliases": encode_aliases(alias_names),
         "birth_date": dob,
         "positions": designation,
         "countries": ";".join(nationalities),
@@ -135,7 +140,7 @@ def _parse_entity(el: ET.Element) -> dict:
         "id": entity_id,
         "schema": "Organization",
         "name": canonical_name,
-        "aliases": ";".join(alias_names),
+        "aliases": encode_aliases(alias_names),
         "birth_date": "",
         "positions": "",
         "countries": "",

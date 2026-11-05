@@ -160,7 +160,12 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                 >
                   <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-app/60 [&::-webkit-details-marker]:hidden">
                     <span className={`h-2 w-2 shrink-0 rounded-full ${isPotentialMatch ? 'bg-semantic-error' : 'bg-text-muted'}`} />
-                    <span className="min-w-0 flex-1 text-[13px] font-medium text-text-primary truncate">{candidate.name}</span>
+                    <span className="min-w-0 flex-1 flex items-baseline gap-1.5 overflow-hidden">
+                      <span className="text-[13px] font-medium text-text-primary truncate">{candidate.name}</span>
+                      {candidate.matched_alias && (
+                        <span className="shrink-0 text-[10.5px] text-text-muted">via alias: <span className="italic">{candidate.matched_name}</span></span>
+                      )}
+                    </span>
                     <span className="shrink-0 text-[11px] text-text-muted">Sanctions</span>
                     <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${isPotentialMatch ? 'bg-semantic-error/10 text-semantic-error border-semantic-error/25' : 'bg-surface text-text-muted border-border'}`}>
                       {isPotentialMatch ? 'Potential match' : 'Excluded'}
@@ -187,7 +192,11 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                         <tr>
                           <td className="py-1.5 text-text-muted">DOB</td>
                           <td className="py-1.5 text-text-primary">{formatDisplayDob(search.searchDob)}</td>
-                          <td className="py-1.5 text-text-primary">{formatDisplayDob(candidate.birth_date ?? undefined)}</td>
+                          <td className="py-1.5 text-text-primary">
+                            {candidate.all_birth_dates && candidate.all_birth_dates.length > 1
+                              ? candidate.all_birth_dates.map((d) => formatDisplayDob(d)).join(', ')
+                              : formatDisplayDob(candidate.birth_date ?? undefined)}
+                          </td>
                           <td className="py-1.5"><DobBadge assessment={candidate.dob_assessment} /></td>
                         </tr>
                         <tr>
