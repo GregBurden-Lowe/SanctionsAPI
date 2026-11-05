@@ -449,6 +449,68 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             for key in ('Is Sanctioned','Candidate Evidence','Entity Type Checks','Input Classification'):
                 self.assertEqual(result[key],interactive[key])
 
+    async def prepare_postgres_worker(self, manifest=None):
+        async with self.pool.acquire() as conn:
+            await conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
+            await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text,
+                name text, name_norm text, birth_date date, dataset text, regime text, raw_json jsonb)''')
+            await conn.execute("""INSERT INTO watchlist_entities VALUES('sanctions','listed','Person','Jane Smith','jane smith',
+                NULL,'OFAC',NULL,'{}'::jsonb)""")
+            await conn.execute('INSERT INTO watchlist_source_state VALUES(true,$1::jsonb)', json.dumps(manifest or self.source_manifest))
+            job = await screening_db.enqueue_job(conn, 'pg-worker', 'Jane Smith', None, 'UK', 'Person', 'Fixture', 'PG-1', 'Client Onboarding')
+        url = os.environ['SANCTIONS_TEST_ADMIN_DSN'].split('?')[0].rsplit('/', 1)[0] + '/' + self.database
+        return job, {'DATABASE_URL': url, 'SCREENING_WORKER_BACKEND': 'postgres'}
+
+    async def test_postgres_worker_matches_interactive_and_never_reads_parquet(self):
+        import screening_worker
+        from screening_policy import run_postgres_check
+        from utils import worker_backend
+        job, env = await self.prepare_postgres_worker()
+        with patch.dict(os.environ, env), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt), \
+             patch('screening_worker.run_parquet_check', side_effect=AssertionError('Parquet used')), \
+             patch('utils.get_opensanctions_df', side_effect=AssertionError('Parquet used')):
+            with self.assertRaises(KeyboardInterrupt):
+                await asyncio.to_thread(screening_worker.main)
+            async with self.pool.acquire() as conn:
+                saved = (await screening_db.get_job_status(conn, job))['result']
+                interactive = await run_postgres_check(conn, name='Jane Smith', dob=None, country='UK', entity_type='Person')
+                stamp_screening_result(interactive, 'Jane Smith', None, 'UK', 'Person', 'postgres_beta')
+                self.assertEqual(saved['Screening Inputs']['backend'], 'postgres_beta')
+                for key in ('Is Sanctioned', 'Candidate Evidence', 'Entity Type Checks', 'Screening Fingerprint'):
+                    self.assertEqual(saved[key], interactive[key])
+                self.assertEqual(saved['Source Coverage']['version'], 'test-source')
+                fingerprint = screening_fingerprint('Jane Smith', None, 'UK', 'Person', worker_backend())
+                self.assertIsNotNone(await screening_db.get_valid_screening(conn, 'pg-worker', fingerprint))
+
+    async def test_postgres_worker_refuses_a_stale_snapshot(self):
+        from datetime import datetime, timedelta, timezone
+        import screening_worker
+        stale = dict(self.source_manifest, ingested_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat())
+        job, env = await self.prepare_postgres_worker(stale)
+        with patch.dict(os.environ, env), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                await asyncio.to_thread(screening_worker.main)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT status, error_message FROM screening_jobs WHERE job_id=$1::uuid', job)
+            self.assertEqual(row['status'], 'failed')
+            self.assertIn('stale', row['error_message'])
+            self.assertIsNone(await conn.fetchval("SELECT status FROM screened_entities WHERE entity_key='pg-worker'"))
+
+    async def test_monitoring_uses_the_postgres_snapshot_with_a_postgres_worker(self):
+        from screening_monitoring import tick
+        _, env = await self.prepare_postgres_worker()
+        with patch.dict(os.environ, env), patch('screening_monitoring.parquet_manifest', side_effect=AssertionError('Parquet used')):
+            async with self.pool.acquire() as conn:
+                self.assertIn((await tick(conn))['status'], {'running', 'completed'})
+
+    def test_worker_backend_defaults_to_parquet_and_rejects_unknown_values(self):
+        from utils import worker_backend
+        with patch.dict(os.environ):
+            os.environ.pop('SCREENING_WORKER_BACKEND', None)
+            self.assertEqual(worker_backend(), 'worker-original')
+        with patch.dict(os.environ, {'SCREENING_WORKER_BACKEND': 'sqlite'}), self.assertRaises(ScreeningUnavailableError):
+            worker_backend()
+
     async def test_idempotent_concurrent_http_submissions_and_payload_conflict(self):
         import httpx
         api_server.app.dependency_overrides[api_server.get_current_user] = lambda: {'sub':'same-user','is_admin':True}

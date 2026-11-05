@@ -967,6 +967,19 @@ class ScreeningUnavailableError(RuntimeError):
     """Required source coverage is unavailable; never interpret this as no match."""
 
 
+def worker_backend() -> str:
+    """Backend recorded for background screening; shared by the API and the worker.
+
+    The API compares queued jobs and saved results against this value, so both
+    processes must read the same setting.
+    """
+    backends = {"parquet": "worker-original", "postgres": "postgres_beta"}
+    setting = os.getenv("SCREENING_WORKER_BACKEND", "parquet").strip().lower()
+    if setting not in backends:
+        raise ScreeningUnavailableError("Worker backend configuration is invalid. No clearance issued.")
+    return backends[setting]
+
+
 def screening_fingerprint(name, dob, country, entity_type, backend):
     # Preserve all name tokens; entity keys are only legacy grouping identifiers.
     payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),

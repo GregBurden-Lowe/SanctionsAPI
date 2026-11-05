@@ -103,6 +103,7 @@ from utils import (
     perform_postgres_watchlist_check,
     refresh_opensanctions_data,
     sync_own_watchlists_postgres,
+    worker_backend,
     build_uk_sanctions_snapshot_from_parquet,
     compute_uk_snapshot_delta,
     derive_entity_key,
@@ -2765,7 +2766,7 @@ async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> d
 
     valid = None
     for key_candidate in entity_key_candidates:
-        valid = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, "worker-original"))
+        valid = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, worker_backend()))
         if valid is not None:
             break
     if valid is not None:
@@ -2773,7 +2774,7 @@ async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> d
 
     for key_candidate in entity_key_candidates:
         job = await conn.fetchrow("SELECT job_id, name, date_of_birth, country, entity_type FROM screening_jobs WHERE entity_key=$1 AND status IN ('pending', 'running') ORDER BY created_at LIMIT 1", key_candidate)
-        if job and screening_fingerprint(job['name'], job['date_of_birth'], job['country'], job['entity_type'], 'worker-original') == screening_fingerprint(name, dob, country, entity_type, 'worker-original'):
+        if job and screening_fingerprint(job['name'], job['date_of_birth'], job['country'], job['entity_type'], worker_backend()) == screening_fingerprint(name, dob, country, entity_type, worker_backend()):
             # Lock prevents completion racing the attachment of this new request.
             async with conn.transaction():
                 pending = await conn.fetchrow("SELECT job_id FROM screening_jobs WHERE job_id=$1 AND status IN ('pending','running') FOR UPDATE", job['job_id'])
