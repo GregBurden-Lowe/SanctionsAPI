@@ -1609,21 +1609,27 @@ async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
         for match in similar_tokens(token, [r["token"] for r in nearby]):
             matched_tokens.append(match)
             matched_positions.append(position)
-    # Whole-name similarity is what v1 retrieves on, so v2 keeps every candidate v1
-    # would find; the word index then adds variations similarity alone misses.
-    candidate_ids = {r["entity_id"] for r in await conn.fetch(
-        """SELECT t.entity_id FROM watchlist_name_tokens t
-           JOIN unnest($1::text[], $2::int[]) AS q(token, position) USING (token)
-           WHERE t.entity_kind = $3 GROUP BY t.entity_id
-           HAVING count(DISTINCT q.position) >= $4 LIMIT $5""",
-        matched_tokens, matched_positions, kind, plan.required_matches, limit + 1)}
+    # Core candidates follow v1's retrieval rules, so v2 keeps everything v1 would find,
+    # and exceeding the limit here refuses the search exactly as v1 does.
     query_norm = _normalize_text(name)
-    candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+    candidate_ids = {r["entity_id"] for r in await conn.fetch(
         """SELECT DISTINCT entity_id FROM watchlist_names
            WHERE entity_kind = $1 AND (name_norm % $2 OR strpos(name_norm, $2) > 0) LIMIT $3""",
         kind, query_norm, limit + 1)} if query_norm else set()
+    if kind == "person" and len(set(plan.query_tokens)) >= 2:
+        candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+            """SELECT entity_id FROM watchlist_name_tokens WHERE entity_kind = 'person' AND token = ANY($1::text[])
+               GROUP BY entity_id HAVING count(DISTINCT token) >= 2 LIMIT $2""", plan.query_tokens, limit + 1)}
     if len(candidate_ids) > limit:
         raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
+    # Spelling variations are additions, so an overflow keeps the closest rather than refusing.
+    candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+        """SELECT t.entity_id FROM watchlist_name_tokens t
+           JOIN unnest($1::text[], $2::int[]) AS q(token, position) USING (token)
+           WHERE t.entity_kind = $3 GROUP BY t.entity_id
+           HAVING count(DISTINCT q.position) >= $4
+           ORDER BY count(DISTINCT q.position) DESC, t.entity_id LIMIT $5""",
+        matched_tokens, matched_positions, kind, plan.required_matches, limit)}
     if full_dob and kind == "person":
         # A single listed word plus an exact date of birth stays reviewable.
         candidate_ids |= {r["entity_id"] for r in await conn.fetch(

@@ -175,10 +175,24 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_whole_name_similarity_retrieves_a_shorter_listed_name(self):
         short = dict(self.FIXTURE[2], id='short', name='Zorbex')
-        alias = dict(self.FIXTURE[2], id='alias', name='Unrelated Display', aliases='Zorbex Trading Partners')
+        alias = dict(self.FIXTURE[2], id='alias', name='Unrelated Display', aliases='Zorbex Marlow')
         await self.load(self.FIXTURE + [short, alias])
         rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Zorbex Marlowe', 'Organization', None, 2000)
         self.assertEqual({row['entity_id'] for row in rows}, {'short', 'alias'})
+
+    async def test_two_shared_words_retrieve_a_person_even_when_both_are_particles(self):
+        listed = dict(self.FIXTURE[0], id='particles', name='Abd Al Kareem')
+        await self.load(self.FIXTURE + [listed])
+        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Abd Al Thornton', 'Person', None, 2000)
+        self.assertIn('particles', {row['entity_id'] for row in rows})
+
+    async def test_word_matches_beyond_the_limit_do_not_refuse_the_search(self):
+        await self.load(self.FIXTURE)
+        await self.conn.execute("""INSERT INTO watchlist_name_tokens
+            SELECT 'zorbexian','organization','extra-'||g FROM generate_series(1,2001) g""")
+        await self.conn.execute("INSERT INTO watchlist_tokens VALUES('zorbexian',2001)")
+        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Zorbexian', 'Organization', None, 2000)
+        self.assertEqual(rows, [])
 
     async def test_a_reload_replaces_the_index(self):
         await self.load(self.FIXTURE)
@@ -193,7 +207,8 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_too_many_candidates_still_refuses(self):
         await self.load(self.FIXTURE)
-        await self.conn.execute("INSERT INTO watchlist_name_tokens SELECT 'volga','organization','extra-'||g FROM generate_series(1,2001) g")
+        await self.conn.execute("INSERT INTO watchlist_names SELECT 'volga','organization','extra-'||g||'' FROM generate_series(1,2001) g ON CONFLICT DO NOTHING")
+        await self.conn.execute("INSERT INTO watchlist_names SELECT 'volga '||g,'organization','extra-'||g FROM generate_series(1,2001) g")
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}), self.assertRaises(ScreeningUnavailableError):
             await utils.perform_postgres_watchlist_check(self.conn, 'Volga', None, entity_type='Organization', log_search=False)
 
