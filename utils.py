@@ -621,9 +621,9 @@ async def sync_watchlist_entities_postgres(
                     continue
 
                 entity_schema = _safe_str(row.get("schema")).strip() or "Person"
+                # A non-Latin primary name normalises to empty; keep the row so its
+                # aliases stay searchable, as they are on the Parquet path.
                 name_norm = _normalize_text(name)
-                if not name_norm:
-                    continue
 
                 # This happens inside the refresh transaction, so a malformed
                 # nested value leaves the previous PostgreSQL snapshot intact.
@@ -794,9 +794,9 @@ async def sync_own_watchlists_postgres(
             if not name:
                 continue
             entity_schema = _safe_str(row.get("schema")).strip() or "Person"
+            # A non-Latin primary name normalises to empty; keep the row so its
+            # aliases stay searchable, as they are on the Parquet path.
             name_norm = _normalize_text(name)
-            if not name_norm:
-                continue
 
             # Reject malformed legacy data instead of changing alias boundaries.
             # Newly scraped aliases are encoded as semicolon-delimited CSV.

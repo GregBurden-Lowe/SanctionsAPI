@@ -119,3 +119,49 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
             if created:
                 await admin.execute(f'DROP DATABASE "{database}"')
             await admin.close()
+
+    async def test_non_latin_primary_name_stays_searchable_by_alias(self):
+        import asyncpg
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from scripts.rehearse_history_migration import local_dsn
+        from screening_policy import run_postgres_check
+        from utils import sync_own_watchlists_postgres
+
+        dsn = local_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'])
+        admin = await asyncpg.connect(dsn)
+        database = 'sanctions_alias_' + uuid4().hex
+        conn = None
+        created = False
+        try:
+            await admin.execute(f'CREATE DATABASE "{database}"')
+            created = True
+            conn = await asyncpg.connect(dsn, database=database)
+            await conn.execute('CREATE EXTENSION pg_trgm')
+            await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text,
+                entity_schema text, name text, name_norm text, birth_date date, dataset text,
+                regime text, raw_json jsonb)''')
+            rows = [{'id': 'greek', 'name': 'Μπάμπαρ Χαλσά', 'schema': 'Organization', 'dataset': 'EU',
+                     'source_type': 'sanctions', 'aliases': encode_aliases(['Babbar Khalsa'])},
+                    {'id': 'cyrillic', 'name': 'Максим Решетников', 'schema': 'Person', 'dataset': 'EU',
+                     'source_type': 'sanctions', 'aliases': encode_aliases(['Maxim Reshetnikov'])}]
+            manifest = {'version': 'published-version', 'ingested_at': datetime.now(timezone.utc).isoformat(),
+                        'list_counts': {k: 1 for k in ('UK', 'UN', 'EU', 'OFAC')}}
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'snapshot.parquet'
+                table = pa.Table.from_pylist(rows)
+                table = table.replace_schema_metadata({b'screening.source_manifest.v1': json.dumps(manifest).encode()})
+                pq.write_table(table, path)
+                counts = await sync_own_watchlists_postgres(conn, watchlists_parquet_path=str(path))
+            self.assertEqual(counts['sanctions'], 2)
+            for name, entity_type, record_id in (('Babbar Khalsa', 'Organization', 'greek'),
+                                                 ('Maxim Reshetnikov', 'Person', 'cyrillic')):
+                result = await run_postgres_check(conn, name=name, dob=None, country=None, entity_type=entity_type)
+                self.assertTrue(result['Is Sanctioned'], name)
+                self.assertIn(record_id, [item['record_id'] for item in result['Candidate Evidence']])
+        finally:
+            if conn:
+                await conn.close()
+            if created:
+                await admin.execute(f'DROP DATABASE "{database}"')
+            await admin.close()
