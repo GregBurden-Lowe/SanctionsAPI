@@ -67,6 +67,21 @@ def require_current(manifest):
     return coverage
 
 
+async def loaded_list_mismatches(conn, manifest):
+    """Lists whose PostgreSQL row count differs from the published manifest."""
+    expected = decode(manifest).get('list_counts', {})
+    loaded = {name: 0 for name in LIST_LABELS}
+    for row in await conn.fetch("""SELECT dataset, count(*) AS rows FROM watchlist_entities
+                                   WHERE source_type='sanctions' GROUP BY dataset"""):
+        label = str(row['dataset'] or '').lower()
+        for name, patterns in LIST_LABELS.items():
+            if any(part in label for part in patterns):
+                loaded[name] += row['rows']
+                break
+    return {name: {'expected': expected[name], 'loaded': loaded[name]}
+            for name in LIST_LABELS if name in expected and expected[name] != loaded[name]}
+
+
 async def postgres_manifest(conn):
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_source_state') IS NOT NULL"):
         return {}

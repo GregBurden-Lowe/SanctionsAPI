@@ -703,8 +703,13 @@ async def readiness():
                     EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='sanctions')""")
                 if not coverage:
                     raise RuntimeError('Required watchlist coverage missing')
-                from source_assurance import require_current, postgres_manifest
-                require_current(await postgres_manifest(conn))
+                from source_assurance import loaded_list_mismatches, require_current, postgres_manifest
+                manifest = await postgres_manifest(conn)
+                require_current(manifest)
+                mismatches = await loaded_list_mismatches(conn, manifest)
+                if mismatches:
+                    logger.error('Loaded watchlist differs from its manifest: %s', mismatches)
+                    raise RuntimeError('Loaded watchlist differs from its manifest')
     except Exception:
         raise HTTPException(503, 'Screening dependencies are not ready')
     return JSONResponse({'status': 'ready', 'protocol': PROTOCOL,

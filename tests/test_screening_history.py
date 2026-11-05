@@ -753,8 +753,10 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.pool.acquire() as conn:
             await install_schema(conn)
             await verify_schema(conn)
-            await conn.execute('CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text, name text, name_norm text)')
-            await conn.execute("INSERT INTO watchlist_entities(source_type, entity_id, entity_schema, name, name_norm) VALUES('sanctions','s','Person','Fixture','fixture'),('peps','p','Person','Fixture','fixture')")
+            await conn.execute('CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text, name text, name_norm text, dataset text)')
+            await conn.executemany("INSERT INTO watchlist_entities(source_type, entity_id, entity_schema, name, name_norm, dataset) VALUES('sanctions',$1,'Person','Fixture','fixture',$2)",
+                                   [('uk', 'UK Sanctions List (FCDO)'), ('un', 'UN Security Council Consolidated List'),
+                                    ('eu', 'EU Consolidated Financial Sanctions List'), ('ofac', 'OFAC SDN List')])
             await conn.execute('INSERT INTO watchlist_source_state VALUES(true,$1::jsonb)', json.dumps(self.source_manifest))
         with patch.dict(os.environ, {'SANCTIONS_SCHEMA_MODE':'verify', 'RELEASE_ID':'fixture-release','SEED_DEFAULT_ADMIN':'false'}), \
              patch.object(api_server,'_validate_jwt_secret'), patch.object(screening_db,'ensure_schema',AsyncMock()) as ensure, \
@@ -766,6 +768,9 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.json()['release'],'fixture-release')
                     self.assertEqual(response.json()['schema_contract'],schema_contract())
                     ensure.assert_not_called()
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("DELETE FROM watchlist_entities WHERE entity_id='eu'")
+                    self.assertEqual((await client.get('/ready')).status_code,503)
                     async with self.pool.acquire() as conn:
                         await conn.execute("DELETE FROM watchlist_entities WHERE source_type='sanctions'")
                     self.assertEqual((await client.get('/ready')).status_code,503)

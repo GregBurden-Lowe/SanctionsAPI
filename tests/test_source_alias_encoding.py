@@ -165,3 +165,51 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
             if created:
                 await admin.execute(f'DROP DATABASE "{database}"')
             await admin.close()
+
+    async def test_partial_import_is_refused_and_the_previous_watchlist_is_kept(self):
+        import asyncpg
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from scripts.rehearse_history_migration import local_dsn
+        from utils import sync_own_watchlists_postgres
+
+        dsn = local_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'])
+        admin = await asyncpg.connect(dsn)
+        database = 'sanctions_alias_' + uuid4().hex
+        conn = None
+        created = False
+        try:
+            await admin.execute(f'CREATE DATABASE "{database}"')
+            created = True
+            conn = await asyncpg.connect(dsn, database=database)
+            await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text,
+                entity_schema text, name text, name_norm text, birth_date date, dataset text,
+                regime text, raw_json jsonb)''')
+            row = {'name': 'Jane Smith', 'schema': 'Person', 'dataset': 'UK', 'source_type': 'sanctions', 'aliases': ''}
+            manifest = {'version': 'published-version', 'ingested_at': datetime.now(timezone.utc).isoformat(),
+                        'list_counts': {k: 1 for k in ('UK', 'UN', 'EU', 'OFAC')}}
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'snapshot.parquet'
+
+                def write(rows):
+                    table = pa.Table.from_pylist(rows)
+                    pq.write_table(table.replace_schema_metadata(
+                        {b'screening.source_manifest.v1': json.dumps(manifest).encode()}), path)
+                write([{**row, 'id': 'kept'}])
+                await sync_own_watchlists_postgres(conn, watchlists_parquet_path=str(path))
+                # Simulates an import fault that silently drops a row.
+                await conn.execute('''CREATE FUNCTION drop_row() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN IF NEW.entity_id = 'dropped' THEN RETURN NULL; END IF; RETURN NEW; END $$;
+                    CREATE TRIGGER drop_row BEFORE INSERT ON watchlist_entities
+                    FOR EACH ROW EXECUTE FUNCTION drop_row()''')
+                write([{**row, 'id': 'new'}, {**row, 'id': 'dropped'}])
+                with self.assertRaisesRegex(ScreeningUnavailableError, 'loaded 1 of 2'):
+                    await sync_own_watchlists_postgres(conn, watchlists_parquet_path=str(path))
+            self.assertEqual([r['entity_id'] for r in await conn.fetch('SELECT entity_id FROM watchlist_entities')], ['kept'])
+        finally:
+            if conn:
+                await conn.close()
+            if created:
+                await admin.execute(f'DROP DATABASE "{database}"')
+            await admin.close()
+

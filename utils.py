@@ -851,6 +851,14 @@ async def sync_own_watchlists_postgres(
                 "Refresh did not provide sanctions data; existing watchlist retained."
             )
 
+        # A partial load still looks current, so every snapshot row must arrive.
+        expected_rows = int((df["name"].astype(str).str.strip() != "").sum())
+        loaded_rows = await conn.fetchval("SELECT count(*) FROM watchlist_entities")
+        if loaded_rows != expected_rows:
+            raise ScreeningUnavailableError(
+                f"Refresh loaded {loaded_rows} of {expected_rows} snapshot rows; existing watchlist retained."
+            )
+
         await conn.execute(
             "INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) "
             "ON CONFLICT(singleton) DO UPDATE SET manifest=EXCLUDED.manifest",
