@@ -16,13 +16,17 @@ Set `SCREENING_MATCHER_VERSION=v2` to enable it. The default is `v1`, and any ot
 |---|---|---|
 | Spelling in several words | Whole-name similarity | Each word aligned separately (Jaro-Winkler) |
 | Omitted patronymic or middle name | Often rejected | Small penalty for listed words missing from the search |
-| Distinctive word disagrees | Can still alert | Removed unless a date of birth was supplied |
+| Distinctive word disagrees | Can still alert | Unchanged: v2 only adds matches |
 | Company legal forms and hyphens | Partly handled | Removed before comparing distinctive words |
 | Common words | Equal weight | Weighted by how often they appear on the lists |
 | Retrieval | Trigrams and alias expansion per row | Word index, with fuzzy word lookup |
 | Non-Latin searches | "Too many candidates" | "Enter a name containing supported letters" |
 
 Date-of-birth conflicts still exclude a candidate, as in v1. Results show `match_rule` as `standard` or `token_alignment`, and aligned matches say so in their reasons.
+
+## Why v2 only adds matches
+
+`refine_hits` can also remove standard hits whose distinctive words disagree. This is off. It cut alerts on constructed names, but on a real-subject sample it removed 7 of 16 v1 alerts, some sharing words that are rare on the lists. Those could be the same person, and nobody has reviewed them. Do not enable it without independently labelled cases.
 
 ## Limits
 
@@ -37,7 +41,5 @@ On 526 constructed cases not used during design, built from the public 2026-11-0
 | Expected listing found (of 391) | 349 | 386 |
 | OFSI-pattern variations found (of 23) | 1 | 20 |
 | Listings found by v1 and lost by v2 | n/a | 0 |
-| Alerts on non-listed names, excluding broad searches (of 74) | 18 | 10 |
-| Candidates across all alerts | 3,460 | 3,966 |
 
-This is diagnostic evidence, not accuracy. There are no independently labelled cases yet, and v2 has not been measured on real customer names. Alerts on cross-combined names rose from 0 to 3 of 15.
+These figures were measured with the filter on, so the listings found are unaffected but alert volumes on non-listed names will be higher than the 10 of 74 measured with it. This is diagnostic evidence, not accuracy. There are no independently labelled cases yet.

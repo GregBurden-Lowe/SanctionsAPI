@@ -19,9 +19,10 @@ from utils import ScreeningUnavailableError, get_best_name_matches, _normalize_t
 STATS = TokenStats({'sergei': 200, 'ivanovich': 300, 'daniel': 120, 'volga': 3, 'james': 40}, 33000)
 
 
-def refined(query, names, entity_type='Person', has_dob=False):
+def refined(query, names, entity_type='Person', has_dob=False, remove_disagreeing=False):
     standard = get_best_name_matches(query, names, limit=len(names), threshold=75, has_dob=has_dob, entity_type=entity_type)
-    return refine_hits(query, names, standard, has_dob=has_dob, entity_type=entity_type, stats=STATS)
+    return refine_hits(query, names, standard, has_dob=has_dob, entity_type=entity_type, stats=STATS,
+                       remove_disagreeing=remove_disagreeing)
 
 
 class TokenTests(unittest.TestCase):
@@ -44,12 +45,14 @@ class PersonTests(unittest.TestCase):
         self.assertEqual(added, {0})
         self.assertLess(hits[0][1], 90)
 
-    def test_different_distinctive_surname_is_removed(self):
-        self.assertTrue(get_best_name_matches('Sergei Ivanovich Thornton', ['Sergei Ivanovich SKRIBA'], threshold=75))
-        self.assertEqual(refined('Sergei Ivanovich Thornton', ['Sergei Ivanovich SKRIBA'])[0], [])
+    def test_standard_hits_are_never_removed_by_default(self):
+        self.assertTrue(refined('Sergei Ivanovich Thornton', ['Sergei Ivanovich SKRIBA'])[0])
 
-    def test_a_date_of_birth_keeps_the_standard_hit_for_review(self):
-        self.assertTrue(refined('Sergei Ivanovich Thornton', ['Sergei Ivanovich SKRIBA'], has_dob=True)[0])
+    def test_optional_filter_removes_a_different_distinctive_surname(self):
+        self.assertEqual(refined('Sergei Ivanovich Thornton', ['Sergei Ivanovich SKRIBA'], remove_disagreeing=True)[0], [])
+
+    def test_a_date_of_birth_keeps_the_hit_even_with_the_filter(self):
+        self.assertTrue(refined('Sergei Ivanovich Thornton', ['Sergei Ivanovich SKRIBA'], has_dob=True, remove_disagreeing=True)[0])
 
     def test_single_word_queries_are_not_widened(self):
         self.assertEqual(refined('Rotinberg', ['Arkady Romanovich ROTENBERG'])[1], set())
@@ -70,7 +73,7 @@ class OrganisationTests(unittest.TestCase):
                 self.assertTrue(refined(query, [name], 'Organization')[0])
 
     def test_common_single_word_listing_needs_more_than_a_shared_word(self):
-        self.assertEqual(refined('Daniel Marlowe', ['DANIEL'], 'Organization')[0], [])
+        self.assertEqual(refined('Daniel Marlowe', ['DANIEL'], 'Organization', remove_disagreeing=True)[0], [])
 
     def test_rare_distinctive_word_stays_reviewable(self):
         self.assertTrue(assess_organisation('Volga Bakery', 'Volga Shipping', STATS).rare_word_aligned)

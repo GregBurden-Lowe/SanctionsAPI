@@ -159,19 +159,20 @@ def assess_organisation(query_name, candidate_name, stats: TokenStats) -> Option
 
 
 def refine_hits(query_name, names: List[str], standard_hits, *, has_dob: bool, entity_type: str,
-                stats: TokenStats) -> Tuple[list, Set[int]]:
-    """Combine standard hits with token alignment.
+                stats: TokenStats, remove_disagreeing: bool = False) -> Tuple[list, Set[int]]:
+    """Add names the standard comparison rejected but token alignment accepts.
 
-    Removes standard hits whose distinctive words disagree, unless a date of
-    birth was supplied, then adds names the standard comparison rejected but
-    token alignment accepts. Returns the hits and the indexes added by alignment.
+    Standard hits are always kept. remove_disagreeing also drops hits whose
+    distinctive words disagree, but it stays off: on real subjects it removed
+    alerts sharing rare listed words, and no labelled evidence supports that yet.
+    Returns the hits and the indexes added by alignment.
     """
     organisation = (entity_type or "Person").strip().lower() == "organization"
     assess = assess_organisation if organisation else assess_person
     kept = []
     for hit in standard_hits:
         assessment = assess(query_name, names[hit[2]], stats)
-        if not has_dob and assessment and (
+        if remove_disagreeing and not has_dob and assessment and (
             (not assessment.distinctive_words_agree and not assessment.rare_word_aligned) if organisation
             else assessment.unexplained_share >= UNEXPLAINED_SHARE_LIMIT
         ):
