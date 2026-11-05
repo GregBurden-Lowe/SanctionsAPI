@@ -25,8 +25,8 @@ class ScreeningSafetyTests(unittest.TestCase):
             with self.assertRaises(ScreeningUnavailableError):
                 perform_opensanctions_check('Jane Smith', None)
 
-    def test_missing_pep_coverage_is_incomplete(self):
-        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame({'source_type': ['sanctions']})):
+    def test_watchlist_without_sanctions_rows_is_not_clear(self):
+        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame({'source_type': ['peps']})):
             with self.assertRaises(ScreeningUnavailableError):
                 perform_opensanctions_check('Jane Smith', None)
 
@@ -44,7 +44,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         from datetime import datetime, timezone
         import pandas as pd
         self.source_manifest = {'version':'test-source', 'ingested_at':datetime.now(timezone.utc).isoformat(),
-            'list_counts':{k:1 for k in ('UK','UN','EU','OFAC','PEP')}}
+            'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
         source_frame = pd.DataFrame()
         source_frame.attrs['source_manifest'] = self.source_manifest
         for mocked in (patch('utils.get_opensanctions_df', return_value=source_frame),
@@ -262,8 +262,10 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 excluded = await perform_postgres_watchlist_check(conn, 'Jane Smith', '1970-01-01', log_search=False, include_peps=False)
                 self.assertFalse(excluded['Match Found'])
                 self.assertEqual(excluded['Candidate Evidence'][0]['disposition'], 'excluded')
+                empty = path.with_name('empty.csv')
+                empty.write_text(','.join(rows[0].keys()) + '\n')
                 with self.assertRaises(ScreeningUnavailableError):
-                    await sync_watchlist_entities_postgres(conn, sanctions_csv_path=str(path), peps_csv_path=None, include_peps=True)
+                    await sync_watchlist_entities_postgres(conn, sanctions_csv_path=str(empty), peps_csv_path=None, include_peps=False)
                 self.assertEqual(await conn.fetchval('SELECT count(*) FROM watchlist_entities'), 1)
                 malformed = [{**rows[0], 'aliases':'"unclosed;alias'}]
                 with path.open('w') as file:
@@ -436,7 +438,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             result = (await screening_db.get_job_status(conn,job))['result']
             self.assertTrue(result['Is Sanctioned'])
             self.assertTrue(result['Input Classification']['likely_misclassified'])
-            for key in ('Is Sanctioned','Is PEP','Candidate Evidence','Entity Type Checks','PEP Check','Input Classification'):
+            for key in ('Is Sanctioned','Candidate Evidence','Entity Type Checks','Input Classification'):
                 self.assertEqual(result[key],interactive[key])
 
     async def test_idempotent_concurrent_http_submissions_and_payload_conflict(self):
@@ -757,7 +759,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.json()['schema_contract'],schema_contract())
                     ensure.assert_not_called()
                     async with self.pool.acquire() as conn:
-                        await conn.execute("DELETE FROM watchlist_entities WHERE source_type='peps'")
+                        await conn.execute("DELETE FROM watchlist_entities WHERE source_type='sanctions'")
                     self.assertEqual((await client.get('/ready')).status_code,503)
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE deployment_schema SET contract='incompatible'")

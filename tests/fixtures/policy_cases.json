@@ -229,17 +229,16 @@
     "match": true
   },
   {
-    "label": "person PEP enabled",
+    "label": "person PEP row not screened",
     "query": "Jane Smith",
     "row": {
       "name": "Jane Smith",
       "source_type": "peps"
     },
-    "match": true,
-    "pep": true
+    "match": false
   },
   {
-    "label": "organisation PEP skipped",
+    "label": "organisation PEP row not screened",
     "query": "Jane Smith",
     "type": "Organization",
     "row": {
@@ -249,7 +248,7 @@
     "match": false
   },
   {
-    "label": "company looking person skips PEP",
+    "label": "company looking person PEP row not screened",
     "query": "Acme Trading Ltd",
     "row": {
       "name": "Acme Trading Ltd",
@@ -273,8 +272,7 @@
     "label": "repeated name does not match unrelated second token",
     "query": "Milo Winters",
     "row": {
-      "name": "Milo Milo",
-      "source_type": "peps"
+      "name": "Milo Milo"
     },
     "match": false
   },
@@ -284,7 +282,6 @@
     "row": {
       "name": "Claire Barlow",
       "aliases": "Barlow",
-      "source_type": "peps",
       "birth_date": "1980-01-01"
     },
     "match": false
@@ -296,11 +293,9 @@
     "row": {
       "name": "Claire Barlow",
       "aliases": "Barlow",
-      "source_type": "peps",
       "birth_date": "1980-01-01"
     },
     "match": true,
-    "pep": true,
     "dob_assessment": "exact"
   },
   {
@@ -310,7 +305,6 @@
     "row": {
       "name": "Claire Barlow",
       "aliases": "Barlow",
-      "source_type": "peps",
       "birth_date": "1980-01-01"
     },
     "match": false
@@ -331,11 +325,9 @@
     "query": "Clara Barlow",
     "row": {
       "name": "Claire Barlow",
-      "aliases": "Barlow;Clara Barlow",
-      "source_type": "peps"
+      "aliases": "Barlow;Clara Barlow"
     },
-    "match": true,
-    "pep": true
+    "match": true
   },
   {
     "label": "long query retrieval using corroborated single word alias",
@@ -344,11 +336,9 @@
     "row": {
       "name": "Claire Barlow",
       "aliases": "Barlow",
-      "source_type": "peps",
       "birth_date": "1980-01-01"
     },
     "match": true,
-    "pep": true,
     "dob_assessment": "exact"
   },
   {

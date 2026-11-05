@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import asyncpg
@@ -37,10 +38,15 @@ class PolicyCorpusTests(unittest.TestCase):
                 assert_outcome(self, run_parquet_check(**arguments(case)), case)
 
     def test_missing_required_source_never_clears(self):
-        for rows in ([], [dict(name='Unrelated', schema='Person', source_type='sanctions')]):
-            with self.subTest(rows=rows), patch('utils.get_opensanctions_df', return_value=pd.DataFrame(rows)):
+        # Mirrors the worker: assurance is required, so rows without a complete manifest cannot clear.
+        partial = pd.DataFrame([dict(name='Unrelated', schema='Person', source_type='sanctions')])
+        partial.attrs['source_manifest'] = {'version': 'fixture', 'ingested_at': datetime.now(timezone.utc).isoformat(),
+                                            'list_counts': {'UK': 1, 'EU': 1, 'OFAC': 1}}
+        unverified = pd.DataFrame([dict(name='Unrelated', schema='Person', source_type='sanctions')])
+        for frame in (pd.DataFrame(), unverified, partial):
+            with self.subTest(rows=len(frame), manifest=bool(frame.attrs)), patch('utils.get_opensanctions_df', return_value=frame):
                 with self.assertRaises(ScreeningUnavailableError):
-                    run_parquet_check(name='Jane Smith', dob=None, country=None, entity_type='Person')
+                    run_parquet_check(name='Jane Smith', dob=None, country=None, entity_type='Person', require_assurance=True)
 
 
 @unittest.skipUnless(os.getenv('SANCTIONS_TEST_ADMIN_DSN'), 'Requires isolated local PostgreSQL')

@@ -26,7 +26,7 @@ from services import companies_house as ch
 
 def manifest(version='fixture'):
     return {'version':version, 'ingested_at':datetime.now(timezone.utc).isoformat(),
-            'list_counts':{name:1 for name in ('UK','UN','EU','OFAC','PEP')}}
+            'list_counts':{name:1 for name in ('UK','UN','EU','OFAC')}}
 
 
 def result(name='Jane Smith', dob='1980', country='UK', extra=False):
@@ -40,14 +40,15 @@ def result(name='Jane Smith', dob='1980', country='UK', extra=False):
 
 class PureImprovements(unittest.TestCase):
     def test_coverage_fails_for_each_missing_required_list_and_staleness(self):
-        for name in ('UK','UN','EU','OFAC','PEP'):
+        for name in ('UK','UN','EU','OFAC'):
             m=manifest(); del m['list_counts'][name]
             with self.subTest(name=name), self.assertRaises(ScreeningUnavailableError): require_current(m)
         m=manifest(); m['ingested_at']=(datetime.now(timezone.utc)-timedelta(days=3)).isoformat()
         with self.assertRaises(ScreeningUnavailableError): require_current(m)
         with self.assertRaises(ScreeningUnavailableError): require_current({})
-        m=manifest(); del m['list_counts']['PEP']
-        self.assertEqual(require_current(m,False)['status'],'current')
+        m=manifest()
+        self.assertNotIn('PEP',m['list_counts'])
+        self.assertEqual(require_current(m)['status'],'current')
         self.assertNotIn('source_published_at',m)
 
     def test_manifest_uses_exact_csv_hash_and_recognises_current_uk_label(self):
@@ -55,7 +56,7 @@ class PureImprovements(unittest.TestCase):
             path=Path(folder)/'source.csv'
             path.write_text('name,dataset\nTest,UK Sanctions List;United Nations;EU Council;OFAC\n')
             first=build_manifest(path)
-            require_current(first,False)
+            require_current(first)
             path.write_text(path.read_text()+'Another,OFAC\n')
             self.assertNotEqual(first['version'],build_manifest(path)['version'])
             self.assertIsNone(first['source_published_at'])

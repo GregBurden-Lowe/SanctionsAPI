@@ -58,9 +58,9 @@ class AiBatchTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown=fixtures.InternalDatabaseTests.asyncTearDown
 
     async def seed(self,key='subject'):
-        result=_empty_no_match_result('PEP')
-        result.update({'Is PEP':True,'Match Found':True,'Sanctions Name':'Bob Jones','Score':60,'Risk Level':'Medium Risk'})
-        result['Check Summary']['Status']='Fail PEP'
+        result=_empty_no_match_result('Sanctions')
+        result.update({'Is Sanctioned':True,'Match Found':True,'Sanctions Name':'Bob Jones','Score':60,'Risk Level':'Medium Risk'})
+        result['Check Summary']['Status']='Fail Sanction'
         stamp_screening_result(result,'Alice Smith',None,None,'Person','original')
         await screening_db.upsert_screening(self.conn,key,'Alice Smith','alice smith',None,None,'Person','tester',key,'Client Onboarding',result)
         return result
@@ -175,7 +175,7 @@ class AiBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task['status'],'APPROVED'); self.assertEqual(task['human_decision'],'AUTO_APPROVED')
         current=await self.conn.fetchrow('SELECT * FROM screened_entities')
         self.assertEqual(current['status'],'Cleared - False Positive')
-        self.assertTrue(json.loads(current['result_json'])['Is PEP'])
+        self.assertTrue(json.loads(current['result_json'])['Is Sanctioned'])
         self.assertEqual(json.loads(current['review_decision'])['decision_type'],'ai_auto_clear')
         self.assertEqual(str(current['current_run_id']),first['run_id'])
         self.assertFalse(await ai_triage.auto_clear_task(self.conn,str(task['triage_id'])))
@@ -203,7 +203,7 @@ class AiBatchTests(unittest.IsolatedAsyncioTestCase):
         await self.seed()
         self.assertFalse(await ai_triage.auto_clear_task(self.conn,identifier))
         self.assertEqual(await self.conn.fetchval('SELECT status FROM ai_triage_recommendations'),'SUPERSEDED')
-        self.assertEqual(await self.conn.fetchval('SELECT status FROM screened_entities'),'Fail PEP')
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM screened_entities'),'Fail Sanction')
 
     async def test_approval_and_clear_rollback_together(self):
         identifier=await self.pending_clear()
@@ -213,7 +213,7 @@ class AiBatchTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError('injected publication failure')
         with patch('review_decisions.write_decision',side_effect=fail_after_decision):
             with self.assertRaises(RuntimeError): await ai_triage.auto_clear_task(self.conn,identifier)
-        self.assertEqual(await self.conn.fetchval('SELECT status FROM screened_entities'),'Fail PEP')
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM screened_entities'),'Fail Sanction')
         self.assertEqual(await self.conn.fetchval('SELECT status FROM ai_triage_recommendations'),'PENDING_REVIEW')
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_review_decisions'),0)
 

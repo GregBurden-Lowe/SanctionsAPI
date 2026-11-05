@@ -225,28 +225,28 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         await self.conn.execute('CREATE EXTENSION pg_trgm')
         await self.conn.execute('''CREATE TABLE watchlist_entities(source_type text,entity_id text,entity_schema text,
             name text,name_norm text,birth_date date,dataset text,regime text,raw_json jsonb)''')
-        records=[{'id':'p1','name':'Jane Smith','schema':'Person','source_type':'peps','dataset':'Fixture PEP'},
+        records=[{'id':'p1','name':'Jane Smith','schema':'Person','source_type':'sanctions','dataset':'Fixture sanctions'},
                  {'id':'s1','name':'Other Subject','schema':'Person','source_type':'sanctions','dataset':'Fixture sanctions'}]
         for item in records:
             await self.conn.execute('''INSERT INTO watchlist_entities(source_type,entity_id,entity_schema,name,name_norm,dataset,raw_json)
                 VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',item['source_type'],item['id'],item['schema'],item['name'],
                 item['name'].lower(),item['dataset'],json.dumps(item))
         manifest={'version':'fixture','ingested_at':datetime.now(timezone.utc).isoformat(),
-                  'list_counts':{k:1 for k in ('UK','UN','EU','OFAC','PEP')}}
+                  'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
         await self.conn.execute("INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=excluded.manifest",json.dumps(manifest))
         args={'name':'Jane Smith','dob':None,'country':None,'entity_type':'Person','backend':'postgres_beta'}
         result=await screen(self.conn,args,'evidence-v8')
-        self.assertTrue(result['Is PEP'])
+        self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(result['Source Coverage']['version'],'fixture')
         report=await execute(self.conn,plan,'evidence-v8')
         self.assertEqual(report['status'],'complete')
-        self.assertTrue(await self.conn.fetchval("SELECT pep_flag FROM screened_entities WHERE entity_key='entity'"))
+        self.assertEqual(await self.conn.fetchval("SELECT status FROM screened_entities WHERE entity_key='entity'"),'Fail Sanction')
         frame=pd.DataFrame(records)
         frame.attrs['source_manifest']=manifest
         args['backend']='original'
         with patch('utils.get_opensanctions_df',return_value=frame):
             result=await screen(self.conn,args,'evidence-v8')
-        self.assertTrue(result['Is PEP'])
+        self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(result['Screening Inputs']['backend'],'original')
         self.assertEqual(result['Source Coverage']['version'],'fixture')
 
@@ -281,7 +281,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         await self.conn.execute('CREATE EXTENSION pg_trgm')
         await self.conn.execute('CREATE TABLE watchlist_entities(source_type text,raw_json jsonb)')
         manifest={'version':'fixture','ingested_at':datetime.now(timezone.utc).isoformat(),
-                  'list_counts':{k:1 for k in ('UK','UN','EU','OFAC','PEP')}}
+                  'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
         await self.conn.execute("INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=excluded.manifest",json.dumps(manifest))
         await self.conn.execute("INSERT INTO watchlist_entities VALUES('sanctions',$1::jsonb)",json.dumps({'aliases':'"John; Smith"'}))
         await self.conn.execute("INSERT INTO watchlist_entities VALUES('peps',$1::jsonb)",json.dumps({'aliases':'"unclosed;name'}))

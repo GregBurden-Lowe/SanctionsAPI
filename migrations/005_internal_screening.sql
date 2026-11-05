@@ -58,7 +58,7 @@ BEGIN
     UPDATE screened_entities SET review_decision=decision,review_status='COMPLETED',
       review_outcome=saved.outcome,review_notes=saved.notes,review_completed_by=saved.actor,
       review_completed_at=saved.decided_at,status='Cleared - False Positive',risk_level='Cleared',
-      uk_sanctions_flag=false,pep_flag=false,manual_override_stale=false WHERE entity_key=target_key;
+      uk_sanctions_flag=false,manual_override_stale=false WHERE entity_key=target_key;
     RETURN decision;
 END $$;
 CREATE TABLE IF NOT EXISTS screening_monitoring_items (

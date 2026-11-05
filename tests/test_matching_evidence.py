@@ -160,13 +160,12 @@ class MatchingEvidenceTests(unittest.TestCase):
         self.assertTrue(result['Candidate Evidence Summary']['display_truncated'])
         self.assertEqual(result['Candidate Evidence'][0]['dob_assessment'], 'exact')
 
-    def test_dual_merge_keeps_pep_and_sanctions_evidence(self):
-        pep = row(); pep['source_type'] = 'peps'
-        person = evaluate([pep])
+    def test_dual_merge_keeps_person_and_organisation_evidence(self):
+        person = evaluate([row()])
         organisation = row('Example Ltd'); organisation['schema'] = 'Organization'
         org = evaluate([organisation], 'Example Ltd', entity_type='Organization')
-        result = _merge_dual_type_results(person, org, name='Example Ltd', submitted_entity_type='Person', pep_checked=True)
-        self.assertTrue(result['Is PEP']); self.assertTrue(result['Is Sanctioned'])
+        result = _merge_dual_type_results(person, org, name='Example Ltd', submitted_entity_type='Person')
+        self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(len(result['Candidate Evidence']), 2)
 
     def test_parquet_uses_same_evidence(self):

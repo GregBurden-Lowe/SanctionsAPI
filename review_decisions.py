@@ -51,7 +51,6 @@ async def write_decision(conn, row, actor, outcome, notes, decision_type='analys
         status=CASE WHEN $6 THEN 'Cleared - False Positive' ELSE status END,
         risk_level=CASE WHEN $6 THEN 'Cleared' ELSE risk_level END,
         uk_sanctions_flag=CASE WHEN $6 THEN false ELSE uk_sanctions_flag END,
-        pep_flag=CASE WHEN $6 THEN false ELSE pep_flag END,
         manual_override_uk_hash=CASE WHEN $6 THEN screened_against_uk_hash ELSE manual_override_uk_hash END,
         manual_override_stale=false
         WHERE entity_key=$1''', row['entity_key'], json.dumps(decision), outcome, notes, actor, false_positive)

@@ -14,7 +14,7 @@ BASE = os.environ.get("SANCTIONS_API_BASE", "http://127.0.0.1:8000")
 # Expected response keys from POST /opcheck (frozen contract)
 OPCHECK_KEYS = frozenset({
     "Match Found", "Risk Level", "Confidence", "Score", "Top Matches",
-    "Check Summary", "Is Sanctioned", "Is PEP", "Sanctions Name", "Birth Date",
+    "Check Summary", "Is Sanctioned", "Sanctions Name", "Birth Date",
     "Regime", "Position", "Topics",
 })
 

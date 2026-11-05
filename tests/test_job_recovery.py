@@ -21,7 +21,7 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         from datetime import datetime, timezone
         import pandas as pd
         self.source_manifest = {'version':'test-source', 'ingested_at':datetime.now(timezone.utc).isoformat(),
-            'list_counts':{k:1 for k in ('UK','UN','EU','OFAC','PEP')}}
+            'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
         source_frame = pd.DataFrame()
         source_frame.attrs['source_manifest'] = self.source_manifest
         for mocked in (patch('utils.get_opensanctions_df', return_value=source_frame),
