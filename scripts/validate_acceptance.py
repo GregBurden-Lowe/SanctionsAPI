@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import asyncpg
 import pyarrow.parquet as pq
-from screening_policy import run_postgres_check, run_parquet_check
+from screening_policy import run_postgres_check
 from utils import _normalize_text, stamp_screening_result, get_matching_config
 from scripts.rehearse_history_migration import local_dsn
 
@@ -70,40 +70,7 @@ def outcome(result):
     return 'no_potential_match'
 
 
-def compare_backends(postgres, parquet):
-    """Compare complete displayed candidates, not just the overall outcome.
-
-    Use provider IDs when available and source evidence hashes for snapshots
-    without IDs. The replay's synthetic IDs are not provider IDs.
-    """
-    if postgres.get('outcome') == 'incomplete' or parquet.get('outcome') == 'incomplete':
-        return {'status': 'incomplete', 'reason': 'At least one backend did not complete.'}
-    results = [postgres.get('result', {}), parquet.get('result', {})]
-    if any(r.get('Candidate Evidence Summary', {}).get('display_truncated') for r in results):
-        return {'status': 'incomplete', 'reason': 'Displayed candidate evidence was truncated.'}
-    def candidates(result):
-        items = result.get('Candidate Evidence', [])
-        if any((not item.get('record_id') or str(item['record_id']).startswith('snapshot-row-'))
-               and not item.get('source_evidence_hash') for item in items):
-            return None
-        def key(item):
-            record_id = str(item.get('record_id') or '')
-            identity = ('id', record_id) if record_id and not record_id.startswith('snapshot-row-') else ('hash', item.get('source_evidence_hash'))
-            return (identity, item.get('entity_type'), item.get('disposition'), item.get('matched_name'), item.get('name_score'))
-        return Counter(map(key, items))
-    pg, pq = map(candidates, results)
-    if pg is None or pq is None:
-        return {'status': 'incomplete', 'reason': 'A candidate lacks a usable identity.'}
-    def entries(counter):
-        return [dict(identity_type=k[0][0], identity=k[0][1], entity_type=k[1], disposition=k[2],
-                     matched_name=k[3], name_score=k[4], count=count)
-                for k, count in sorted(counter.items(), key=lambda item: repr(item[0]))]
-    return {'status': 'agree' if pg == pq and postgres['outcome'] == parquet['outcome'] else 'different',
-            'postgres_only': entries(pg - pq), 'parquet_only': entries(pq - pg),
-            'outcomes_agree': postgres['outcome'] == parquet['outcome']}
-
-
-async def replay(pack, snapshot, output, parquet_count, only_new_against=None):
+async def replay(pack, snapshot, output, only_new_against=None):
     if output.resolve().is_relative_to(ROOT):
         raise ValueError('Private case reports must be outside the repository')
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -185,40 +152,9 @@ async def replay(pack, snapshot, output, parquet_count, only_new_against=None):
             results.append(entry)
             write_json(output/'results.json',results)
             print(f'Postgres {index}/{len(cases)}: {entry["postgres"]["outcome"]}',flush=True)
-        # Select discrepancies/incomplete cases first, then balance reviewed and unreviewed cases.
-        selected = [r for r in results if r['postgres']['outcome']=='incomplete' or
-                    (r['category']=='cleared_unreviewed' and r['postgres']['outcome']!='no_potential_match')]
-        remainder = [r for r in results if r not in selected]
-        groups = [[r for r in remainder if r['category']==group] for group in sorted({r['category'] for r in remainder})]
-        while any(groups):
-            for group in groups:
-                if group:
-                    selected.append(group.pop(0))
-        selected = selected[:parquet_count]
-        # Full-snapshot Parquet uses the same public matcher, with logging disabled.
-        from functools import partial
-        from utils import perform_opensanctions_check
-        matcher = partial(perform_opensanctions_check, parquet_path=str(snapshot))
-        for index, entry in enumerate(selected,1):
-            started = time.perf_counter()
-            try:
-                args, _ = inputs_for(entry)
-                result = run_parquet_check(**args, matcher=matcher, log_search=False)
-                stamp_screening_result(result, **args, backend='original')
-                entry['parquet'] = {'outcome':outcome(result), 'result':result}
-                entry['backend_outcomes_agree'] = entry['postgres']['outcome']==outcome(result)
-            except Exception as exc:
-                entry['parquet'] = {'outcome':'incomplete','error_type':type(exc).__name__,'message':str(exc)}
-            entry['parquet']['seconds'] = round(time.perf_counter()-started,3)
-            entry['candidate_comparison'] = compare_backends(entry['postgres'], entry['parquet'])
-            write_json(output/'results.json',results)
-            print(f'Parquet {index}/{len(selected)}: {entry["parquet"]["outcome"]}',flush=True)
         summary['postgres_by_category'] = {category:dict(Counter(r['postgres']['outcome'] for r in results if r['category']==category)) for category in actual_counts}
-        summary['parquet_replayed'] = len(selected)
-        summary['backend_disagreements'] = sum(r.get('backend_outcomes_agree') is False for r in results)
-        summary['candidate_comparisons'] = dict(Counter(r['candidate_comparison']['status'] for r in selected))
         from acceptance_metrics import score_cases
-        summary['quality_metrics'] = {backend:score_cases(results, backend) for backend in ('postgres','parquet')}
+        summary['quality_metrics'] = {'postgres':score_cases(results, 'postgres')}
         summary['status'] = 'diagnostic_replay_complete'
     finally:
         if conn: await conn.close()
@@ -237,9 +173,6 @@ if __name__ == '__main__':
     parser.add_argument('--pack',type=Path,required=True)
     parser.add_argument('--snapshot',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--parquet-count',type=int,default=10)
     parser.add_argument('--only-new-against',type=Path,help='Earlier complete pack: skip only unchanged parsed cases including acceptance fields')
     args = parser.parse_args()
-    if not 0<=args.parquet_count<=1000:
-        parser.error('--parquet-count must be 0..1000')
-    asyncio.run(replay(args.pack,args.snapshot,args.output,args.parquet_count,args.only_new_against))
+    asyncio.run(replay(args.pack,args.snapshot,args.output,args.only_new_against))

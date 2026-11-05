@@ -214,13 +214,12 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(got['Screening Inputs']['backend'],'postgres_beta')
             self.assertTrue(pg.await_args.kwargs['require_assurance'])
         inp['backend']='original'
-        with patch('scripts.execute_release_rescreen.run_parquet_check',return_value=_empty_no_match_result('fixture')) as pq:
+        with patch('scripts.execute_release_rescreen.run_postgres_check',AsyncMock(return_value=_empty_no_match_result('fixture'))) as pg:
             got=await screen(self.conn,inp,'evidence-v8')
-            self.assertEqual(got['Screening Inputs']['backend'],'original')
-            self.assertTrue(pq.call_args.kwargs['require_assurance'])
+            self.assertEqual(got['Screening Inputs']['backend'],'postgres_beta')
+            self.assertTrue(pg.await_args.kwargs['require_assurance'])
 
-    async def test_real_postgres_and_parquet_matchers_use_assured_sources(self):
-        import pandas as pd
+    async def test_real_postgres_matcher_uses_assured_sources(self):
         plan,_=await self.seed(references=('REF-1',))
         await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
         await self.conn.execute('''CREATE TABLE watchlist_entities(source_type text,entity_id text,entity_schema text,
@@ -241,14 +240,6 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         report=await execute(self.conn,plan,'evidence-v8')
         self.assertEqual(report['status'],'complete')
         self.assertEqual(await self.conn.fetchval("SELECT status FROM screened_entities WHERE entity_key='entity'"),'Fail Sanction')
-        frame=pd.DataFrame(records)
-        frame.attrs['source_manifest']=manifest
-        args['backend']='original'
-        with patch('utils.get_opensanctions_df',return_value=frame):
-            result=await screen(self.conn,args,'evidence-v8')
-        self.assertTrue(result['Is Sanctioned'])
-        self.assertEqual(result['Screening Inputs']['backend'],'original')
-        self.assertEqual(result['Source Coverage']['version'],'fixture')
 
     async def test_uncorroborated_backend_mismatch_is_reported(self):
         await self.seed(references=('REF-1',),backend='postgres_beta')

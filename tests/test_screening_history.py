@@ -4,14 +4,15 @@ import json
 import os
 import unittest
 from uuid import uuid4
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pandas as pd
 import asyncpg
 import api_server
 import screening_db
 import screening_history
-from utils import (ScreeningUnavailableError, perform_opensanctions_check,
+from tests.worker_fixtures import postgres_job
+from utils import (ScreeningUnavailableError,
                    screening_fingerprint, stamp_screening_result, _empty_no_match_result)
 
 
@@ -20,16 +21,6 @@ def sample():
 
 
 class ScreeningSafetyTests(unittest.TestCase):
-    def test_empty_watchlist_is_not_clear(self):
-        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame()):
-            with self.assertRaises(ScreeningUnavailableError):
-                perform_opensanctions_check('Jane Smith', None)
-
-    def test_watchlist_without_sanctions_rows_is_not_clear(self):
-        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame({'source_type': ['peps']})):
-            with self.assertRaises(ScreeningUnavailableError):
-                perform_opensanctions_check('Jane Smith', None)
-
     def test_fingerprint_preserves_matching_inputs(self):
         fp = lambda name='Jane A Smith', country='UK', dob='01-02-1980', backend='original': screening_fingerprint(name, dob, country, 'Person', backend)
         self.assertEqual(fp(), fp(dob='1980-02-01'))
@@ -45,9 +36,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         import pandas as pd
         self.source_manifest = {'version':'test-source', 'ingested_at':datetime.now(timezone.utc).isoformat(),
             'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
-        source_frame = pd.DataFrame()
-        source_frame.attrs['source_manifest'] = self.source_manifest
-        for mocked in (patch('utils.get_opensanctions_df', return_value=source_frame),
+        for mocked in (patch('screening_worker.current_postgres_manifest', return_value=self.source_manifest),
                        patch('source_assurance.parquet_manifest', return_value=self.source_manifest),
                        patch.dict(os.environ, {'SCREENING_MONITORING_ENABLED':'false'})):
             mocked.start()
@@ -120,12 +109,12 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_result_does_not_follow_later_entity_changes(self):
         async with self.pool.acquire() as conn:
             job = await screening_db.enqueue_job(conn, 'queued-key', 'Queued Ltd', None, 'UK', 'Organization', 'Alice', 'BATCH-1', 'Client Onboarding')
-            result = stamp_screening_result(sample(), 'Queued Ltd', None, 'UK', 'Organization', 'worker-original')
+            result = stamp_screening_result(sample(), 'Queued Ltd', None, 'UK', 'Organization', 'postgres_beta')
             async with conn.transaction():
                 await screening_db.upsert_screening(conn, 'queued-key', 'Queued Ltd', 'queued ltd', None, 'UK', 'Organization', 'Alice', 'BATCH-1', 'Client Onboarding', result)
                 await conn.execute("UPDATE screening_jobs SET status='completed', finished_at=now(), run_id=$2::uuid WHERE job_id=$1::uuid", job, result['run_id'])
             original_run = result['run_id']
-            other = stamp_screening_result(sample(), 'Queued Ltd', None, 'US', 'Organization', 'worker-original')
+            other = stamp_screening_result(sample(), 'Queued Ltd', None, 'US', 'Organization', 'postgres_beta')
             other['Check Summary']['Status'] = 'Fail Sanction'
             await screening_db.upsert_screening(conn, 'queued-key', 'Queued Ltd', 'queued ltd', None, 'US', 'Organization', 'Bob', 'BATCH-2', 'Client Onboarding', other)
             saved_job = await screening_db.get_job_status(conn, job)
@@ -161,7 +150,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         worker_dsn = make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)
         async with self.pool.acquire() as conn:
             job = await screening_db.enqueue_job(conn, 'worker-key', 'Worker Ltd', None, 'UK', 'Organization', 'Alice', 'WORKER-1', 'Client Onboarding')
-        with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('utils.perform_opensanctions_check', return_value=sample()) as matcher, patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+        with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('screening_worker.run_postgres_job', new=postgres_job(matcher := Mock(return_value=sample()), self.source_manifest)), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 screening_worker.main()
             self.assertEqual(matcher.call_count, 2)
@@ -183,7 +172,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         worker_dsn = make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)
         async with self.pool.acquire() as conn:
             job = await screening_db.enqueue_job(conn, 'worker-key', 'Worker Ltd', None, 'UK', 'Organization', 'Alice', 'WORKER-1', 'Client Onboarding')
-        with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('utils.perform_opensanctions_check', return_value={**sample(), 'Is Sanctioned': True, 'Match Found': True, 'Risk Level': 'High Risk'}) as matcher, patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+        with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('screening_worker.run_postgres_job', new=postgres_job(matcher := Mock(return_value={**sample(), 'Is Sanctioned': True, 'Match Found': True, 'Risk Level': 'High Risk'}), self.source_manifest)), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 screening_worker.main()
             self.assertEqual(matcher.call_count, 2)
@@ -238,7 +227,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         import csv
         import tempfile
         from pathlib import Path
-        from utils import sync_watchlist_entities_postgres, perform_postgres_watchlist_check, perform_opensanctions_check, ScreeningUnavailableError
+        from utils import sync_watchlist_entities_postgres, perform_postgres_watchlist_check, ScreeningUnavailableError
         import pandas as pd
         async with self.pool.acquire() as conn:
             await conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
@@ -256,9 +245,6 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(pg['Match Found'])
                 self.assertEqual(pg['Candidate Evidence'][0]['dob_assessment'], 'compatible')
                 self.assertEqual(pg['Candidate Evidence'][0]['country_assessment'], 'conflicting')
-                with patch('utils.get_opensanctions_df', return_value=pd.DataFrame([{**rows[0], 'source_type':'sanctions'}])):
-                    parquet = perform_opensanctions_check('Jane Jones', '1980-06-15', country='UK', log_search=False, include_peps=False)
-                self.assertEqual(pg['Candidate Evidence'], parquet['Candidate Evidence'])
                 excluded = await perform_postgres_watchlist_check(conn, 'Jane Smith', '1970-01-01', log_search=False, include_peps=False)
                 self.assertFalse(excluded['Match Found'])
                 self.assertEqual(excluded['Candidate Evidence'][0]['disposition'], 'excluded')
@@ -406,7 +392,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         for error, expected in [(ScreeningUnavailableError('Missing source'), 'failed'), (TimeoutError('timeout'), 'failed'), (KeyboardInterrupt(), 'running')]:
             async with self.pool.acquire() as conn:
                 job = await screening_db.enqueue_job(conn, 'failure-'+str(uuid4()), 'Jane Smith', None, 'UK', 'Person', 'Fixture', 'FAILURE-TEST', 'Client Onboarding')
-            with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('utils.perform_opensanctions_check', side_effect=error), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+            with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('screening_worker.run_postgres_job', side_effect=error), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     screening_worker.main()
             async with self.pool.acquire() as conn:
@@ -427,48 +413,41 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_worker_and_interactive_policy_find_wrong_type_match(self):
         import screening_worker
-        from screening_policy import run_parquet_check
-        from psycopg2.extensions import make_dsn
-        rows = pd.DataFrame([
-            dict(id='company', name='Hyde & Partners Ltd', schema='Organization', source_type='sanctions', dataset='OFAC'),
-            dict(id='pep', name='Unrelated Person', schema='Person', source_type='peps', dataset='PEP'),
-        ])
+        from screening_policy import run_postgres_check
+        job, env = await self.prepare_postgres_worker(name='Hyde and Partners')
         async with self.pool.acquire() as conn:
-            job = await screening_db.enqueue_job(conn, 'policy-parity', 'Hyde and Partners', None, 'UK', 'Person', 'Fixture', 'PARITY', 'Client Onboarding')
-        rows.attrs['source_manifest'] = self.source_manifest
-        with patch('utils.get_opensanctions_df', return_value=rows):
-            interactive = run_parquet_check(name='Hyde and Partners', dob=None, country='UK', entity_type='Person')
-            stamp_screening_result(interactive, 'Hyde and Partners', None, 'UK', 'Person', 'worker-original')
-            with patch.dict(os.environ, {'DATABASE_URL': make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)}), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
-                with self.assertRaises(KeyboardInterrupt):
-                    screening_worker.main()
+            await conn.execute("""INSERT INTO watchlist_entities VALUES('sanctions','company','Organization','Hyde & Partners Ltd',
+                'hyde partners ltd',NULL,'OFAC',NULL,'{}'::jsonb)""")
+        with patch.dict(os.environ, env), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                await asyncio.to_thread(screening_worker.main)
         async with self.pool.acquire() as conn:
+            interactive = await run_postgres_check(conn, name='Hyde and Partners', dob=None, country='UK', entity_type='Person')
+            stamp_screening_result(interactive, 'Hyde and Partners', None, 'UK', 'Person', 'postgres_beta')
             result = (await screening_db.get_job_status(conn,job))['result']
-            self.assertTrue(result['Is Sanctioned'])
-            self.assertTrue(result['Input Classification']['likely_misclassified'])
-            for key in ('Is Sanctioned','Candidate Evidence','Entity Type Checks','Input Classification'):
-                self.assertEqual(result[key],interactive[key])
+        self.assertTrue(result['Is Sanctioned'])
+        self.assertTrue(result['Input Classification']['likely_misclassified'])
+        for key in ('Is Sanctioned','Candidate Evidence','Entity Type Checks','Input Classification'):
+            self.assertEqual(result[key],interactive[key])
 
-    async def prepare_postgres_worker(self, manifest=None):
+    async def prepare_postgres_worker(self, manifest=None, name='Jane Smith'):
         async with self.pool.acquire() as conn:
             await conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
             await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text,
                 name text, name_norm text, birth_date date, dataset text, regime text, raw_json jsonb)''')
             await conn.execute("""INSERT INTO watchlist_entities VALUES('sanctions','listed','Person','Jane Smith','jane smith',
                 NULL,'OFAC',NULL,'{}'::jsonb)""")
-            await conn.execute('INSERT INTO watchlist_source_state VALUES(true,$1::jsonb)', json.dumps(manifest or self.source_manifest))
-            job = await screening_db.enqueue_job(conn, 'pg-worker', 'Jane Smith', None, 'UK', 'Person', 'Fixture', 'PG-1', 'Client Onboarding')
+            await conn.execute('INSERT INTO watchlist_source_state VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=EXCLUDED.manifest', json.dumps(manifest or self.source_manifest))
+            job = await screening_db.enqueue_job(conn, 'pg-worker', name, None, 'UK', 'Person', 'Fixture', 'PG-1', 'Client Onboarding')
         url = os.environ['SANCTIONS_TEST_ADMIN_DSN'].split('?')[0].rsplit('/', 1)[0] + '/' + self.database
-        return job, {'DATABASE_URL': url, 'SCREENING_WORKER_BACKEND': 'postgres'}
+        return job, {'DATABASE_URL': url}
 
-    async def test_postgres_worker_matches_interactive_and_never_reads_parquet(self):
+    async def test_worker_matches_interactive_screening(self):
         import screening_worker
         from screening_policy import run_postgres_check
-        from utils import worker_backend
         job, env = await self.prepare_postgres_worker()
         with patch.dict(os.environ, env), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt), \
-             patch('screening_worker.run_parquet_check', side_effect=AssertionError('Parquet used')), \
-             patch('utils.get_opensanctions_df', side_effect=AssertionError('Parquet used')):
+             patch('screening_worker.current_postgres_manifest', side_effect=lambda url: self.source_manifest):
             with self.assertRaises(KeyboardInterrupt):
                 await asyncio.to_thread(screening_worker.main)
             async with self.pool.acquire() as conn:
@@ -479,7 +458,7 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 for key in ('Is Sanctioned', 'Candidate Evidence', 'Entity Type Checks', 'Screening Fingerprint'):
                     self.assertEqual(saved[key], interactive[key])
                 self.assertEqual(saved['Source Coverage']['version'], 'test-source')
-                fingerprint = screening_fingerprint('Jane Smith', None, 'UK', 'Person', worker_backend())
+                fingerprint = screening_fingerprint('Jane Smith', None, 'UK', 'Person', 'postgres_beta')
                 self.assertIsNotNone(await screening_db.get_valid_screening(conn, 'pg-worker', fingerprint))
 
     async def test_postgres_worker_refuses_a_stale_snapshot(self):
@@ -502,14 +481,6 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, env), patch('screening_monitoring.parquet_manifest', side_effect=AssertionError('Parquet used')):
             async with self.pool.acquire() as conn:
                 self.assertIn((await tick(conn))['status'], {'running', 'completed'})
-
-    def test_worker_backend_defaults_to_parquet_and_rejects_unknown_values(self):
-        from utils import worker_backend
-        with patch.dict(os.environ):
-            os.environ.pop('SCREENING_WORKER_BACKEND', None)
-            self.assertEqual(worker_backend(), 'worker-original')
-        with patch.dict(os.environ, {'SCREENING_WORKER_BACKEND': 'sqlite'}), self.assertRaises(ScreeningUnavailableError):
-            worker_backend()
 
     async def test_idempotent_concurrent_http_submissions_and_payload_conflict(self):
         import httpx
@@ -574,20 +545,6 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval('SELECT count(*) FROM screened_entities'),0)
             self.assertEqual(await conn.fetchval('SELECT count(*) FROM screening_jobs'),0)
             self.assertEqual(await conn.fetchval('SELECT count(*) FROM screening_runs'),0)
-
-    async def test_queued_submission_replay_and_recovery_does_not_fail_job(self):
-        data=self.request(); data.search_backend='original'
-        with patch.dict(os.environ,{'OPCHECK_QUEUE_THRESHOLD':'0'}):
-            first=await api_server._check_opensanctions_impl(data,actor='alice',idempotency_key='queued')
-            second=await api_server._check_opensanctions_impl(data,actor='alice',idempotency_key='queued')
-        first_body=json.loads(first.body); second_body=json.loads(second.body)
-        self.assertEqual(first_body['job_id'],second_body['job_id'])
-        self.assertEqual(first_body['request_id'],second_body['request_id'])
-        async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE screening_requests SET expires_at=clock_timestamp()-interval '1 second'")
-            await screening_history.recover_expired(conn)
-            self.assertEqual(await conn.fetchval('SELECT status FROM screening_requests'),'queued')
-            self.assertEqual(await conn.fetchval('SELECT count(*) FROM screening_jobs'),1)
 
     async def test_run_and_request_response_commit_together(self):
         async with self.pool.acquire() as conn:

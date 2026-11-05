@@ -97,10 +97,10 @@ export function ScreeningAssurance() {
           <>
             {/* Backend status */}
             <div className="space-y-2">
-              <BackendRow label="Interactive screening" data={data.postgres} />
-              <BackendRow label="Background screening" data={data.parquet} />
+              <BackendRow label="Screening (PostgreSQL)" data={data.postgres} />
+              <BackendRow label="Snapshot file" data={data.parquet} />
               {versionMismatch && (
-                <ErrorBox message="The two screening backends are on different dataset versions. Refresh both before relying on consistent results." />
+                <ErrorBox message="The snapshot file and PostgreSQL are on different dataset versions. Refresh before relying on consistent results." />
               )}
               <p className="text-[11px] text-text-muted px-1">
                 Publication times are not verified by the current feed — freshness reflects ingestion time only.

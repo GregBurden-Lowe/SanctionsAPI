@@ -1,4 +1,4 @@
-from screening_policy import run_parquet_check, run_postgres_check, _merge_dual_type_results
+from screening_policy import run_postgres_check, _merge_dual_type_results
 # api_server.py
 
 from contextlib import asynccontextmanager
@@ -95,7 +95,6 @@ class SPAStaticFiles(StaticFiles):
         return full_path, stat_result
 
 from utils import (
-    perform_opensanctions_check,
     _normalize_dob,
     screening_fingerprint,
     stamp_screening_result,
@@ -103,7 +102,6 @@ from utils import (
     perform_postgres_watchlist_check,
     refresh_opensanctions_data,
     sync_own_watchlists_postgres,
-    worker_backend,
     build_uk_sanctions_snapshot_from_parquet,
     compute_uk_snapshot_delta,
     derive_entity_key,
@@ -392,7 +390,7 @@ class OpCheckRequest(BaseModel):
         "Ad-Hoc Compliance Review",
     ] = Field(..., description="Reason for check (required enum)")
     requestor: Optional[str] = Field(None, description="User performing the check (required)")
-    search_backend: Optional[str] = Field("postgres_beta", description="'postgres_beta' (default) or 'original' (parquet)")
+    search_backend: Optional[str] = Field("postgres_beta", description="Always 'postgres_beta'; retained for API compatibility.")
     retry_of: Optional[constr(pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")] = None
     rerun_entity_key: Optional[str] = Field(
         None,
@@ -1557,19 +1555,6 @@ async def cors_preflight():
     """Ensure CORS preflight (OPTIONS) returns 200 so browsers allow the request."""
     return {}
 
-def _run_check_sync(data: OpCheckRequest):
-    return run_parquet_check(name=data.name.strip(), dob=data.dob, country=data.country,
-        entity_type=data.entity_type, requestor=data.requestor, matcher=perform_opensanctions_check, log_search=True, require_assurance=True)
-
-
-def _opcheck_queue_threshold() -> int:
-    """Configurable queue pressure threshold; above this we enqueue instead of running sync. Default 5."""
-    try:
-        return max(0, int(os.environ.get("OPCHECK_QUEUE_THRESHOLD", "5")))
-    except (ValueError, TypeError):
-        return 5
-
-
 def _attach_entity_id(result: dict, entity_key: str) -> dict:
     """
     Dataverse-friendly response shape:
@@ -1678,10 +1663,10 @@ async def _execute_screening(data: OpCheckRequest):
     reason_for_check = data.reason_for_check
     search_backend = (data.search_backend or "postgres_beta").strip().lower()
     rerun_entity_key = (data.rerun_entity_key or "").strip() or None
-    if search_backend not in ("original", "postgres_beta"):
+    if search_backend != "postgres_beta":
         return JSONResponse(
             status_code=400,
-            content={"error": "invalid_search_backend", "message": "search_backend must be 'original' or 'postgres_beta'."},
+            content={"error": "invalid_search_backend", "message": "search_backend must be 'postgres_beta'."},
         )
     if rerun_entity_key:
         if entity_type_norm not in ("person", "organization"):
@@ -1720,69 +1705,16 @@ async def _execute_screening(data: OpCheckRequest):
                 content={"error": "rerun_name_mismatch", "message": "Name does not match the existing rerun_entity_key record."},
             )
 
-    if search_backend == "postgres_beta":
-        if pool is None:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "backend_unavailable", "message": "postgres_beta requires DATABASE_URL and watchlist tables."},
-            )
-        key_variants = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
-        entity_key_candidates = [f"{k}-pgb" for k in key_variants]
-        if rerun_entity_key:
-            entity_key_candidates = [rerun_entity_key]
-        entity_key = entity_key_candidates[0]
-        async with pool.acquire() as conn:
-            if not rerun_entity_key:
-                cached = None
-                cached_key = entity_key
-                for key_candidate in entity_key_candidates:
-                    cached = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, search_backend))
-                    if cached is not None:
-                        cached_key = key_candidate
-                        break
-                if cached is not None:
-                    logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
-                    return _attach_entity_id(cached, cached_key)
-
-            results = await _run_postgres_dual_check(
-                conn,
-                name=name,
-                dob=dob,
-                country=country,
-                entity_type=entity_type,
-                requestor=requestor,
-            )
-            stamp_screening_result(results, name, dob, country, entity_type, search_backend)
-            # Persist beta checks so Search database can find them by returned entity_key.
-            try:
-                latest_meta = await screening_db.get_latest_uk_hash(conn)
-                await screening_db.upsert_screening(
-                    conn,
-                    entity_key=entity_key,
-                    display_name=name,
-                    normalized_name=_normalize_text(name),
-                    date_of_birth=dob,
-                    country_input=country,
-                    entity_type=entity_type,
-                    requestor=requestor,
-                    business_reference=business_reference,
-                    reason_for_check=reason_for_check,
-                    result=results,
-                    screened_against_uk_hash=latest_meta.get("uk_hash"),
-                    screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
-                )
-            except Exception as e:
-                raise RuntimeError("Screening result could not be saved") from e
-        return _attach_entity_id(results, entity_key)
-
-    entity_key_candidates = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
+    if pool is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "backend_unavailable", "message": "postgres_beta requires DATABASE_URL and watchlist tables."},
+        )
+    key_variants = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
+    entity_key_candidates = [f"{k}-pgb" for k in key_variants]
     if rerun_entity_key:
         entity_key_candidates = [rerun_entity_key]
     entity_key = entity_key_candidates[0]
-    if pool is None:
-        # No DB: run check synchronously
-        return _attach_entity_id(_run_check_sync(data), entity_key)
-
     async with pool.acquire() as conn:
         if not rerun_entity_key:
             cached = None
@@ -1793,47 +1725,38 @@ async def _execute_screening(data: OpCheckRequest):
                     cached_key = key_candidate
                     break
             if cached is not None:
-                # Reuse always first, regardless of load
-                logger.info("screening reused (valid) entity_key=%s", cached_key[:16])
+                logger.info("postgres_beta screening reused (valid) entity_key=%s", cached_key[:16])
                 return _attach_entity_id(cached, cached_key)
 
-        # Queue pressure check: under threshold => sync; at or over => enqueue (graceful load protection)
-        count = await screening_db.get_pending_running_count(conn)
-        threshold = _opcheck_queue_threshold()
-        if not rerun_entity_key and count >= threshold:
-            job_id = await screening_db.enqueue_job(
-                conn, entity_key=entity_key, name=name, date_of_birth=dob,
-                country=country, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check,
-            )
-            logger.info(
-                "screening queued due to load job_id=%s entity_key=%s queue_depth=%s threshold=%s",
-                job_id, entity_key[:16], count, threshold,
-            )
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "status": "queued",
-                    "job_id": job_id,
-                    "entity_key": entity_key,
-                    "entity_id": entity_key,
-                    "message": "Screening queued (load protection). Poll GET /opcheck/jobs/{job_id} for outcome.",
-                },
-                headers={"Location": f"/opcheck/jobs/{job_id}"},
-            )
-
-    # Under threshold: run screening synchronously, then upsert
-    logger.info("synchronous screening chosen entity_key=%s queue_depth=%s threshold=%s", entity_key[:16], count, threshold)
-    results = await asyncio.to_thread(run_parquet_check, name=name, dob=dob, country=country, entity_type=entity_type,
-        requestor=requestor, matcher=perform_opensanctions_check, log_search=True, require_assurance=True)
-    stamp_screening_result(results, name, dob, country, entity_type, search_backend)
-    async with pool.acquire() as conn:
-        latest_meta = await screening_db.get_latest_uk_hash(conn)
-        await screening_db.upsert_screening(
-            conn, entity_key=entity_key, display_name=name, normalized_name=_normalize_text(name),
-            date_of_birth=dob, country_input=country, entity_type=entity_type, requestor=requestor, business_reference=business_reference, reason_for_check=reason_for_check, result=results,
-            screened_against_uk_hash=latest_meta.get("uk_hash"),
-            screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
+        results = await _run_postgres_dual_check(
+            conn,
+            name=name,
+            dob=dob,
+            country=country,
+            entity_type=entity_type,
+            requestor=requestor,
         )
+        stamp_screening_result(results, name, dob, country, entity_type, search_backend)
+        # Persist beta checks so Search database can find them by returned entity_key.
+        try:
+            latest_meta = await screening_db.get_latest_uk_hash(conn)
+            await screening_db.upsert_screening(
+                conn,
+                entity_key=entity_key,
+                display_name=name,
+                normalized_name=_normalize_text(name),
+                date_of_birth=dob,
+                country_input=country,
+                entity_type=entity_type,
+                requestor=requestor,
+                business_reference=business_reference,
+                reason_for_check=reason_for_check,
+                result=results,
+                screened_against_uk_hash=latest_meta.get("uk_hash"),
+                screened_against_refresh_run_id=latest_meta.get("refresh_run_id"),
+            )
+        except Exception as e:
+            raise RuntimeError("Screening result could not be saved") from e
     return _attach_entity_id(results, entity_key)
 
 
@@ -2766,7 +2689,7 @@ async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> d
 
     valid = None
     for key_candidate in entity_key_candidates:
-        valid = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, worker_backend()))
+        valid = await screening_db.get_valid_screening(conn, key_candidate, screening_fingerprint(name, dob, country, entity_type, 'postgres_beta'))
         if valid is not None:
             break
     if valid is not None:
@@ -2774,7 +2697,7 @@ async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> d
 
     for key_candidate in entity_key_candidates:
         job = await conn.fetchrow("SELECT job_id, name, date_of_birth, country, entity_type FROM screening_jobs WHERE entity_key=$1 AND status IN ('pending', 'running') ORDER BY created_at LIMIT 1", key_candidate)
-        if job and screening_fingerprint(job['name'], job['date_of_birth'], job['country'], job['entity_type'], worker_backend()) == screening_fingerprint(name, dob, country, entity_type, worker_backend()):
+        if job and screening_fingerprint(job['name'], job['date_of_birth'], job['country'], job['entity_type'], 'postgres_beta') == screening_fingerprint(name, dob, country, entity_type, 'postgres_beta'):
             # Lock prevents completion racing the attachment of this new request.
             async with conn.transaction():
                 pending = await conn.fetchrow("SELECT job_id FROM screening_jobs WHERE job_id=$1 AND status IN ('pending','running') FOR UPDATE", job['job_id'])

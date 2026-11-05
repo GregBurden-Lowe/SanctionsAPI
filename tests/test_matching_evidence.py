@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 import pandas as pd
 
-from utils import _evaluate_watchlist_rows, _identity_dob_evidence, _normalize_dob, _parse_aliases, perform_opensanctions_check, ScreeningUnavailableError
+from utils import _evaluate_watchlist_rows, _identity_dob_evidence, _normalize_dob, _parse_aliases, ScreeningUnavailableError
 from api_server import _merge_dual_type_results
 
 
@@ -167,13 +167,6 @@ class MatchingEvidenceTests(unittest.TestCase):
         result = _merge_dual_type_results(person, org, name='Example Ltd', submitted_entity_type='Person')
         self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(len(result['Candidate Evidence']), 2)
-
-    def test_parquet_uses_same_evidence(self):
-        rows = [row(birth_date='1980')]
-        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame(rows)):
-            result = perform_opensanctions_check('Jane Smith', '1980-06-15', include_peps=False, log_search=False)
-        self.assertEqual(result['Candidate Evidence'], evaluate(rows, dob='1980-06-15')['Candidate Evidence'])
-
     def test_query_dates_do_not_invent_precision(self):
         for raw in ('0000', '9999', '1980-02', 'today', '31-02-1980'):
             self.assertIsNone(_normalize_dob(raw))

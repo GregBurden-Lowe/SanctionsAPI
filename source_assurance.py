@@ -90,9 +90,9 @@ async def postgres_manifest(conn):
 
 def parquet_manifest(path=None):
     import pyarrow.parquet as pq
-    from utils import OSN_PARQUET
+    from utils import OWN_PARQUET
     try:
-        return decode((pq.read_schema(path or OSN_PARQUET).metadata or {}).get(METADATA_KEY))
+        return decode((pq.read_schema(path or OWN_PARQUET).metadata or {}).get(METADATA_KEY))
     except (FileNotFoundError, OSError, ValueError):
         return {}
 

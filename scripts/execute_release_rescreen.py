@@ -21,7 +21,7 @@ import asyncpg
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import screening_db
 from screening_guidance import describe_change
-from screening_policy import run_parquet_check, run_postgres_check
+from screening_policy import run_postgres_check
 from scripts.plan_release_rescreen import database_identity, make_plan, parse_time, review_fingerprint, write_private
 from utils import _empty_no_match_result, _normalize_text, stamp_screening_result
 
@@ -62,14 +62,11 @@ def valid_plan(plan):
 
 async def screen(conn, inputs, rules):
     args = {k:inputs.get(k) for k in ('name','dob','country','entity_type')}
-    if inputs['backend'] == 'postgres_beta':
-        result = await run_postgres_check(conn, **args, requestor=ACTOR, log_search=False, require_assurance=True)
-        backend = 'postgres_beta'
-    elif inputs['backend'] == 'original':
-        result = await asyncio.to_thread(run_parquet_check, **args, requestor=ACTOR, log_search=False, require_assurance=True)
-        backend = 'original'
-    else:
+    # Requests first screened on the retired Parquet route re-screen on PostgreSQL.
+    if inputs['backend'] not in ('postgres_beta', 'original'):
         raise ValueError('Unknown backend')
+    result = await run_postgres_check(conn, **args, requestor=ACTOR, log_search=False, require_assurance=True)
+    backend = 'postgres_beta'
     stamp_screening_result(result, **args, backend=backend)
     if result.get('Matching Rules Version') != rules:
         raise RuntimeError('Executed matching version does not match the requested release version')

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import asyncpg
 import pandas as pd
-from screening_policy import run_parquet_check, run_postgres_check
+from screening_policy import run_postgres_check
 from utils import _normalize_text, ScreeningUnavailableError, perform_postgres_watchlist_check
 
 CASES = json.loads((Path(__file__).parent / 'fixtures/policy_cases.json').read_text())
@@ -31,26 +31,8 @@ def assert_outcome(test, result, case):
             test.assertEqual(result['Candidate Evidence'][0][key], case[key], case['label'])
 
 
-class PolicyCorpusTests(unittest.TestCase):
-    def test_corpus_parquet(self):
-        for case in CASES:
-            with self.subTest(case=case['label']), patch('utils.get_opensanctions_df', return_value=pd.DataFrame(fixture(case))):
-                assert_outcome(self, run_parquet_check(**arguments(case)), case)
-
-    def test_missing_required_source_never_clears(self):
-        # Mirrors the worker: assurance is required, so rows without a complete manifest cannot clear.
-        partial = pd.DataFrame([dict(name='Unrelated', schema='Person', source_type='sanctions')])
-        partial.attrs['source_manifest'] = {'version': 'fixture', 'ingested_at': datetime.now(timezone.utc).isoformat(),
-                                            'list_counts': {'UK': 1, 'EU': 1, 'OFAC': 1}}
-        unverified = pd.DataFrame([dict(name='Unrelated', schema='Person', source_type='sanctions')])
-        for frame in (pd.DataFrame(), unverified, partial):
-            with self.subTest(rows=len(frame), manifest=bool(frame.attrs)), patch('utils.get_opensanctions_df', return_value=frame):
-                with self.assertRaises(ScreeningUnavailableError):
-                    run_parquet_check(name='Jane Smith', dob=None, country=None, entity_type='Person', require_assurance=True)
-
-
 @unittest.skipUnless(os.getenv('SANCTIONS_TEST_ADMIN_DSN'), 'Requires isolated local PostgreSQL')
-class BackendParityTests(unittest.IsolatedAsyncioTestCase):
+class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.admin = await asyncpg.connect(os.environ['SANCTIONS_TEST_ADMIN_DSN'])
         self.database = 'sanctions_parity_' + uuid4().hex
@@ -65,7 +47,7 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
         await self.admin.execute(f'DROP DATABASE "{self.database}"')
         await self.admin.close()
 
-    async def test_real_retrieval_matches_parquet_corpus(self):
+    async def test_real_retrieval_meets_the_policy_corpus(self):
         for case in CASES:
             with self.subTest(case=case['label']):
                 rows = fixture(case)
@@ -75,10 +57,6 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
                     [(r['source_type'],r['id'],r['schema'],r['name'],_normalize_text(r['name']),r['dataset'],json.dumps(r)) for r in rows])
                 pg = await run_postgres_check(self.conn, **arguments(case))
                 assert_outcome(self, pg, case)
-                with patch('utils.get_opensanctions_df', return_value=pd.DataFrame(rows)):
-                    parquet = run_parquet_check(**arguments(case))
-                for key in ('Match Found','Is Sanctioned','Candidate Evidence','Candidate Evidence Summary','Entity Type Checks','Input Classification'):
-                    self.assertEqual(pg[key], parquet[key], key)
 
     async def test_statement_timeout_propagates_as_incomplete(self):
         locker = await asyncpg.connect(os.environ['SANCTIONS_TEST_ADMIN_DSN'], database=self.database)
@@ -103,10 +81,7 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
             [(r['source_type'], r['id'], r['schema'], r['name'], _normalize_text(r['name']), r['dataset'], json.dumps(r)) for r in rows])
         args = dict(name='Ho Gyu Kim', dob=None, country=None, entity_type='Person')
         pg = await run_postgres_check(self.conn, **args)
-        with patch('utils.get_opensanctions_df', return_value=pd.DataFrame(rows)):
-            parquet = run_parquet_check(**args)
         self.assertEqual({c['record_id'] for c in pg['Candidate Evidence']}, {'primary', 'other', 'alias'})
-        self.assertEqual(pg['Candidate Evidence'], parquet['Candidate Evidence'])
         with self.assertRaises(ScreeningUnavailableError):
             await perform_postgres_watchlist_check(self.conn, 'Ho Gyu Kim', None, candidate_limit=1)
 

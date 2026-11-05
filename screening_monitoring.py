@@ -7,9 +7,7 @@ from source_assurance import decode, require_current, parquet_manifest, postgres
 
 async def tick(conn, batch_size=100, force=False):
     import screening_db
-    from utils import worker_backend
-    source = await postgres_manifest(conn) if worker_backend() == 'postgres_beta' else parquet_manifest()
-    coverage = require_current(source)
+    coverage = require_current(await postgres_manifest(conn))
     async with conn.transaction():
         if not await conn.fetchval('SELECT pg_try_advisory_xact_lock(720031005)'):
             return {'status': 'busy'}

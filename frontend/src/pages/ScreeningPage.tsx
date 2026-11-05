@@ -107,7 +107,7 @@ export function ScreeningPage() {
         business_reference: businessReferenceTrim,
         reason_for_check: reasonForCheck as (typeof REASON_FOR_CHECK_OPTIONS)[number],
         requestor: requestorTrim,
-        search_backend: retry?.inputs.search_backend || 'postgres_beta',
+        search_backend: 'postgres_beta',
         rerun_entity_key: retry?.inputs.rerun_entity_key,
         retry_of: retry?.request_id,
       }
@@ -389,7 +389,7 @@ export function ScreeningResultPage() {
           | 'Periodic Re-Screen'
           | 'Ad-Hoc Compliance Review',
         requestor: searchDetails.requestor,
-        search_backend: searchDetails.searchBackend === 'original' ? 'original' : 'postgres_beta',
+        search_backend: 'postgres_beta',
         rerun_entity_key: result.entity_key,
       })
       const data = await res.json().catch(() => ({}))

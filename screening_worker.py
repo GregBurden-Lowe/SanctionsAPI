@@ -2,14 +2,14 @@
 """
 Background worker: claims one screening job at a time, runs the check, upserts screened_entities.
 Run 1–2 instances (e.g. systemd or Docker) to keep concurrency low.
-Requires: DATABASE_URL, same codebase as API. SCREENING_WORKER_BACKEND selects parquet (default) or postgres.
+Requires: DATABASE_URL, same codebase as API.
 """
 import os
 import sys
 import json
 import logging
 from review_decisions import project_result
-from screening_policy import run_parquet_check, run_postgres_check
+from screening_policy import run_postgres_check
 import time
 from uuid import uuid4
 from job_recovery import Heartbeat, claim_lease, recover_expired, lock_owned_job, LostJobLease
@@ -59,14 +59,13 @@ def main(stop_event=None):
     stop_event = stop_event or threading.Event()
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result, worker_backend
+    from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result
 
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
         logger.error("DATABASE_URL not set")
         sys.exit(1)
-    backend = worker_backend()
-    use_postgres = backend == "postgres_beta"
+    backend = "postgres_beta"
 
     if os.environ.get('SANCTIONS_SCHEMA_MODE') == 'verify':
         import asyncio
@@ -78,17 +77,12 @@ def main(stop_event=None):
             connection = await asyncpg.connect(url, timeout=5)
             try:
                 await verify_schema(connection)
-                if use_postgres and not await connection.fetchval(
+                if not await connection.fetchval(
                         "SELECT EXISTS(SELECT 1 FROM watchlist_entities WHERE source_type='sanctions')"):
                     raise RuntimeError('Worker requires populated sanctions PostgreSQL data')
             finally:
                 await connection.close()
         asyncio.run(verify())
-        if not use_postgres:
-            from utils import get_opensanctions_df
-            data = get_opensanctions_df()
-            if data.empty or 'sanctions' not in set(data['source_type']):
-                raise RuntimeError('Worker requires populated sanctions Parquet data')
         Path('/tmp/screening-worker-ready').write_text(os.environ.get('RELEASE_ID', ''))
 
     poll_interval = max(2, int(os.environ.get("SCREENING_WORKER_POLL_SECONDS", "5")))
@@ -188,9 +182,9 @@ def main(stop_event=None):
                     )
                     existing_valid = cur.fetchone()
                 if existing_valid:
-                    from source_assurance import parquet_manifest, assess, decode
+                    from source_assurance import assess, decode
                     cached_engine = decode(existing_valid['result_json'])
-                    coverage = assess(current_postgres_manifest(url) if use_postgres else parquet_manifest())
+                    coverage = assess(current_postgres_manifest(url))
                     if coverage['status'] != 'current' or coverage.get('version') != cached_engine.get('Source Coverage', {}).get('version'):
                         existing_valid = None
                 if existing_valid and not force_rescreen:
@@ -238,7 +232,7 @@ def main(stop_event=None):
                 logger.info("Job %s: running check for %s", job_id, name[:50])
                 check = dict(name=name, dob=dob, country=country, entity_type=entity_type,
                              requestor=requestor, log_search=False, require_assurance=True)
-                result = run_postgres_job(url, **check) if use_postgres else run_parquet_check(**check)
+                result = run_postgres_job(url, **check)
 
                 stamp_screening_result(result, name, dob, country, entity_type, backend)
                 result['Review Business Reference'] = business_reference

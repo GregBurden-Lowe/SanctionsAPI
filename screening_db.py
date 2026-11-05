@@ -371,10 +371,8 @@ async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] 
     if not fingerprint or result.get("Screening Fingerprint") != fingerprint:
         return None
     if 'Source Coverage' in result:
-        from source_assurance import postgres_manifest, parquet_manifest, assess
-        backend = result.get('Screening Inputs', {}).get('backend')
-        current = await postgres_manifest(conn) if backend == 'postgres_beta' else parquet_manifest()
-        coverage = assess(current)
+        from source_assurance import postgres_manifest, assess
+        coverage = assess(await postgres_manifest(conn))
         if coverage['status'] != 'current' or coverage.get('version') != result['Source Coverage'].get('version'):
             return None
     result = project_result(result, row['review_decision'], stale=row['manual_override_stale'])

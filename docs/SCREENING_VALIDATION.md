@@ -1,3 +1,5 @@
+> Parquet screening was retired on 2026-11-05. This document records earlier evidence, and its Parquet comparisons and `scripts/benchmark_screening.py` no longer exist. See [matcher v2](MATCHING_V2.md).
+
 # Matching, consistency, performance and failure validation
 
 Local validation on 30 October 2026. No production data, provider calls, deployment or production migration.

@@ -1,14 +1,12 @@
 # Matcher v2
 
-Matcher v2 compares names word by word and uses a word index for candidate retrieval. It is off by default, and it changes who is alerted, so it must not be enabled without Compliance acceptance.
+Matcher v2 compares names word by word and uses name and word indexes for candidate retrieval. It is the production matcher. `SCREENING_MATCHER_VERSION` defaults to `v1` in code, and production sets `v2`.
 
-Set `SCREENING_MATCHER_VERSION=v2` to enable it. The default is `v1`, and any other value stops screening with no clearance. Results record `evidence-v9-matching-v2` as their rules version, which is part of the screening fingerprint, so earlier results are not reused.
+Any value other than `v1` or `v2` stops screening with no clearance. Results record `evidence-v9-matching-v2` as their rules version, which is part of the screening fingerprint, so earlier results are not reused.
 
-## Before enabling
+## Operating notes
 
-- **Move the worker to PostgreSQL first.** v2 applies only to the PostgreSQL path, and Parquet stays on `evidence-v8`. Enabling it earlier would run different rules for interactive and background screening.
-- **Build the index.** Install migration `007_name_token_index.sql`, then refresh the watchlist. If the index is missing or empty, v2 refuses to screen. It does not fall back to v1.
-- **Plan a re-screen.** Results produced under v1 remain as they are until they are screened again.
+If the name or word index is missing or empty, v2 refuses to screen. It does not fall back to v1. Each refresh rebuilds the indexes in the same transaction as the watchlist. Results produced under v1 remain as they are until screened again.
 
 ## What changes
 

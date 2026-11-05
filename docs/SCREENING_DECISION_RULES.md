@@ -1,3 +1,5 @@
+> Parquet screening was retired on 2026-11-05. PostgreSQL is the only screening route. Parquet remains the snapshot format, and references below to a Parquet route are historical.
+
 # Screening decision rules — evidence-v8
 
 This is the locally implemented matching stage following the history foundation. Production activation is a separate release step.

@@ -18,8 +18,8 @@ import pyarrow.parquet as pq
 import screening_db
 from source_assurance import assess, require_current, build_manifest, METADATA_KEY
 from screening_guidance import reusable_candidates, describe_change
-from screening_policy import run_parquet_check, run_postgres_check
-from utils import ScreeningUnavailableError, _evaluate_watchlist_rows, stamp_screening_result, get_opensanctions_df, clear_osn_cache
+from screening_policy import run_postgres_check
+from utils import ScreeningUnavailableError, _evaluate_watchlist_rows, stamp_screening_result
 from acceptance_metrics import score_cases
 from services import companies_house as ch
 
@@ -60,20 +60,6 @@ class PureImprovements(unittest.TestCase):
             path.write_text(path.read_text()+'Another,OFAC\n')
             self.assertNotEqual(first['version'],build_manifest(path)['version'])
             self.assertIsNone(first['source_published_at'])
-
-    def test_parquet_replacement_invalidates_cache_and_pins_metadata(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'watchlist.parquet'
-            def publish(version,name):
-                t=pa.Table.from_pylist([{'name':name,'schema':'Person','source_type':'sanctions'}])
-                t=t.replace_schema_metadata({METADATA_KEY:json.dumps(manifest(version)).encode()})
-                tmp=Path(folder)/'new.parquet'; pq.write_table(t,tmp); tmp.replace(path)
-            publish('one','One'); before=get_opensanctions_df(str(path))
-            publish('two','Two'); after=get_opensanctions_df(str(path))
-            self.assertEqual(before.attrs['source_manifest']['version'],'one')
-            self.assertEqual(after.attrs['source_manifest']['version'],'two')
-            self.assertEqual(after.iloc[0]['name'],'Two')
-        clear_osn_cache()
 
     def test_name_only_and_truncated_evidence_cannot_be_reused(self):
         self.assertTrue(reusable_candidates(result()))
@@ -150,7 +136,7 @@ class InternalDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_candidates_reuse_but_new_candidate_reopens(self):
         first=await self.save(); await self.dismiss()
         worker_result=result()
-        stamp_screening_result(worker_result,'Jane Smith','1980','UK','Person','worker-original')
+        stamp_screening_result(worker_result,'Jane Smith','1980','UK','Person','postgres_beta')
         second=await self.save(worker_result)
         self.assertFalse(second['Is Sanctioned'])
         self.assertTrue(second['Engine Result']['Is Sanctioned'])
@@ -185,7 +171,7 @@ class InternalDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_monitoring_paginates_population_and_retains_pending_work(self):
         from screening_monitoring import tick
         for i in range(3): await self.save(key=f'subject-{i}')
-        with patch('screening_monitoring.parquet_manifest',return_value=manifest()):
+        with patch('screening_monitoring.postgres_manifest',AsyncMock(return_value=manifest())):
             first=await tick(self.conn,batch_size=1)
             self.assertEqual(first['queued'],1)
             self.assertEqual(first['remaining'],3)
@@ -288,7 +274,7 @@ class InternalDatabaseTests(unittest.IsolatedAsyncioTestCase):
         from screening_monitoring import tick
         await self.save()
         job=await screening_db.enqueue_job(self.conn,'subject','Jane Smith','1980','UK','Person','fixture','POL-1','Client Onboarding')
-        with patch('screening_monitoring.parquet_manifest',return_value=manifest()):
+        with patch('screening_monitoring.postgres_manifest',AsyncMock(return_value=manifest())):
             first=await tick(self.conn)
             self.assertEqual(first['queued'],0)
             self.assertEqual(first['remaining'],1)

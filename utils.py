@@ -2,12 +2,10 @@
 
 import os
 import csv
-import time
 import json
 import hashlib
 import re
 from datetime import datetime, date
-from functools import lru_cache
 from typing import Optional, List, Tuple, Dict, Any, Set
 
 import requests
@@ -22,7 +20,6 @@ from rapidfuzz import fuzz
 
 DATA_DIR = "data"
 OWN_PARQUET = os.path.join(DATA_DIR, "watchlists.parquet")       # self-scraped combined watchlist
-OSN_PARQUET = OWN_PARQUET                                          # kept for backward compat
 MATCHING_CONFIG_PATH = os.path.join(DATA_DIR, "matching_config.json")
 
 # OpenSanctions URL — kept for reference; no longer downloaded at runtime.
@@ -521,7 +518,6 @@ def refresh_opensanctions_data():
             os.unlink(tmp_path)
     print(f"[Watchlists] Parquet saved -> {OWN_PARQUET}")
 
-    clear_osn_cache()
 
 
 def _parse_birth_date_for_db(raw_value: str) -> Optional[date]:
@@ -921,84 +917,8 @@ def build_uk_sanctions_snapshot_from_parquet(
     return {"uk_hash": digest.hexdigest(), "row_count": len(entries), "entries": entries}
 
 
-# =============================================================================
-# Loading & caching
-# =============================================================================
-
-def get_opensanctions_df(parquet_path: str = OSN_PARQUET):
-    # Atomic replacement changes inode; every process observes updates without a restart.
-    try:
-        stat = os.stat(parquet_path)
-        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    except FileNotFoundError:
-        signature = None
-    return _load_opensanctions_df(parquet_path, signature)
-
-
-@lru_cache(maxsize=2)
-def _load_opensanctions_df(parquet_path: str, signature) -> pd.DataFrame:
-    """
-    Load parquet once, project required columns, and precompute normalized fields.
-    Uses Arrow-backed dtypes to keep memory small.
-    """
-    if not os.path.exists(parquet_path):
-        return pd.DataFrame(columns=OSN_COLS + ["name_norm", "birth_norm"])
-
-    table = pq.read_table(parquet_path)
-    have = set(table.column_names)
-    arrays, names = [], []
-    for c in OSN_COLS:
-        if c in have:
-            arrays.append(table[c])
-        else:
-            arrays.append(pa.array([""] * len(table)))
-        names.append(c)
-    table2 = pa.Table.from_arrays(arrays, names=names)
-
-    # Convert to pandas with ArrowDtype
-    df = table2.to_pandas(types_mapper=pd.ArrowDtype)
-
-    # Precompute normalized fields
-    df["name_norm"] = (
-        df["name"]
-        .astype("string[pyarrow]")
-        .fillna("")
-        .map(str)
-        .map(_normalize_text)
-    )
-    df["birth_norm"] = pd.to_datetime(
-        df["birth_date"].astype("string[pyarrow]").fillna(""),
-        errors="coerce",
-    ).dt.strftime("%Y-%m-%d")
-
-    df["source_type"] = df["source_type"].astype("string[pyarrow]").fillna("")
-    from source_assurance import METADATA_KEY, decode
-    df.attrs['source_manifest'] = decode((table.schema.metadata or {}).get(METADATA_KEY))
-    return df
-
-def clear_osn_cache():
-    _load_opensanctions_df.cache_clear()
-
-# =============================================================================
-# Matching
-# =============================================================================
-
 class ScreeningUnavailableError(RuntimeError):
     """Required source coverage is unavailable; never interpret this as no match."""
-
-
-def worker_backend() -> str:
-    """Backend recorded for background screening; shared by the API and the worker.
-
-    The API compares queued jobs and saved results against this value, so both
-    processes must read the same setting.
-    """
-    backends = {"parquet": "worker-original", "postgres": "postgres_beta"}
-    setting = os.getenv("SCREENING_WORKER_BACKEND", "parquet").strip().lower()
-    if setting not in backends:
-        raise ScreeningUnavailableError("Worker backend configuration is invalid. No clearance issued.")
-    return backends[setting]
-
 
 
 STANDARD_RULES_VERSION = "evidence-v8"
@@ -1588,22 +1508,6 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
                        'Risk Level': 'High Risk'})
         result['Check Summary'].update(Status='Fail Sanction', Source='; '.join(dict.fromkeys(e['dataset'] or source_label for e in sanctions)))
         result['Decision Explanation'] = 'Potential sanctions match; analyst verification is required.'
-    return result
-
-
-def perform_opensanctions_check(name, dob, country=None, entity_type="Person", parquet_path=OSN_PARQUET,
-                               requestor=None, log_search=True, include_peps=False, dataframe=None):
-    df = dataframe if dataframe is not None else get_opensanctions_df(parquet_path)
-    sources = set(df.get("source_type", pd.Series(dtype=str)).astype(str).str.lower())
-    if df.empty or "sanctions" not in sources:
-        raise ScreeningUnavailableError("Sanctions data is unavailable.")
-    # Filter before conversion to avoid duplicating the entire watchlist in memory.
-    schemas = df['schema'].fillna('').astype(str).str.lower()
-    allowed = ['organization', 'company', 'legalentity'] if entity_type.lower() == 'organization' else ['person']
-    selected = df[schemas.isin(allowed)]
-    result = _evaluate_watchlist_rows(name, dob, country, entity_type, (dict(zip(selected.columns, values)) for values in selected.itertuples(index=False, name=None)), 'OpenSanctions')
-    if log_search:
-        _append_search_to_csv(name, result['Check Summary'])
     return result
 
 

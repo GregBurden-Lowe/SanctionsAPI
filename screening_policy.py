@@ -77,29 +77,6 @@ def check_plan(name, dob, country, entity_type):
     ]
 
 
-def run_parquet_check(*, name, dob, country, entity_type, requestor=None, matcher=None, log_search=False, require_assurance=False):
-    from utils import perform_opensanctions_check, get_opensanctions_df
-    from source_assurance import require_current, assess
-    actual = matcher is None or matcher is perform_opensanctions_check
-    matcher = matcher or perform_opensanctions_check
-    plan = check_plan(name, dob, country, entity_type)
-    coverage = None
-    if actual:
-        frame = get_opensanctions_df()
-        manifest = frame.attrs.get('source_manifest', {})
-        coverage = require_current(manifest) if require_assurance else assess(manifest)
-        results = [matcher(**item, requestor=requestor, log_search=False, dataframe=frame) for item in plan]
-    else:
-        results = [matcher(**item, requestor=requestor, log_search=False) for item in plan]
-    merged = _merge_dual_type_results(*results, name=name, submitted_entity_type=entity_type)
-    if coverage is not None:
-        merged['Source Coverage'] = coverage
-    if log_search:
-        from utils import _append_search_to_csv
-        _append_search_to_csv(name, merged['Check Summary'])
-    return merged
-
-
 async def run_postgres_check(conn, *, name, dob, country, entity_type, requestor=None, matcher=None, log_search=False, require_assurance=False):
     from utils import perform_postgres_watchlist_check
     from source_assurance import require_current, assess, postgres_manifest

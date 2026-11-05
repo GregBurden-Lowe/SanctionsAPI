@@ -60,7 +60,7 @@ export interface OpCheckParams {
     | 'Periodic Re-Screen'
     | 'Ad-Hoc Compliance Review'
   requestor?: string | null
-  search_backend?: 'original' | 'postgres_beta'
+  search_backend?: 'postgres_beta'
   rerun_entity_key?: string | null
   retry_of?: string | null
 }

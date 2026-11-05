@@ -10,6 +10,7 @@ import asyncpg
 import psycopg2
 from psycopg2.extensions import make_dsn
 import screening_db
+from tests.worker_fixtures import postgres_job
 import screening_worker
 from job_recovery import claim_lease, renew_lease, recover_expired, lock_owned_job, LostJobLease, Heartbeat
 from utils import _empty_no_match_result
@@ -19,12 +20,9 @@ from utils import _empty_no_match_result
 class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from datetime import datetime, timezone
-        import pandas as pd
         self.source_manifest = {'version':'test-source', 'ingested_at':datetime.now(timezone.utc).isoformat(),
             'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
-        source_frame = pd.DataFrame()
-        source_frame.attrs['source_manifest'] = self.source_manifest
-        for mocked in (patch('utils.get_opensanctions_df', return_value=source_frame),
+        for mocked in (patch('screening_worker.current_postgres_manifest', return_value=self.source_manifest),
                        patch('source_assurance.parquet_manifest', return_value=self.source_manifest),
                        patch.dict(os.environ, {'SCREENING_MONITORING_ENABLED':'false'})):
             mocked.start()
@@ -56,7 +54,7 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         def match(**kwargs):
             stopping.set()
             return _empty_no_match_result('fixture')
-        with patch.dict(os.environ, {'DATABASE_URL':self.dsn}), patch('utils.perform_opensanctions_check',side_effect=match), \
+        with patch.dict(os.environ, {'DATABASE_URL':self.dsn}), patch('screening_worker.run_postgres_job',new=postgres_job(match,self.source_manifest)), \
              patch('screening_worker.time.sleep'):
             screening_worker.main(stopping)
         self.assertEqual(await self.conn.fetchval('SELECT status FROM screening_jobs WHERE job_id=$1::uuid',self.job),'completed')
@@ -134,12 +132,12 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.worker.commit()
 
     async def test_interrupted_job_completes_after_restart(self):
-        with patch.dict(os.environ,{'DATABASE_URL':self.dsn}), patch('utils.perform_opensanctions_check',side_effect=KeyboardInterrupt):
+        with patch.dict(os.environ,{'DATABASE_URL':self.dsn}), patch('screening_worker.run_postgres_job',side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 screening_worker.main()
         self.assertEqual(await self.conn.fetchval('SELECT status FROM screening_jobs'),'running')
         await self.expire()
-        with patch.dict(os.environ,{'DATABASE_URL':self.dsn}), patch('utils.perform_opensanctions_check',return_value=_empty_no_match_result('fixture')), patch('screening_worker.time.sleep',side_effect=KeyboardInterrupt):
+        with patch.dict(os.environ,{'DATABASE_URL':self.dsn}), patch('screening_worker.run_postgres_job',new=postgres_job(lambda **_: _empty_no_match_result('fixture'),self.source_manifest)), patch('screening_worker.time.sleep',side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 screening_worker.main()
         result=await screening_db.get_job_status(self.conn,self.job)
@@ -164,7 +162,7 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             nonlocal calls
             calls+=1
             return takeover(**kwargs) if calls==1 else _empty_no_match_result('fixture')
-        with patch.dict(os.environ,{'DATABASE_URL':self.dsn}), patch('utils.perform_opensanctions_check',side_effect=matcher), patch('screening_worker.time.sleep',side_effect=KeyboardInterrupt):
+        with patch.dict(os.environ,{'DATABASE_URL':self.dsn}), patch('screening_worker.run_postgres_job',new=postgres_job(matcher,self.source_manifest)), patch('screening_worker.time.sleep',side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 screening_worker.main()
         self.assertEqual(await self.conn.fetchval('SELECT status FROM screening_jobs'),'running')
