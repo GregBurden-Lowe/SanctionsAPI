@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 import unittest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, Mock
 
 import asyncpg
 import ai_triage
@@ -18,13 +18,60 @@ def recommendation(action='INVESTIGATE'):
         llm_model='test-model',llm_runtime='fixture',guardrail_overridden=False,guardrail_reasons=[])
 
 
+def many_candidates(count):
+    evidence=[{'name':f'Listed Person {i}','matched_name':f'Listed Person {i}','name_score':80,'birth_date':'1970','country':'Elsewhere',
+        'dataset':'Fixture','disposition':'potential_match','reasons':['long reason '*50],'source_evidence_hash':'x'*64} for i in range(count)]
+    return {'display_name':'Alice Smith','matched_name':'Listed Person 0','score':80,'source_label':'Fixture',
+        'result_json':{'Candidate Evidence':evidence,'Candidate Evidence Summary':{'potential_matches':count}}}
+
+
+class PromptTests(unittest.TestCase):
+    def test_prompt_stays_small_however_many_candidates_exist(self):
+        prompt=ai_triage._build_prompt(many_candidates(50))
+        self.assertLess(len(prompt),4000)
+        self.assertEqual(prompt.count('listed_name'),ai_triage.PROMPT_MAX_CANDIDATES)
+        self.assertIn('"candidates_not_shown": 45',prompt)
+
+    def test_long_fields_are_clipped(self):
+        candidate=many_candidates(5)
+        for item in candidate['result_json']['Candidate Evidence']:
+            item['name']='x'*5000
+        self.assertLess(len(ai_triage._build_prompt(candidate)),4000)
+
+    def test_strongest_candidates_are_shown_first(self):
+        candidate=many_candidates(6)
+        candidate['result_json']['Candidate Evidence'][5].update(name='Strongest Match',name_score=99)
+        self.assertIn('Strongest Match',ai_triage._build_prompt(candidate))
+
+    def test_clear_is_refused_when_a_candidate_was_not_shown(self):
+        action,overridden,reasons=ai_triage.apply_guardrails(many_candidates(6),'CLEAR')
+        self.assertEqual(action,'INVESTIGATE')
+        self.assertTrue(overridden)
+        self.assertIn('Not every potential match was shown to the model',reasons)
+
+    def test_clear_is_allowed_when_every_candidate_was_shown(self):
+        self.assertEqual(ai_triage.apply_guardrails(many_candidates(5),'CLEAR')[0],'CLEAR')
+
+    def test_candidates_beyond_saved_evidence_count_as_not_shown(self):
+        candidate=many_candidates(2)
+        candidate['result_json']['Candidate Evidence Summary']['potential_matches']=60
+        self.assertEqual(ai_triage.apply_guardrails(candidate,'CLEAR')[0],'INVESTIGATE')
+
+    def test_a_full_context_window_gives_no_recommendation(self):
+        response=Mock(status_code=200)
+        response.json.return_value={'done':True,'done_reason':'stop','prompt_eval_count':ai_triage.MODEL_CONTEXT_TOKENS,
+            'response':json.dumps({'recommended_action':'CLEAR','confidence':.9,'rationale_short':'Names differ.'})}
+        with patch('ai_triage.requests.post',return_value=response),self.assertRaisesRegex(ValueError,'context'):
+            ai_triage._call_ollama_json('prompt')
+
+
 class GuardrailTests(unittest.TestCase):
     def test_generation_is_bounded_and_complete_response_is_accepted(self):
         answer = {'recommended_action': 'CLEAR', 'confidence': .85, 'rationale_short': 'Names differ.'}
         with patch('ai_triage.requests.post') as post:
             post.return_value.json.return_value = {'done': True, 'done_reason': 'stop', 'response': json.dumps(answer)}
             self.assertEqual(ai_triage._call_ollama_json('test'), answer)
-            self.assertEqual(post.call_args.kwargs['json']['options']['num_predict'], 384)
+            self.assertEqual(post.call_args.kwargs['json']['options']['num_predict'], ai_triage.MODEL_MAX_OUTPUT_TOKENS)
             self.assertEqual(post.call_args.kwargs['json']['options']['num_thread'], 2)
 
     def test_truncated_or_invalid_response_cannot_produce_clearance(self):
