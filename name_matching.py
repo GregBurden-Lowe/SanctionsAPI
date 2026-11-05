@@ -26,6 +26,7 @@ MAX_EXTRA_TOKEN_PENALTY = 0.08     # keeps omitted patronymics from sinking a ma
 RARE_TOKEN_DOC_FREQUENCY = 30
 RETRIEVAL_TOKEN_SIMILARITY = 0.80  # looser than scoring: retrieval must favour recall
 RETRIEVAL_MIN_FUZZY_LENGTH = 4
+RETRIEVAL_UNCOMMON_DOC_FREQUENCY = 500  # one word this uncommon is enough to retrieve a candidate
 RETRIEVAL_LENGTH_TOLERANCE = 2
 MIN_TOKEN_WEIGHT = 0.2
 ALIGNED_ORG_SCORE = 90

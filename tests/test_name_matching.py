@@ -173,6 +173,17 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.check(name, entity_type)
                 self.assertIn(expected, [item['record_id'] for item in result['Candidate Evidence']])
 
+    async def test_one_uncommon_shared_word_is_enough_to_retrieve_a_candidate(self):
+        await self.load(self.FIXTURE)
+        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Tatiana Rotenberg', 'Person', None, 2000)
+        self.assertEqual([row['entity_id'] for row in rows], ['person'])
+
+    async def test_a_common_word_alone_does_not_retrieve_a_candidate(self):
+        await self.load(self.FIXTURE)
+        await self.conn.execute("UPDATE watchlist_tokens SET doc_frequency=5000 WHERE token='rotenberg'")
+        rows, _ = await utils._retrieve_candidates_v2(self.conn, 'Tatiana Rotenberg', 'Person', None, 2000)
+        self.assertEqual(rows, [])
+
     async def test_a_reload_replaces_the_index(self):
         await self.load(self.FIXTURE)
         await self.load(self.FIXTURE[:1])

@@ -1582,7 +1582,7 @@ def perform_opensanctions_check(name, dob, country=None, entity_type="Person", p
 
 async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
     """Fetch rows sharing enough similar words with the query, plus the query's word statistics."""
-    from name_matching import TokenStats, retrieval_plan, similar_tokens
+    from name_matching import RETRIEVAL_UNCOMMON_DOC_FREQUENCY, TokenStats, retrieval_plan, similar_tokens
 
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_tokens') IS NOT NULL") or \
             not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM watchlist_tokens)"):
@@ -1595,21 +1595,23 @@ async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
     stats = TokenStats(frequencies, total)
     if not plan.query_tokens:
         return [], stats
-    matched_tokens, matched_positions = [], []
+    matched_tokens, matched_positions, matched_uncommon = [], [], []
     for position in plan.informative:
         token = plan.query_tokens[position]
         nearby = await conn.fetch(
-            """SELECT token FROM watchlist_tokens WHERE token = $1 OR (length($1) >= 4 AND (token % $1 OR
+            """SELECT token, doc_frequency FROM watchlist_tokens WHERE token = $1 OR (length($1) >= 4 AND (token % $1 OR
                (left(token, 1) = left($1, 1) AND length(token) BETWEEN length($1) - 2 AND length($1) + 2)))""", token)
-        for match in similar_tokens(token, [r["token"] for r in nearby]):
+        frequency = {r["token"]: r["doc_frequency"] for r in nearby}
+        for match in similar_tokens(token, frequency):
             matched_tokens.append(match)
             matched_positions.append(position)
+            matched_uncommon.append(frequency[match] <= RETRIEVAL_UNCOMMON_DOC_FREQUENCY)
     candidate_ids = [r["entity_id"] for r in await conn.fetch(
         """SELECT t.entity_id FROM watchlist_name_tokens t
-           JOIN unnest($1::text[], $2::int[]) AS q(token, position) USING (token)
-           WHERE t.entity_kind = $3 GROUP BY t.entity_id
-           HAVING count(DISTINCT q.position) >= $4 LIMIT $5""",
-        matched_tokens, matched_positions, kind, plan.required_matches, limit + 1)]
+           JOIN unnest($1::text[], $2::int[], $3::boolean[]) AS q(token, position, uncommon) USING (token)
+           WHERE t.entity_kind = $4 GROUP BY t.entity_id
+           HAVING count(DISTINCT q.position) >= $5 OR bool_or(q.uncommon) LIMIT $6""",
+        matched_tokens, matched_positions, matched_uncommon, kind, plan.required_matches, limit + 1)]
     if len(candidate_ids) > limit:
         raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
     if full_dob and kind == "person":
