@@ -137,7 +137,7 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
             await admin.execute(f'CREATE DATABASE "{database}"')
             created = True
             conn = await asyncpg.connect(dsn, database=database)
-            await conn.execute('CREATE EXTENSION pg_trgm')
+            await conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
             await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text,
                 entity_schema text, name text, name_norm text, birth_date date, dataset text,
                 regime text, raw_json jsonb)''')

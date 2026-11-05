@@ -56,7 +56,7 @@ class BackendParityTests(unittest.IsolatedAsyncioTestCase):
         self.database = 'sanctions_parity_' + uuid4().hex
         await self.admin.execute(f'CREATE DATABASE "{self.database}"')
         self.conn = await asyncpg.connect(os.environ['SANCTIONS_TEST_ADMIN_DSN'], database=self.database)
-        await self.conn.execute('CREATE EXTENSION pg_trgm')
+        await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
         await self.conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text,
             name text, name_norm text, birth_date date, dataset text, regime text, raw_json jsonb)''')
 

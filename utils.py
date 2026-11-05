@@ -726,6 +726,7 @@ async def sync_own_watchlists_postgres(
     Drop-in replacement for sync_watchlist_entities_postgres using our own
     scraped data (UN, OFAC, UK, EU).
     """
+    from name_matching import name_tokens
     from source_assurance import parquet_manifest, require_current
 
     parquet_path = watchlists_parquet_path or OWN_PARQUET
@@ -779,6 +780,9 @@ async def sync_own_watchlists_postgres(
 
     counts: Dict[str, int] = {}
     batch: List[Tuple[Any, ...]] = []
+    token_rows: Set[Tuple[str, str, str]] = set()
+    name_rows: Set[Tuple[str, str, str]] = set()
+    token_frequency: Dict[str, int] = {}
 
     async with conn.transaction():
         await conn.execute(
@@ -814,6 +818,13 @@ async def sync_own_watchlists_postgres(
             entity_id = _safe_str(row.get("id")).strip() or hashlib.sha1(
                 f"{source_type}|{name_norm}|{dataset}|{birth_date or ''}".encode("utf-8")
             ).hexdigest()
+            if source_type == "sanctions":
+                entity_kind = "person" if entity_schema.lower() == "person" else "organization"
+                all_names = [name] + _parse_aliases(aliases_clean)
+                name_rows.update((norm, entity_kind, entity_id) for norm in map(_normalize_text, all_names) if norm)
+                for token in name_tokens(all_names):
+                    token_rows.add((token, entity_kind, entity_id))
+                    token_frequency[token] = token_frequency.get(token, 0) + 1
 
             raw_json = json.dumps(
                 {
@@ -858,6 +869,15 @@ async def sync_own_watchlists_postgres(
             raise ScreeningUnavailableError(
                 f"Refresh loaded {loaded_rows} of {expected_rows} snapshot rows; existing watchlist retained."
             )
+
+        if await conn.fetchval("SELECT to_regclass('public.watchlist_name_tokens') IS NOT NULL"):
+            await conn.execute("TRUNCATE TABLE watchlist_name_tokens, watchlist_tokens, watchlist_names")
+            await conn.copy_records_to_table("watchlist_names", records=list(name_rows),
+                                             columns=["name_norm", "entity_kind", "entity_id"])
+            await conn.copy_records_to_table("watchlist_tokens", records=list(token_frequency.items()),
+                                             columns=["token", "doc_frequency"])
+            await conn.copy_records_to_table("watchlist_name_tokens", records=list(token_rows),
+                                             columns=["token", "entity_kind", "entity_id"])
 
         await conn.execute(
             "INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) "
@@ -980,18 +1000,38 @@ def worker_backend() -> str:
     return backends[setting]
 
 
+
+STANDARD_RULES_VERSION = "evidence-v8"
+
+
+def active_matcher_version() -> str:
+    """The v2 matcher is opt-in; anything other than v1 or v2 stops screening."""
+    version = os.getenv("SCREENING_MATCHER_VERSION", "v1").strip().lower()
+    if version not in {"v1", "v2"}:
+        raise ScreeningUnavailableError("Matching configuration is invalid. No clearance issued.")
+    return version
+
+
+def rules_version_for(backend) -> str:
+    """v2 needs the PostgreSQL token index, so Parquet stays on the standard rules."""
+    if str(backend) == "postgres_beta" and active_matcher_version() == "v2":
+        from name_matching import MATCHER_RULES_VERSION
+        return MATCHER_RULES_VERSION
+    return STANDARD_RULES_VERSION
+
+
 def screening_fingerprint(name, dob, country, entity_type, backend):
     # Preserve all name tokens; entity keys are only legacy grouping identifiers.
     payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),
                "country": _normalize_country(country), "entity_type": (entity_type or "Person").lower(),
-               "backend": backend, "rules_version": "evidence-v8", "matching_config": get_matching_config()}
+               "backend": backend, "rules_version": rules_version_for(backend), "matching_config": get_matching_config()}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def stamp_screening_result(result, name, dob, country, entity_type, backend):
     result["Screening Inputs"] = {"name": name, "dob": dob, "country": country, "entity_type": entity_type, "backend": backend}
     result["Screening Fingerprint"] = screening_fingerprint(name, dob, country, entity_type, backend)
-    result["Matching Rules Version"] = "evidence-v8"
+    result["Matching Rules Version"] = rules_version_for(backend)
     result["Matching Configuration"] = get_matching_config()
     from screening_guidance import enrich_result
     enrich_result(result)
@@ -1441,7 +1481,7 @@ def _parse_aliases(value):
     return [item.strip() for item in values if item.strip()]
 
 
-def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps=False):
+def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps=False, token_stats=None):
     """One decision/evidence implementation shared by both storage backends."""
     if not _normalize_text(name):
         raise ScreeningUnavailableError("Enter a name containing supported letters or numbers.")
@@ -1464,6 +1504,11 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         aliases = _safe_str(raw.get("aliases") or row.get("aliases"))
         names = list(dict.fromkeys([display_name] + _parse_aliases(aliases)))
         hits = get_best_name_matches(name, names, limit=len(names), threshold=75, has_dob=bool(_normalize_dob(dob)), entity_type=entity_type)
+        aligned_indexes = set()
+        if token_stats is not None:
+            from name_matching import refine_hits
+            hits, aligned_indexes = refine_hits(name, names, hits, has_dob=bool(_normalize_dob(dob)),
+                                                entity_type=entity_type, stats=token_stats)
         suggestion_hits = get_best_name_matches(name, names, limit=1, threshold=60, strict_short_queries=False, entity_type=entity_type)
         if suggestion_hits:
             suggestions[display_name] = max(suggestions.get(display_name, 0), suggestion_hits[0][1])
@@ -1494,6 +1539,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         excluded = dob_status == "conflicting"
         reasons = (["A single-word name or alias matched a search token and the full date of birth agrees; review required."]
                    if weak_name_with_dob else ["Name comparison passed the decision rules; the displayed similarity also reflects the full name."])
+        if hits and matched_index in aligned_indexes:
+            reasons.append("Name parts align word by word, allowing for spelling variation or omitted names.")
         if matched_index:
             reasons.append(f'Matched a listed alias: “{names[matched_index]}”.')
             if len(names) > 5:
@@ -1511,6 +1558,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         elif country_status == "unknown":
             reasons.append("Country evidence is unavailable or was not supplied.")
         evidence.append({
+            **({"match_rule": "token_alignment" if hits and matched_index in aligned_indexes else "standard"}
+               if token_stats is not None else {}),
             "record_id": _safe_str(row.get("entity_id") or row.get("id")) or None,
             "source_evidence_hash": hashlib.sha256(json.dumps({'name': display_name, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}, sort_keys=True).encode()).hexdigest(),
             "name": display_name, "matched_name": names[matched_index], "matched_alias": bool(matched_index),
@@ -1558,6 +1607,65 @@ def perform_opensanctions_check(name, dob, country=None, entity_type="Person", p
     return result
 
 
+async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
+    """Fetch rows sharing enough similar words with the query, plus the query's word statistics."""
+    from name_matching import TokenStats, retrieval_plan, similar_tokens
+
+    if not await conn.fetchval("SELECT to_regclass('public.watchlist_tokens') IS NOT NULL") or \
+            not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM watchlist_tokens)"):
+        raise ScreeningUnavailableError("Matching index is unavailable. No clearance issued.")
+    plan = retrieval_plan(name, entity_type)
+    kind = "organization" if entity_type.lower() == "organization" else "person"
+    frequencies = {r["token"]: r["doc_frequency"] for r in await conn.fetch(
+        "SELECT token, doc_frequency FROM watchlist_tokens WHERE token = ANY($1::text[])", plan.query_tokens)}
+    total = await conn.fetchval("SELECT count(*) FROM watchlist_entities WHERE source_type='sanctions'")
+    stats = TokenStats(frequencies, total)
+    if not plan.query_tokens:
+        return [], stats
+    matched_tokens, matched_positions = [], []
+    for position in plan.informative:
+        token = plan.query_tokens[position]
+        nearby = await conn.fetch(
+            """SELECT token FROM watchlist_tokens WHERE token = $1 OR (length($1) >= 4 AND (token % $1 OR
+               (left(token, 1) = left($1, 1) AND length(token) BETWEEN length($1) - 2 AND length($1) + 2)))""", token)
+        for match in similar_tokens(token, [r["token"] for r in nearby]):
+            matched_tokens.append(match)
+            matched_positions.append(position)
+    # Core candidates follow v1's retrieval rules, so v2 keeps everything v1 would find,
+    # and exceeding the limit here refuses the search exactly as v1 does.
+    query_norm = _normalize_text(name)
+    candidate_ids = {r["entity_id"] for r in await conn.fetch(
+        """SELECT DISTINCT entity_id FROM watchlist_names
+           WHERE entity_kind = $1 AND (name_norm % $2 OR strpos(name_norm, $2) > 0) LIMIT $3""",
+        kind, query_norm, limit + 1)} if query_norm else set()
+    if kind == "person" and len(set(plan.query_tokens)) >= 2:
+        candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+            """SELECT entity_id FROM watchlist_name_tokens WHERE entity_kind = 'person' AND token = ANY($1::text[])
+               GROUP BY entity_id HAVING count(DISTINCT token) >= 2 LIMIT $2""", plan.query_tokens, limit + 1)}
+    if len(candidate_ids) > limit:
+        raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
+    # Spelling variations are additions, so an overflow keeps the closest rather than refusing.
+    candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+        """SELECT t.entity_id FROM watchlist_name_tokens t
+           JOIN unnest($1::text[], $2::int[]) AS q(token, position) USING (token)
+           WHERE t.entity_kind = $3 GROUP BY t.entity_id
+           HAVING count(DISTINCT q.position) >= $4
+           ORDER BY count(DISTINCT q.position) DESC, t.entity_id LIMIT $5""",
+        matched_tokens, matched_positions, kind, plan.required_matches, limit)}
+    if full_dob and kind == "person":
+        # A single listed word plus an exact date of birth stays reviewable.
+        candidate_ids |= {r["entity_id"] for r in await conn.fetch(
+            """SELECT e.entity_id FROM watchlist_entities e
+               JOIN watchlist_name_tokens t ON t.entity_id = e.entity_id AND t.entity_kind = 'person'
+               WHERE t.token = ANY($1::text[]) AND strpos(COALESCE(e.raw_json->>'birth_date', ''), $2) > 0""",
+            plan.query_tokens, full_dob)}
+    rows = await conn.fetch(
+        """SELECT entity_id, name, birth_date::text AS birth_date, dataset, regime, entity_schema, raw_json, source_type
+           FROM watchlist_entities WHERE source_type = 'sanctions' AND entity_id = ANY($1::text[])""",
+        list(candidate_ids))
+    return [dict(r) for r in rows], stats
+
+
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
                                           candidate_limit=2000, log_search=True, include_peps=False):
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
@@ -1573,6 +1681,12 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
     normalized_dob = _normalize_dob(dob)
     full_dob = normalized_dob if normalized_dob and len(normalized_dob) == 10 and entity_type.lower() != 'organization' else None
     query_tokens = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name)).split()
+    if active_matcher_version() == "v2":
+        rows, token_stats = await _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit)
+        result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist', token_stats=token_stats)
+        if log_search:
+            _append_search_to_csv(name, result['Check Summary'])
+        return result
     rows = []
     for source_type in ['sanctions']:
         candidates = await conn.fetch('''

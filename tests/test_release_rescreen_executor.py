@@ -222,7 +222,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_postgres_and_parquet_matchers_use_assured_sources(self):
         import pandas as pd
         plan,_=await self.seed(references=('REF-1',))
-        await self.conn.execute('CREATE EXTENSION pg_trgm')
+        await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
         await self.conn.execute('''CREATE TABLE watchlist_entities(source_type text,entity_id text,entity_schema text,
             name text,name_norm text,birth_date date,dataset text,regime text,raw_json jsonb)''')
         records=[{'id':'p1','name':'Jane Smith','schema':'Person','source_type':'sanctions','dataset':'Fixture sanctions'},
@@ -278,7 +278,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_alias_preflight_detects_malformed_values_read_only(self):
         from scripts.validate_watchlist_aliases import validate
-        await self.conn.execute('CREATE EXTENSION pg_trgm')
+        await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
         await self.conn.execute('CREATE TABLE watchlist_entities(source_type text,raw_json jsonb)')
         manifest={'version':'fixture','ingested_at':datetime.now(timezone.utc).isoformat(),
                   'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
