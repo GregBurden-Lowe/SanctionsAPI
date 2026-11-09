@@ -89,7 +89,8 @@ async def run_postgres_check(conn, *, name, dob, country, entity_type, requestor
             await conn.execute('LOCK TABLE watchlist_entities IN ACCESS SHARE MODE')
             manifest = await postgres_manifest(conn)
             coverage = require_current(manifest) if require_assurance else assess(manifest)
-            results = [await matcher(conn, **item, requestor=requestor, log_search=False) for item in plan]
+            results = [await matcher(conn, **item, requestor=requestor, log_search=False,
+                                     submitted_entity_type=entity_type) for item in plan]
     else:
         results = [await matcher(conn, **item, requestor=requestor, log_search=False) for item in plan]
     merged = _merge_dual_type_results(*results, name=name, submitted_entity_type=entity_type)

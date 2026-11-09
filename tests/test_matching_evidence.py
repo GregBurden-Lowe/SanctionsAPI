@@ -18,6 +18,23 @@ def evaluate(rows, name='Jane Smith', dob=None, country=None, entity_type='Perso
 
 
 class MatchingEvidenceTests(unittest.TestCase):
+    def test_vessel_single_word_for_person_and_full_alias(self):
+        vessel = row('CARL', aliases='CARL BAUER'); vessel['schema'] = 'Vessel'
+        partial = _evaluate_watchlist_rows('Carl Smith', None, None, 'Organization', [vessel], 'fixture',
+                                          submitted_entity_type='Person')
+        self.assertFalse(partial['Match Found'])
+        exact = _evaluate_watchlist_rows('Carl Bauer', None, None, 'Organization', [vessel], 'fixture',
+                                        submitted_entity_type='Person')
+        self.assertTrue(exact['Match Found'])
+        self.assertEqual(exact['Candidate Evidence'][0]['entity_type'], 'Vessel')
+        self.assertEqual(exact['Candidate Evidence'][0]['matched_name'], 'CARL BAUER')
+        single = _evaluate_watchlist_rows('Carl', None, None, 'Organization', [vessel], 'fixture',
+                                         submitted_entity_type='Person')
+        self.assertTrue(single['Match Found'])
+        organisation = _evaluate_watchlist_rows('Carl Smith', None, None, 'Organization', [vessel], 'fixture',
+                                               submitted_entity_type='Organization')
+        self.assertTrue(organisation['Match Found'])
+
     def test_labelled_name_benchmark(self):
         cases = json.loads((Path(__file__).parent / 'fixtures/matching_cases.json').read_text())
         for case in cases:

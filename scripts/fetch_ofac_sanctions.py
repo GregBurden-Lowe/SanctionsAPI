@@ -77,7 +77,9 @@ def _parse_entry(entry_el: ET.Element, source_label: str) -> dict:
 
     # SDN type: Individual / Entity / Vessel / Aircraft
     sdn_type = _text(_find(entry_el, "sdnType"))
-    schema = "Person" if sdn_type == "Individual" else "Organization"
+    schema = {"individual": "Person", "vessel": "Vessel", "aircraft": "Aircraft"}.get(
+        sdn_type.lower(), "Organization"
+    )
 
     # Name
     first = _text(_find(entry_el, "firstName"))

@@ -17,6 +17,18 @@ from utils import _parse_aliases, refresh_opensanctions_data, ScreeningUnavailab
 
 
 class SourceAliasEncodingTests(unittest.TestCase):
+    def test_source_parsers_keep_vessel_types(self):
+        from defusedxml import ElementTree as ET
+        from scripts.fetch_ofac_sanctions import _parse_entry, OFAC_NS
+        from scripts.fetch_uk_sanctions import _parse_designation
+        for source_type, expected in [('Individual', 'Person'), ('Entity', 'Organization'),
+                                      ('Vessel', 'Vessel'), ('Aircraft', 'Aircraft')]:
+            entry = ET.fromstring(f'<sdnEntry xmlns="{OFAC_NS}"><uid>1</uid>'
+                                  f'<sdnType>{source_type}</sdnType><lastName>CARL</lastName></sdnEntry>')
+            self.assertEqual(_parse_entry(entry, 'OFAC SDN List')['schema'], expected)
+        ship = ET.fromstring('<Designation><IndividualEntityShip>Ship</IndividualEntityShip></Designation>')
+        self.assertEqual(_parse_designation(ship)['schema'], 'Vessel')
+
     def test_aliases_round_trip_quotes_semicolons_and_unicode(self):
         values = ['"ZAPCHAST TRADE" LLP', 'Name; with semicolon', 'Émile "Jack" Doe']
         self.assertEqual(_parse_aliases(encode_aliases(values)), values)

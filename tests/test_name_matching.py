@@ -95,14 +95,14 @@ class FlagTests(unittest.TestCase):
         with patch.dict(os.environ):
             os.environ.pop('SCREENING_MATCHER_VERSION', None)
             self.assertEqual(utils.active_matcher_version(), 'v1')
-            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1')
 
     def test_v2_applies_only_to_postgres_and_changes_the_fingerprint(self):
         args = ('Jane Smith', None, None, 'Person')
         standard = utils.screening_fingerprint(*args, 'postgres_beta')
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}):
-            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION)
-            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1')
+            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1')
             self.assertNotEqual(utils.screening_fingerprint(*args, 'postgres_beta'), standard)
 
     def test_an_unknown_version_stops_screening(self):
@@ -172,6 +172,25 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
             for name, entity_type, expected in (('Babbar Khalsa', 'Organization', 'greek'), ('Volga Group', 'Organization', 'company')):
                 result = await self.check(name, entity_type)
                 self.assertIn(expected, [item['record_id'] for item in result['Candidate Evidence']])
+
+    async def test_vessel_classification_and_person_partial_match(self):
+        vessel = dict(id='ship', name='CARL', schema='Vessel', dataset='OFAC', source_type='sanctions', aliases='')
+        full = dict(vessel, id='full-ship', name='CARL BAUER')
+        await self.load(self.FIXTURE + [vessel])
+        for version in ('v1', 'v2'):
+            with self.subTest(version=version), patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': version}):
+                self.assertFalse((await self.check('Carl Bauer'))['Match Found'])
+                found = await self.check('CARL', 'Organization')
+                self.assertTrue(found['Match Found'])
+                self.assertEqual(found['Candidate Evidence'][0]['entity_type'], 'Vessel')
+                self.assertTrue((await self.check('CARL'))['Match Found'])
+        await self.load(self.FIXTURE + [vessel, full])
+        for version in ('v1', 'v2'):
+            with self.subTest(version=version), patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': version}):
+                found = await self.check('Carl Bauer')
+                self.assertTrue(found['Match Found'])
+                self.assertEqual(found['Candidate Evidence'][0]['record_id'], 'full-ship')
+                self.assertEqual(found['Candidate Evidence'][0]['entity_type'], 'Vessel')
 
     async def test_whole_name_similarity_retrieves_a_shorter_listed_name(self):
         short = dict(self.FIXTURE[2], id='short', name='Zorbex')

@@ -138,7 +138,7 @@ def _parse_positions(ind_el: ET.Element) -> list[str]:
 def _parse_designation(desig_el: ET.Element) -> dict:
     unique_id = _text(desig_el.find("UniqueID"))
     entity_type = _text(desig_el.find("IndividualEntityShip"))
-    schema = "Person" if entity_type == "Individual" else "Organization"
+    schema = {"individual": "Person", "ship": "Vessel"}.get(entity_type.lower(), "Organization")
 
     canonical_name, aliases = _parse_names(desig_el)
 

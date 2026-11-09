@@ -921,7 +921,7 @@ class ScreeningUnavailableError(RuntimeError):
     """Required source coverage is unavailable; never interpret this as no match."""
 
 
-STANDARD_RULES_VERSION = "evidence-v8"
+STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1"
 
 
 def active_matcher_version() -> str:
@@ -936,7 +936,7 @@ def rules_version_for(backend) -> str:
     """v2 needs the PostgreSQL token index, so Parquet stays on the standard rules."""
     if str(backend) == "postgres_beta" and active_matcher_version() == "v2":
         from name_matching import MATCHER_RULES_VERSION
-        return MATCHER_RULES_VERSION
+        return MATCHER_RULES_VERSION + "-vessel-types-v1"
     return STANDARD_RULES_VERSION
 
 
@@ -1401,7 +1401,7 @@ def _parse_aliases(value):
     return [item.strip() for item in values if item.strip()]
 
 
-def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps=False, token_stats=None):
+def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps=False, token_stats=None, submitted_entity_type=None):
     """One decision/evidence implementation shared by both storage backends."""
     if not _normalize_text(name):
         raise ScreeningUnavailableError("Enter a name containing supported letters or numbers.")
@@ -1415,7 +1415,7 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         if isinstance(raw, str):
             raw = json.loads(raw)
         schema = _safe_str(row.get("entity_schema") or row.get("schema")).lower()
-        if schema and schema not in ({"organization", "company", "legalentity"} if et == "organization" else {"person"}):
+        if schema and schema not in ({"organization", "company", "legalentity", "vessel", "aircraft"} if et == "organization" else {"person"}):
             continue
         source_type = row.get("source_type", "sanctions")
         if source_type == "peps":
@@ -1429,7 +1429,19 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             from name_matching import refine_hits
             hits, aligned_indexes = refine_hits(name, names, hits, has_dob=bool(_normalize_dob(dob)),
                                                 entity_type=entity_type, stats=token_stats)
-        suggestion_hits = get_best_name_matches(name, names, limit=1, threshold=60, strict_short_queries=False, entity_type=entity_type)
+        # A single listed vessel word cannot establish a match to a multi-word
+        # person query. Keep complete names and all organisation searches eligible.
+        partial_vessel = schema == 'vessel' and (submitted_entity_type or '').lower() == 'person'
+        if partial_vessel:
+            query_words = _normalize_text(re.sub(r"[-‐‑‒–—;]", " ", name)).split()
+            partial_vessel = len(query_words) > 1
+            if partial_vessel:
+                hits = [hit for hit in hits if len(_normalize_text(
+                    re.sub(r"[-‐‑‒–—;]", " ", names[hit[2]])).split()) > 1]
+        suggestion_hits = get_best_name_matches(name, names, limit=len(names), threshold=60, strict_short_queries=False, entity_type=entity_type)
+        if partial_vessel:
+            suggestion_hits = [hit for hit in suggestion_hits if len(_normalize_text(
+                re.sub(r"[-‐‑‒–—;]", " ", names[hit[2]])).split()) > 1]
         if suggestion_hits:
             suggestions[display_name] = max(suggestions.get(display_name, 0), suggestion_hits[0][1])
         # New imports preserve original precision/multiple DOBs. Older PostgreSQL
@@ -1481,9 +1493,9 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             **({"match_rule": "token_alignment" if hits and matched_index in aligned_indexes else "standard"}
                if token_stats is not None else {}),
             "record_id": _safe_str(row.get("entity_id") or row.get("id")) or None,
-            "source_evidence_hash": hashlib.sha256(json.dumps({'name': display_name, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}, sort_keys=True).encode()).hexdigest(),
+            "source_evidence_hash": hashlib.sha256(json.dumps({'name': display_name, 'schema': schema, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}, sort_keys=True).encode()).hexdigest(),
             "name": display_name, "matched_name": names[matched_index], "matched_alias": bool(matched_index),
-            "entity_type": entity_type, "source_type": source_type,
+            "entity_type": {'vessel': 'Vessel', 'aircraft': 'Aircraft'}.get(schema, entity_type), "source_type": source_type,
             "dataset": _safe_str(row.get("dataset")), "regime": _safe_str(row.get("regime") or _derive_regime_like_row(row)),
             "position": _safe_str(raw.get("positions") or row.get("positions")) or None,
             "name_score": score, "birth_date": candidate_dob or None, "country": candidate_country or None,
@@ -1571,7 +1583,7 @@ async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
 
 
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
-                                          candidate_limit=2000, log_search=True, include_peps=False):
+                                          candidate_limit=2000, log_search=True, include_peps=False, submitted_entity_type=None):
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
         raise ScreeningUnavailableError("Watchlist data is unavailable.")
     sources = await conn.fetch("SELECT DISTINCT source_type FROM watchlist_entities")
@@ -1581,13 +1593,13 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
     # Retrieval must not suppress missing/conflicting identity evidence. Apply type
     # before LIMIT so unrelated schemas cannot crowd out eligible candidates.
     limit = max(1, min(2000, int(candidate_limit)))
-    schemas = ['organization', 'company', 'legalentity'] if entity_type.lower() == 'organization' else ['person']
+    schemas = ['organization', 'company', 'legalentity', 'vessel', 'aircraft'] if entity_type.lower() == 'organization' else ['person']
     normalized_dob = _normalize_dob(dob)
     full_dob = normalized_dob if normalized_dob and len(normalized_dob) == 10 and entity_type.lower() != 'organization' else None
     query_tokens = _normalize_text(re.sub(r"[-‐‑‒–—]", " ", name)).split()
     if active_matcher_version() == "v2":
         rows, token_stats = await _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit)
-        result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist', token_stats=token_stats)
+        result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist', token_stats=token_stats, submitted_entity_type=submitted_entity_type)
         if log_search:
             _append_search_to_csv(name, result['Check Summary'])
         return result
@@ -1642,7 +1654,7 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
         if len(candidates) > limit:
             raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
         rows.extend(dict(r) for r in candidates)
-    result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist')
+    result = _evaluate_watchlist_rows(name, dob, country, entity_type, rows, 'Postgres watchlist', submitted_entity_type=submitted_entity_type)
     if log_search:
         _append_search_to_csv(name, result['Check Summary'])
     return result
