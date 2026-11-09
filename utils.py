@@ -921,7 +921,7 @@ class ScreeningUnavailableError(RuntimeError):
     """Required source coverage is unavailable; never interpret this as no match."""
 
 
-STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1"
+STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1-dob-links-v1"
 
 
 def active_matcher_version() -> str:
@@ -936,15 +936,17 @@ def rules_version_for(backend) -> str:
     """v2 needs the PostgreSQL token index, so Parquet stays on the standard rules."""
     if str(backend) == "postgres_beta" and active_matcher_version() == "v2":
         from name_matching import MATCHER_RULES_VERSION
-        return MATCHER_RULES_VERSION + "-vessel-types-v1"
+        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1"
     return STANDARD_RULES_VERSION
 
 
 def screening_fingerprint(name, dob, country, entity_type, backend):
     # Preserve all name tokens; entity keys are only legacy grouping identifiers.
+    from linked_listings import REVIEWED_LINKS
     payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),
                "country": _normalize_country(country), "entity_type": (entity_type or "Person").lower(),
-               "backend": backend, "rules_version": rules_version_for(backend), "matching_config": get_matching_config()}
+               "backend": backend, "rules_version": rules_version_for(backend), "matching_config": get_matching_config(),
+               "reviewed_links": REVIEWED_LINKS}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -1366,8 +1368,19 @@ def _identity_dob_evidence(candidate, query):
     values = re.split(r"[;|]", _safe_str(candidate))
     parsed = []
     unknown = False
+    approximate_compatible = False
     for raw in values:
         raw = raw.strip()
+        approximate = re.fullmatch(r"(?:circa|approximately)\s+(\d{4})", raw, re.IGNORECASE)
+        if approximate:
+            year = int(approximate.group(1))
+            if not 1 <= year <= 9999:
+                unknown = True
+            elif abs(int(query[:4]) - year) <= 1:
+                approximate_compatible = True
+            else:
+                parsed.append(f"{year:04d}")
+            continue
         if re.fullmatch(r"\d{4}(?:-\d{2})?(?:-\d{2})?", raw):
             try:
                 datetime.strptime(raw, {4: "%Y", 7: "%Y-%m", 10: "%Y-%m-%d"}[len(raw)])
@@ -1380,7 +1393,9 @@ def _identity_dob_evidence(candidate, query):
         precision = min(len(value), len(query))
         if value[:precision] == query[:precision]:
             return "exact" if precision == 10 else "compatible"
-    return "unknown" if unknown or not parsed else "conflicting"
+    if approximate_compatible:
+        return "compatible"
+    return "unknown" if unknown or not (parsed or approximate_compatible) else "conflicting"
 
 
 def _identity_country_evidence(candidate, query):
@@ -1504,6 +1519,9 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             "dob_assessment": dob_status, "country_assessment": country_status,
             "disposition": "excluded" if excluded else "potential_match", "reasons": reasons,
         })
+    if et == 'person':
+        from linked_listings import apply_reviewed_links
+        apply_reviewed_links(evidence, dob, _identity_dob_evidence)
     evidence.sort(key=lambda x: (x['disposition'] != 'potential_match', -x['name_score'], x['name']))
     sanctions = [e for e in evidence if e['disposition'] == 'potential_match' and e['source_type'] == 'sanctions']
     result = _empty_no_match_result(source_label)

@@ -214,6 +214,15 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                         <span className="break-all">Record: <span className="font-mono text-text-secondary">{candidate.record_id}</span></span>
                       )}
                     </div>
+                    {candidate.linked_listing_evidence && (
+                      <div className="text-[11px] text-text-secondary space-y-1">
+                        <p>Reviewed linked listings: {candidate.linked_listing_evidence.record_ids.join(', ')}</p>
+                        <p>Review: {candidate.linked_listing_evidence.review_reference} ({candidate.linked_listing_evidence.reviewed_by})</p>
+                        {Object.entries(candidate.linked_listing_evidence.birth_dates_by_record).map(([id, dates]) => (
+                          <p key={id}>{id}: {dates || 'No DOB recorded'}</p>
+                        ))}
+                      </div>
+                    )}
                     {candidate.reasons.length > 0 && (
                       <ul className="space-y-1">
                         {candidate.reasons.map((reason) => (

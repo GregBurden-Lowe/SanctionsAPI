@@ -60,6 +60,14 @@ export interface CandidateEvidenceItem {
   name_score: number
   birth_date: string | null
   all_birth_dates?: string[]
+  linked_listing_evidence?: {
+    record_ids: string[]
+    review_reference: string
+    reviewed_by: string
+    dob_assessment: string
+    individual_dob_assessment: string
+    birth_dates_by_record: Record<string, string | null>
+  }
   alias_count?: number
   country: string | null
   dob_assessment: 'exact' | 'compatible' | 'conflicting' | 'unknown' | 'not_applicable'

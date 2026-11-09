@@ -95,14 +95,14 @@ class FlagTests(unittest.TestCase):
         with patch.dict(os.environ):
             os.environ.pop('SCREENING_MATCHER_VERSION', None)
             self.assertEqual(utils.active_matcher_version(), 'v1')
-            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1-dob-links-v1')
 
     def test_v2_applies_only_to_postgres_and_changes_the_fingerprint(self):
         args = ('Jane Smith', None, None, 'Person')
         standard = utils.screening_fingerprint(*args, 'postgres_beta')
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}):
-            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1')
-            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1-dob-links-v1')
+            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1-dob-links-v1')
             self.assertNotEqual(utils.screening_fingerprint(*args, 'postgres_beta'), standard)
 
     def test_an_unknown_version_stops_screening(self):
@@ -153,6 +153,27 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
     async def check(self, name, entity_type='Person', dob=None):
         from screening_policy import run_postgres_check
         return await run_postgres_check(self.conn, name=name, dob=dob, country=None, entity_type=entity_type, log_search=False)
+
+    async def test_import_and_reviewed_link_evaluation_through_postgres(self):
+        import linked_listings
+        rows = [dict(id='source-a', name='Jane Smith', schema='Person', dataset='UN', source_type='sanctions', aliases='', birth_date='1970;1971'),
+                dict(id='source-b', name='Jane Smith', schema='Person', dataset='EU', source_type='sanctions', aliases='', birth_date='')]
+        await self.load(rows)
+        self.assertEqual(await self.conn.fetchval("SELECT raw_json->>'birth_date' FROM watchlist_entities WHERE entity_id='source-a'"), '1970;1971')
+        for version in ('v1', 'v2'):
+            with self.subTest(version=version), patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': version}):
+                initial = await self.check('Jane Smith', dob='1980')
+                self.assertTrue(initial['Match Found'])
+                hashes = {c['record_id']: c['source_evidence_hash'] for c in initial['Candidate Evidence']}
+                link = {'records': hashes, 'reviewed_by': 'fixture reviewer', 'review_reference': 'fixture-review'}
+                with patch.object(linked_listings, 'REVIEWED_LINKS', (link,)):
+                    linked = await self.check('Jane Smith', dob='1980')
+                    self.assertFalse(linked['Match Found'])
+                    self.assertEqual(linked['Candidate Evidence Summary']['excluded'], 2)
+                    self.assertTrue((await self.check('Jane Smith', dob='1971'))['Match Found'])
+                    await self.conn.execute("UPDATE watchlist_entities SET raw_json=jsonb_set(raw_json, '{birth_date}', to_jsonb('approximately 1970;1971'::text)) WHERE entity_id='source-a'")
+                    self.assertTrue((await self.check('Jane Smith', dob='1980'))['Match Found'])
+                    await self.conn.execute("UPDATE watchlist_entities SET raw_json=jsonb_set(raw_json, '{birth_date}', to_jsonb('1970;1971'::text)) WHERE entity_id='source-a'")
 
     FIXTURE = [
         dict(id='person', name='Arkady Romanovich ROTENBERG', schema='Person', dataset='UK', source_type='sanctions', aliases=''),

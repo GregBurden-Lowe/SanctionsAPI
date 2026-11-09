@@ -67,6 +67,11 @@ class MatchingEvidenceTests(unittest.TestCase):
             ('1980-02', '1980-02-01', 'compatible'), ('1980-02-01', '1980', 'compatible'),
             ('1980-02-01', '1980-02-01', 'exact'), ('1970', '1980', 'conflicting'),
             ('1970;1980', '1980-02-01', 'compatible'), ('1970;unknown', '1980', 'unknown'),
+            ('1970;circa 1968', '1980', 'conflicting'), ('1970;1980', '1980', 'compatible'),
+            ('circa 1968', '1967', 'compatible'), ('approximately 1968', '1969', 'compatible'),
+            ('circa 1968', '1966', 'conflicting'), ('circa 1968', '1970', 'conflicting'),
+            ('circa 1968;1970-12-25', '1970-12-25', 'exact'),
+            ('circa 1968;unknown', '1980', 'unknown'), ('circa 1968-01-01', '1980', 'unknown'),
             ('1980-02-30', '1980-02-01', 'unknown'), ('1970-01-01', None, 'unknown'),
         ]:
             with self.subTest(candidate=candidate, query=query):
@@ -76,6 +81,44 @@ class MatchingEvidenceTests(unittest.TestCase):
         result = evaluate([row()], dob='1980-02-01')
         self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(result['Candidate Evidence'][0]['dob_assessment'], 'unknown')
+
+    def test_reviewed_links_combine_dates_only_for_complete_unchanged_group(self):
+        import linked_listings
+        first = dict(name='Jane Smith', schema='Person', source_type='sanctions', dataset='A', id='a', birth_date='1970')
+        second = dict(name='Jane Smith', schema='Person', source_type='sanctions', dataset='B', id='b', birth_date='')
+        base = evaluate([first, second], dob='1980')
+        records = {e['record_id']: e['source_evidence_hash'] for e in base['Candidate Evidence']}
+        link = {'records': records, 'reviewed_by': 'Compliance', 'review_reference': 'case-1'}
+        with patch.object(linked_listings, 'REVIEWED_LINKS', (link,)):
+            linked = evaluate([first, second], dob='1980')
+            self.assertFalse(linked['Match Found'])
+            self.assertTrue(all(e['linked_listing_evidence']['dob_assessment'] == 'conflicting' for e in linked['Candidate Evidence']))
+            self.assertTrue(evaluate([second], dob='1980')['Match Found'])
+            self.assertTrue(evaluate([first, dict(second, birth_date='1980')], dob='1980')['Match Found'])
+            self.assertTrue(evaluate([first, second], dob='1970')['Match Found'])
+            unrelated = dict(name='Jane Smith', schema='Person', source_type='sanctions', dataset='C', id='c', birth_date='')
+            self.assertTrue(evaluate([first, second, unrelated], dob='1980')['Match Found'])
+        with patch.object(linked_listings, 'REVIEWED_LINKS', (link, link)):
+            self.assertTrue(evaluate([first, second], dob='1980')['Match Found'])
+        self.assertTrue(evaluate([first, second], dob='1980')['Match Found'])
+
+    def test_link_registry_changes_screening_fingerprint(self):
+        import linked_listings
+        from utils import screening_fingerprint
+        args = ('Jane Smith', '1980', None, 'Person', 'postgres_beta')
+        before = screening_fingerprint(*args)
+        with patch.object(linked_listings, 'REVIEWED_LINKS', ({'records': {'a': '1', 'b': '2'}, 'reviewed_by': 'Compliance', 'review_reference': 'case-1'},)):
+            self.assertNotEqual(before, screening_fingerprint(*args))
+
+    def test_linked_approximate_year_uses_one_year_tolerance(self):
+        import linked_listings
+        first = dict(name='Jane Smith', schema='Person', source_type='sanctions', dataset='A', id='a', birth_date='circa 1970;1971')
+        second = dict(name='Jane Smith', schema='Person', source_type='sanctions', dataset='B', id='b', birth_date='')
+        evidence = evaluate([first, second], dob='1980')['Candidate Evidence']
+        records = {e['record_id']: e['source_evidence_hash'] for e in evidence}
+        with patch.object(linked_listings, 'REVIEWED_LINKS', ({'records': records, 'reviewed_by': 'Compliance', 'review_reference': 'case-1'},)):
+            self.assertFalse(evaluate([first, second], dob='1980')['Match Found'])
+            self.assertTrue(evaluate([first, second], dob='1969')['Match Found'])
 
     def test_conflicting_dob_retained_as_excluded_evidence(self):
         result = evaluate([row(birth_date='1970-01-01')], dob='1980-02-01')

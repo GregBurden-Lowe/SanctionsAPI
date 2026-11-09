@@ -80,10 +80,11 @@ def _parse_names(desig_el: ET.Element) -> tuple[str, list[str]]:
 
 
 def _parse_dob(ind_el: ET.Element) -> str:
-    """Extract best DOB from an Individual sub-element."""
+    """Preserve every DOB alternative, including unrecognised values."""
     dobs_el = ind_el.find("DOBs")
     if dobs_el is None:
         return ""
+    values = []
     for dob_el in dobs_el.findall("DOB"):
         raw = _text(dob_el)
         if not raw:
@@ -98,14 +99,13 @@ def _parse_dob(ind_el: ET.Element) -> str:
             year = "" if year.lower() == "yyyy" else year
             if year:
                 if month and day:
-                    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                    raw = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                 elif month:
-                    return f"{year}-{month.zfill(2)}"
+                    raw = f"{year}-{month.zfill(2)}"
                 else:
-                    return year
-        elif re.match(r"\d{4}", raw):
-            return raw[:4]
-    return ""
+                    raw = year
+        values.append(raw)
+    return ";".join(dict.fromkeys(values))
 
 
 def _parse_nationalities(ind_el: ET.Element) -> list[str]:
@@ -156,7 +156,7 @@ def _parse_designation(desig_el: ET.Element) -> dict:
         sanctions_label += f" (designated {date_designated})"
 
     # Individual-specific fields
-    dob = ""
+    dobs = []
     countries = []
     positions = []
     titles = []
@@ -168,8 +168,9 @@ def _parse_designation(desig_el: ET.Element) -> dict:
     ind_details = desig_el.find("IndividualDetails")
     if ind_details is not None:
         for ind_el in ind_details.findall("Individual"):
-            if not dob:
-                dob = _parse_dob(ind_el)
+            dob = _parse_dob(ind_el)
+            if dob:
+                dobs.append(dob)
             countries.extend(_parse_nationalities(ind_el))
             positions.extend(_parse_positions(ind_el))
 
@@ -178,7 +179,7 @@ def _parse_designation(desig_el: ET.Element) -> dict:
         "schema": schema,
         "name": canonical_name,
         "aliases": encode_aliases(aliases),
-        "birth_date": dob,
+        "birth_date": ";".join(dobs),
         "positions": ";".join(titles + positions),
         "countries": ";".join(dict.fromkeys(countries)),
         "program_ids": regime,

@@ -98,14 +98,13 @@ def _parse_entry(entry_el: ET.Element, source_label: str) -> dict:
                 alias_names.append(aka_name)
 
     # DOB
-    dob = ""
+    dobs = []
     dob_list = _find(entry_el, "dateOfBirthList")
     if dob_list is not None:
         for dob_el in _findall(dob_list, "dateOfBirthItem"):
             dob_text = _text(_find(dob_el, "dateOfBirth"))
             if dob_text:
-                dob = dob_text
-                break
+                dobs.append(dob_text)
 
     # Nationality / citizenship
     nationalities = []
@@ -142,7 +141,7 @@ def _parse_entry(entry_el: ET.Element, source_label: str) -> dict:
         "schema": schema,
         "name": name,
         "aliases": encode_aliases(alias_names),
-        "birth_date": dob,
+        "birth_date": ";".join(dict.fromkeys(dobs)),
         "positions": title,
         "countries": ";".join(nationalities),
         "program_ids": ";".join(programs),

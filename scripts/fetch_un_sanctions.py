@@ -66,16 +66,18 @@ def _parse_individual(el: ET.Element) -> dict:
         if alias_name:
             alias_names.append(alias_name)
 
-    # Date of birth — may have multiple, take first resolvable
-    dob = ""
+    # Preserve every alternative, including approximate and unsupported dates.
+    dobs = []
     for dob_el in el.findall("INDIVIDUAL_DATE_OF_BIRTH"):
         date_str = _text(dob_el.find("DATE"))
         year_str = _text(dob_el.find("YEAR"))
-        if date_str:
-            dob = date_str
-            break
-        if year_str and not dob:
-            dob = year_str
+        date_type = _text(dob_el.find("TYPE_OF_DATE")).upper()
+        value = date_str or year_str
+        if not value:
+            value = "unparsed " + " ".join(f"{_tag.tag}={_text(_tag)}" for _tag in dob_el if _text(_tag))
+        elif date_type not in ("", "EXACT"):
+            value = date_type.lower() + " " + value
+        dobs.append(value)
 
     # Nationality
     nationalities = []
@@ -104,7 +106,7 @@ def _parse_individual(el: ET.Element) -> dict:
         "schema": "Person",
         "name": canonical_name,
         "aliases": encode_aliases(alias_names),
-        "birth_date": dob,
+        "birth_date": ";".join(dict.fromkeys(dobs)),
         "positions": designation,
         "countries": ";".join(nationalities),
         "program_ids": reference_num,

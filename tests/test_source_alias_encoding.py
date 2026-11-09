@@ -17,6 +17,29 @@ from utils import _parse_aliases, refresh_opensanctions_data, ScreeningUnavailab
 
 
 class SourceAliasEncodingTests(unittest.TestCase):
+    def test_source_parsers_preserve_all_dob_alternatives(self):
+        from defusedxml import ElementTree as ET
+        from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
+        from scripts.fetch_uk_sanctions import _parse_designation
+        from scripts.fetch_ofac_sanctions import _parse_entry, OFAC_NS
+        un = ET.fromstring('<INDIVIDUAL><FIRST_NAME>Jane</FIRST_NAME>'
+                           '<INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>APPROXIMATELY</TYPE_OF_DATE><YEAR>1968</YEAR></INDIVIDUAL_DATE_OF_BIRTH>'
+                           '<INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>EXACT</TYPE_OF_DATE><DATE>1970-12-25</DATE></INDIVIDUAL_DATE_OF_BIRTH>'
+                           '<INDIVIDUAL_DATE_OF_BIRTH><YEAR>1971</YEAR></INDIVIDUAL_DATE_OF_BIRTH></INDIVIDUAL>')
+        self.assertEqual(_parse_individual(un)['birth_date'], 'approximately 1968;1970-12-25;1971')
+        eu = ET.fromstring(f'<sanctionEntity xmlns="{EU_NS}"><nameAlias wholeName="Jane"/>'
+                           '<birthdate circa="true" year="1968"/><birthdate birthdate="1970-12-25"/></sanctionEntity>')
+        self.assertEqual(_parse_entity(eu)['birth_date'], 'circa 1968;1970-12-25')
+        uk = ET.fromstring('<Designation><IndividualDetails><Individual><DOBs>'
+                           '<DOB>01/02/1970</DOB><DOB>dd/mm/1971</DOB><DOB>circa 1968</DOB>'
+                           '</DOBs></Individual></IndividualDetails></Designation>')
+        self.assertEqual(_parse_designation(uk)['birth_date'], '1970-02-01;1971;circa 1968')
+        ofac = ET.fromstring(f'<sdnEntry xmlns="{OFAC_NS}"><lastName>Jane</lastName><dateOfBirthList>'
+                             '<dateOfBirthItem><dateOfBirth>1970</dateOfBirth></dateOfBirthItem>'
+                             '<dateOfBirthItem><dateOfBirth>circa 1968</dateOfBirth></dateOfBirthItem>'
+                             '</dateOfBirthList></sdnEntry>')
+        self.assertEqual(_parse_entry(ofac, 'OFAC')['birth_date'], '1970;circa 1968')
+
     def test_source_parsers_keep_vessel_types(self):
         from defusedxml import ElementTree as ET
         from scripts.fetch_ofac_sanctions import _parse_entry, OFAC_NS

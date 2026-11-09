@@ -93,16 +93,19 @@ def _parse_entity(entity_el: ET.Element) -> dict:
         elif whole != canonical_name:
             alias_names.append(whole)
 
-    # DOB — take first with a real date
-    dob = ""
+    # Preserve every alternative and its approximation marker. An approximate
+    # date must not become an exact date during matching.
+    dobs = []
     for bd in entity_el.findall(f"{NS_PREFIX}birthdate"):
         date_val = bd.get("birthdate", "").strip()
         year_val = bd.get("year", "").strip()
-        if date_val:
-            dob = date_val
-            break
-        if year_val and not dob:
-            dob = year_val
+        month_val = bd.get("month", "").strip()
+        value = date_val or (f"{year_val}-{month_val.zfill(2)}" if year_val and month_val.isdigit() else year_val)
+        if not value:
+            value = "unparsed birthdate: " + ET.tostring(bd, encoding="unicode")
+        if bd.get("circa", "").lower() == "true":
+            value = "circa " + value
+        dobs.append(value)
 
     # Citizenship / nationality
     countries = []
@@ -134,7 +137,7 @@ def _parse_entity(entity_el: ET.Element) -> dict:
         "schema": schema,
         "name": canonical_name,
         "aliases": encode_aliases(dict.fromkeys(alias_names)),
-        "birth_date": dob,
+        "birth_date": ";".join(dict.fromkeys(dobs)),
         "positions": "",
         "countries": ";".join(countries),
         "program_ids": programme,
