@@ -5,6 +5,7 @@ import csv
 import json
 import hashlib
 import re
+import calendar
 from datetime import datetime, date
 from typing import Optional, List, Tuple, Dict, Any, Set
 
@@ -921,7 +922,7 @@ class ScreeningUnavailableError(RuntimeError):
     """Required source coverage is unavailable; never interpret this as no match."""
 
 
-STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1-dob-links-v1"
+STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1"
 
 
 def active_matcher_version() -> str:
@@ -936,7 +937,7 @@ def rules_version_for(backend) -> str:
     """v2 needs the PostgreSQL token index, so Parquet stays on the standard rules."""
     if str(backend) == "postgres_beta" and active_matcher_version() == "v2":
         from name_matching import MATCHER_RULES_VERSION
-        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1"
+        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1-dob-formats-v1"
     return STANDARD_RULES_VERSION
 
 
@@ -1365,42 +1366,74 @@ def _top_name_suggestions(
             seen[display] = float(score)
     return [(n, int(s)) for n, s in sorted(seen.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
+_DOB_MONTHS = {name: number for number, name in enumerate(
+    ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'), 1)}
+
+
+def _dob_interval(value):
+    """Parse a single known-precision date into inclusive bounds, without inventing precision."""
+    value = value.strip()
+    match = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", value)
+    if match:
+        year, month, day = match.groups()
+    else:
+        match = re.fullmatch(r"(?:(\d{1,2})\s+)?([A-Za-z]{3})\s+(\d{4})", value)
+        if not match or match.group(2).lower() not in _DOB_MONTHS:
+            return None
+        day, month_name, year = match.groups()
+        month = str(_DOB_MONTHS[month_name.lower()])
+    try:
+        year = int(year)
+        if not month:
+            return date(year, 1, 1), date(year, 12, 31), False
+        month = int(month)
+        if not day:
+            return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1]), False
+        exact = date(year, month, int(day))
+        return exact, exact, True
+    except (ValueError, OverflowError):
+        return None
+
+
 def _identity_dob_evidence(candidate, query):
-    """Compare known precision; unknown data is never a contradictory date."""
+    """Compare all known DOB alternatives; incomplete or invalid evidence cannot clear."""
     query = _normalize_dob(query)
     if not query:
         return "unknown"
-    values = re.split(r"[;|]", _safe_str(candidate))
-    parsed = []
+    query_start, query_end, query_exact = _dob_interval(query)
     unknown = False
-    approximate_compatible = False
-    for raw in values:
+    compatible = False
+    comparable = False
+    for raw in re.split(r"[;|]", _safe_str(candidate)):
         raw = raw.strip()
         approximate = re.fullmatch(r"(?:circa|approximately)\s+(\d{4})", raw, re.IGNORECASE)
         if approximate:
             year = int(approximate.group(1))
             if not 1 <= year <= 9999:
                 unknown = True
-            elif abs(int(query[:4]) - year) <= 1:
-                approximate_compatible = True
-            else:
-                parsed.append(f"{year:04d}")
-            continue
-        if re.fullmatch(r"\d{4}(?:-\d{2})?(?:-\d{2})?", raw):
-            try:
-                datetime.strptime(raw, {4: "%Y", 7: "%Y-%m", 10: "%Y-%m-%d"}[len(raw)])
-                parsed.append(raw)
                 continue
-            except ValueError:
-                pass
-        unknown = True
-    for value in parsed:
-        precision = min(len(value), len(query))
-        if value[:precision] == query[:precision]:
-            return "exact" if precision == 10 else "compatible"
-    if approximate_compatible:
+            interval = (date(max(1, year - 1), 1, 1), date(min(9999, year + 1), 12, 31), False)
+        else:
+            parts = re.split(r"\s+to\s+", raw, flags=re.IGNORECASE)
+            if len(parts) == 1:
+                interval = _dob_interval(parts[0])
+            elif len(parts) == 2:
+                start, end = _dob_interval(parts[0]), _dob_interval(parts[1])
+                interval = (start[0], end[1], False) if start and end and start[0] <= end[1] else None
+            else:
+                interval = None
+        if not interval:
+            unknown = True
+            continue
+        start, end, exact = interval
+        comparable = True
+        if start <= query_end and query_start <= end:
+            if exact and query_exact:
+                return "exact"
+            compatible = True
+    if compatible:
         return "compatible"
-    return "unknown" if unknown or not (parsed or approximate_compatible) else "conflicting"
+    return "unknown" if unknown or not comparable else "conflicting"
 
 
 def _identity_country_evidence(candidate, query):
@@ -1596,13 +1629,23 @@ async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
         candidate_ids |= {r["entity_id"] for r in await conn.fetch(
             """SELECT e.entity_id FROM watchlist_entities e
                JOIN watchlist_name_tokens t ON t.entity_id = e.entity_id AND t.entity_kind = 'person'
-               WHERE t.token = ANY($1::text[]) AND strpos(COALESCE(e.raw_json->>'birth_date', ''), $2) > 0""",
-            plan.query_tokens, full_dob)}
+               WHERE t.token = ANY($1::text[]) AND EXISTS (
+                   SELECT 1 FROM regexp_split_to_table(COALESCE(e.raw_json->>'birth_date', ''), '[;|]') AS source_dob
+                   WHERE lower(trim(source_dob)) = ANY($2::text[]))""",
+            plan.query_tokens, _exact_dob_source_forms(full_dob))}
     rows = await conn.fetch(
         """SELECT entity_id, name, birth_date::text AS birth_date, dataset, regime, entity_schema, raw_json, source_type
            FROM watchlist_entities WHERE source_type = 'sanctions' AND entity_id = ANY($1::text[])""",
         list(candidate_ids))
     return [dict(r) for r in rows], stats
+
+
+def _exact_dob_source_forms(value):
+    if not value:
+        return []
+    parsed = date.fromisoformat(value)
+    month = tuple(_DOB_MONTHS)[parsed.month - 1]
+    return [value, f'{parsed.day:02d} {month} {parsed.year}', f'{parsed.day} {month} {parsed.year}']
 
 
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
@@ -1665,16 +1708,16 @@ async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity
                                  )) >= 2)
                                  OR ($5::text IS NOT NULL AND
                                      (birth_date::text=$5 OR EXISTS (SELECT 1 FROM regexp_split_to_table(
-                                         COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE trim(source_dob)=$5)) AND
+                                         COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE lower(trim(source_dob))=ANY($8::text[]))) AND
                                      alias_norm=ANY($6::text[])))
                    OR ($5::text IS NOT NULL AND
                        (birth_date::text=$5 OR EXISTS (SELECT 1 FROM regexp_split_to_table(
-                           COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE trim(source_dob)=$5)) AND
+                           COALESCE(raw_json->>'birth_date',''), '[;|]') AS source_dob WHERE lower(trim(source_dob))=ANY($8::text[]))) AND
                        name_norm=ANY($6::text[])))
             ORDER BY similarity(name_norm, $2) DESC, entity_id
             LIMIT $4
         ''', source_type, _normalize_text(name), schemas, limit + 1, full_dob, query_tokens,
-            entity_type.lower() != 'organization' and len(set(query_tokens)) >= 2)
+            entity_type.lower() != 'organization' and len(set(query_tokens)) >= 2, _exact_dob_source_forms(full_dob))
         if len(candidates) > limit:
             raise ScreeningUnavailableError("Too many possible candidates to complete screening. Refine the name and try again.")
         rows.extend(dict(r) for r in candidates)

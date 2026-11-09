@@ -72,6 +72,16 @@ class MatchingEvidenceTests(unittest.TestCase):
             ('circa 1968', '1966', 'conflicting'), ('circa 1968', '1970', 'conflicting'),
             ('circa 1968;1970-12-25', '1970-12-25', 'exact'),
             ('circa 1968;unknown', '1980', 'unknown'), ('circa 1968-01-01', '1980', 'unknown'),
+            ('03 Mar 1966', '1964-09-01', 'conflicting'), ('03 Mar 1966', '1966-03-03', 'exact'),
+            ('03 Mar 1966', '1966', 'compatible'), ('Mar 1966', '1966-03-01', 'compatible'),
+            ('Mar 1966', '1966-04-01', 'conflicting'),
+            ('1970 to 1972', '1964-09-01', 'conflicting'), ('1970 to 1972', '1970-01-01', 'compatible'),
+            ('1970 to 1972', '1972-12-31', 'compatible'), ('1970 to 1972', '1973', 'conflicting'),
+            ('01 Mar 1965 to 31 Mar 1965', '1965-03-31', 'compatible'),
+            ('01 Mar 1965 to 31 Mar 1965', '1965-04-01', 'conflicting'),
+            ('1972 to 1970', '1964', 'unknown'), ('31 Feb 1966', '1964', 'unknown'),
+            ('1970 to 1972;03 Mar 1966', '1966-03-03', 'exact'),
+            ('1970 to 1972;unparsed', '1964', 'unknown'),
             ('1980-02-30', '1980-02-01', 'unknown'), ('1970-01-01', None, 'unknown'),
         ]:
             with self.subTest(candidate=candidate, query=query):
@@ -81,6 +91,16 @@ class MatchingEvidenceTests(unittest.TestCase):
         result = evaluate([row()], dob='1980-02-01')
         self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(result['Candidate Evidence'][0]['dob_assessment'], 'unknown')
+
+    def test_ofac_written_dates_disambiguate_without_suppressing_name_only_matches(self):
+        rows = [dict(name='Abdul RASHID BALUCH', schema='Person', source_type='sanctions', dataset='OFAC', id='ofac-17765', aliases='Qari Abdul RASHID', birth_date='1970 to 1972'),
+                dict(name='Waseem Rauf LOAN', schema='Person', source_type='sanctions', dataset='OFAC', id='ofac-10593', aliases='Abdul Majid RASHID', birth_date='03 Mar 1966')]
+        initial = evaluate(rows, name='Mr Abdur Rashid')
+        self.assertTrue(initial['Match Found'])
+        result = evaluate(rows, name='Mr Abdur Rashid', dob='1964-09-01')
+        self.assertFalse(result['Match Found'])
+        self.assertEqual({item['record_id'] for item in result['Candidate Evidence']}, {'ofac-17765', 'ofac-10593'})
+        self.assertTrue(all(item['dob_assessment'] == 'conflicting' for item in result['Candidate Evidence']))
 
     def test_reviewed_links_combine_dates_only_for_complete_unchanged_group(self):
         import linked_listings

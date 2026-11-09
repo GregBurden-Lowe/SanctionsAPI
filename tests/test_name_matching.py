@@ -95,14 +95,14 @@ class FlagTests(unittest.TestCase):
         with patch.dict(os.environ):
             os.environ.pop('SCREENING_MATCHER_VERSION', None)
             self.assertEqual(utils.active_matcher_version(), 'v1')
-            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1-dob-links-v1')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1')
 
     def test_v2_applies_only_to_postgres_and_changes_the_fingerprint(self):
         args = ('Jane Smith', None, None, 'Person')
         standard = utils.screening_fingerprint(*args, 'postgres_beta')
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}):
-            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1-dob-links-v1')
-            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1-dob-links-v1')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1-dob-links-v1-dob-formats-v1')
+            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1')
             self.assertNotEqual(utils.screening_fingerprint(*args, 'postgres_beta'), standard)
 
     def test_an_unknown_version_stops_screening(self):
@@ -174,6 +174,23 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
                     await self.conn.execute("UPDATE watchlist_entities SET raw_json=jsonb_set(raw_json, '{birth_date}', to_jsonb('approximately 1970;1971'::text)) WHERE entity_id='source-a'")
                     self.assertTrue((await self.check('Jane Smith', dob='1980'))['Match Found'])
                     await self.conn.execute("UPDATE watchlist_entities SET raw_json=jsonb_set(raw_json, '{birth_date}', to_jsonb('1970;1971'::text)) WHERE entity_id='source-a'")
+
+    async def test_ofac_date_formats_and_exact_single_word_dob_retrieval(self):
+        rows = [dict(id='range', name='Abdul RASHID BALUCH', schema='Person', dataset='OFAC', source_type='sanctions', aliases='Qari Abdul RASHID', birth_date='1970 to 1972'),
+                dict(id='date', name='Waseem Rauf LOAN', schema='Person', dataset='OFAC', source_type='sanctions', aliases='Abdul Majid RASHID', birth_date='03 Mar 1966'),
+                dict(id='single', name='Kowalski', schema='Person', dataset='OFAC', source_type='sanctions', aliases='', birth_date='03 Mar 1966')]
+        await self.load(rows)
+        for version in ('v1', 'v2'):
+            with self.subTest(version=version), patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': version}):
+                name_only = await self.check('Mr Abdur Rashid')
+                self.assertTrue(name_only['Match Found'])
+                different_dob = await self.check('Mr Abdur Rashid', dob='1964-09-01')
+                self.assertFalse(different_dob['Match Found'])
+                self.assertEqual({c['record_id'] for c in different_dob['Candidate Evidence']}, {'range', 'date'})
+                self.assertTrue(all(c['dob_assessment'] == 'conflicting' for c in different_dob['Candidate Evidence']))
+                same_dob = await self.check('Evan Kowalski', dob='1966-03-03')
+                self.assertTrue(same_dob['Match Found'])
+                self.assertIn('single', [c['record_id'] for c in same_dob['Candidate Evidence']])
 
     FIXTURE = [
         dict(id='person', name='Arkady Romanovich ROTENBERG', schema='Person', dataset='UK', source_type='sanctions', aliases=''),

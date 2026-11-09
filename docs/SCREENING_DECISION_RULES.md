@@ -36,10 +36,11 @@ New PostgreSQL imports preserve raw DOB strings, including multiple values and p
 | --- | --- |
 | Exact full-date agreement | Retain potential match; label exact. |
 | Agreement at available year/month precision | Retain potential match; label compatible. |
+| OFAC date ranges, e.g. `1970 to 1972` | Retain when the submitted date overlaps the inclusive range; exclude when all known alternatives conflict. |
 | Missing/unparseable DOB, or DOB not supplied | Retain potential match; label unknown. |
 | All known comparable DOBs conflict, with no unknown alternative | Exclude from decision; retain explanation in candidate evidence. |
 
-An exact DOB supports review; it is not identity proof. Unknown information is not a mismatch. Candidate year/month precision is preserved rather than converted to an invented day.
+OFAC dates such as `03 Mar 1966` and `Mar 1966` are compared at their actual precision. A source range may also contain full dates. Unsupported values, invalid dates and reversed ranges remain unknown. The previously approved one-year tolerance applies only to `circa YYYY` and `approximately YYYY`; approximate full dates remain unknown. An exact DOB supports review; it is not identity proof. Unknown information is not a mismatch. Candidate year/month precision is preserved rather than converted to an invented day. The updated rules invalidate old matching fingerprints and require a coordinated API/worker release, Compliance review and representative production validation before activation.
 
 ## Country policy
 
