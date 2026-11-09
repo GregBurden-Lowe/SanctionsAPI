@@ -107,6 +107,8 @@ from utils import (
     derive_entity_key,
     derive_entity_key_variants,
     _normalize_text,
+    has_unsupported_name_characters,
+    UNSUPPORTED_NAME_MESSAGE,
     get_matching_config,
     save_matching_config,
     get_effective_org_generic_tokens,
@@ -1649,6 +1651,8 @@ async def _execute_screening(data: OpCheckRequest):
                 "message": "Please provide 'requestor' (your name) to run a check."
             },
         )
+    if has_unsupported_name_characters(data.name):
+        return JSONResponse(status_code=400, content={"error": "unsupported_name", "message": UNSUPPORTED_NAME_MESSAGE})
     if not data.name or not _normalize_text(data.name):
         return JSONResponse(
             status_code=400,
@@ -2745,6 +2749,8 @@ async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> d
     """
     name = (item.name or "").strip()
     requestor = (item.requestor or "").strip()
+    if has_unsupported_name_characters(name):
+        return {"status": "error", "error": "unsupported_name", "message": UNSUPPORTED_NAME_MESSAGE}
     if not _normalize_text(name):
         return {"status": "error", "error": "missing_name"}
     if not requestor:

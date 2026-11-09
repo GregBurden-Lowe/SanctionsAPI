@@ -26,6 +26,14 @@ def refined(query, names, entity_type='Person', has_dob=False, remove_disagreein
 
 
 class TokenTests(unittest.TestCase):
+    def test_refuse_names_whose_letters_or_digits_would_be_discarded(self):
+        for value in ('Максим', 'Mr محمد Rashid', '최천식', '李 Wei', 'Øster', 'Anna ١٢'):
+            with self.subTest(name=value):
+                self.assertTrue(utils.has_unsupported_name_characters(value))
+        for value in ('Émile Smith', 'Jose\u0301 Silva', 'Anne-Marie O’Neil', 'Company 12'):
+            with self.subTest(name=value):
+                self.assertFalse(utils.has_unsupported_name_characters(value))
+
     def test_normalisation_matches_the_shared_rules(self):
         for value in ('Émile "Jack" Doe', 'Sa’id Jan ‘Abd-al-Salam', 'Максим', '  A  B ', None):
             self.assertEqual(normalize_text(value), _normalize_text(value))
@@ -271,5 +279,7 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_latin_input_gets_an_honest_refusal_under_v2(self):
         await self.load(self.FIXTURE)
-        with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}), self.assertRaisesRegex(ScreeningUnavailableError, 'supported letters'):
-            await self.check('Максим')
+        with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}):
+            for name in ('Максим', 'Mr محمد Rashid'):
+                with self.subTest(name=name), self.assertRaisesRegex(ScreeningUnavailableError, 'no clearance was issued'):
+                    await self.check(name)

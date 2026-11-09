@@ -115,6 +115,28 @@ _COUNTRY_ALIAS_CANONICAL: Dict[str, str] = {}
 # Small helpers
 # =============================================================================
 
+UNSUPPORTED_NAME_MESSAGE = (
+    "This name contains characters the screening matcher cannot reliably compare. "
+    "Provide a complete Latin-script spelling for screening; no clearance was issued."
+)
+
+
+def has_unsupported_name_characters(value: str) -> bool:
+    """Detect letters/numbers the current ASCII matcher would silently discard.
+
+    NFKD permits accented Latin characters that decompose into ASCII, while
+    refusing mixed-script input as well as unsupported names in one script.
+    Punctuation and combining marks do not contribute name letters.
+    """
+    import unicodedata
+    for char in value or "":
+        if unicodedata.category(char)[0] in ("L", "N"):
+            decomposed = unicodedata.normalize("NFKD", char)
+            if not any(c.isascii() and c.isalnum() for c in decomposed):
+                return True
+    return False
+
+
 def _normalize_text(s: str) -> str:
     import re, unicodedata
     if not isinstance(s, str):
@@ -1465,6 +1487,8 @@ def _parse_aliases(value):
 
 def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label, include_peps=False, token_stats=None, submitted_entity_type=None):
     """One decision/evidence implementation shared by both storage backends."""
+    if has_unsupported_name_characters(name):
+        raise ScreeningUnavailableError(UNSUPPORTED_NAME_MESSAGE)
     if not _normalize_text(name):
         raise ScreeningUnavailableError("Enter a name containing supported letters or numbers.")
     if dob and not _normalize_dob(dob):
@@ -1682,6 +1706,8 @@ def _exact_dob_source_forms(value):
 
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
                                           candidate_limit=2000, log_search=True, include_peps=False, submitted_entity_type=None):
+    if has_unsupported_name_characters(name):
+        raise ScreeningUnavailableError(UNSUPPORTED_NAME_MESSAGE)
     country = effective_screening_country(country)
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
         raise ScreeningUnavailableError("Watchlist data is unavailable.")

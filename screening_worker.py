@@ -59,7 +59,8 @@ def main(stop_event=None):
     stop_event = stop_event or threading.Event()
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    from utils import _normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result
+    from utils import (_normalize_text, _normalize_dob, screening_fingerprint, stamp_screening_result,
+                       has_unsupported_name_characters, UNSUPPORTED_NAME_MESSAGE)
 
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
@@ -145,7 +146,9 @@ def main(stop_event=None):
                 force_rescreen = bool(row.get("force_rescreen"))
 
                 validation_error = None
-                if not business_reference:
+                if has_unsupported_name_characters(name):
+                    validation_error = UNSUPPORTED_NAME_MESSAGE
+                elif not business_reference:
                     validation_error = "business_reference is required"
                 elif reason_for_check not in REASON_FOR_CHECK_ALLOWED:
                     validation_error = "reason_for_check is required and must be a valid enum value"

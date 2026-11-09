@@ -35,6 +35,18 @@ class ScreeningSafetyTests(unittest.TestCase):
         self.assertNotEqual(fp(), fp(backend='postgres_beta'))
 
 
+class UnsupportedNameApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_entry_points_refuse_before_cache_or_queue(self):
+        payload = dict(name='Mr محمد Rashid', entity_type='Person', requestor='Alice',
+                       business_reference='TEST-1', reason_for_check='Client Onboarding')
+        response = await api_server._execute_screening(api_server.OpCheckRequest(**payload))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(response.body)['error'], 'unsupported_name')
+        internal = await api_server._internal_screening_execute(None, api_server.InternalScreeningRequest(**payload))
+        self.assertEqual(internal['error'], 'unsupported_name')
+        self.assertIn('no clearance was issued', internal['message'])
+
+
 class ReconciliationPauseApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_can_pause_and_resume_with_shared_flag(self):
         import httpx
@@ -247,6 +259,26 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval('SELECT count(*) FROM screening_runs'), 1)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM screening_requests WHERE status='completed'"), 2)
             self.assertTrue(await conn.fetchval("SELECT reused FROM screening_requests WHERE business_reference='WORKER-2'"))
+
+    async def test_worker_refuses_mixed_script_before_reusing_cached_result(self):
+        import screening_worker
+        from psycopg2.extensions import make_dsn
+        worker_dsn = make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)
+        async with self.pool.acquire() as conn:
+            await screening_db.enqueue_job(conn, 'worker-key', 'Mr Rashid', None, 'UK', 'Person', 'Alice', 'WORKER-1', 'Client Onboarding')
+        with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('screening_worker.run_postgres_job', new=postgres_job(matcher := Mock(return_value=sample()), self.source_manifest)), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                screening_worker.main()
+            async with self.pool.acquire() as conn:
+                job = await screening_db.enqueue_job(conn, 'worker-key', 'Mr محمد Rashid', None, 'UK', 'Person', 'Bob', 'WORKER-2', 'Client Onboarding')
+            with self.assertRaises(KeyboardInterrupt):
+                screening_worker.main()
+            self.assertEqual(matcher.call_count, 2)
+        async with self.pool.acquire() as conn:
+            status = await screening_db.get_job_status(conn, job)
+            self.assertEqual(status['status'], 'failed')
+            self.assertIn('no clearance was issued', status['error_message'])
+            self.assertEqual(await conn.fetchval('SELECT count(*) FROM screening_runs'), 1)
 
     async def test_worker_reuses_exact_reviewed_response(self):
         import screening_worker
