@@ -99,6 +99,29 @@ export async function clearScreeningData(): Promise<Response> {
   })
 }
 
+export interface TestScreeningRecord {
+  entity_key: string
+  business_reference: string
+  current_reference: string | null
+  display_name: string | null
+  current_run_id: string | null
+  reason: string
+  actor: string
+  updated_at: string
+  scope_matches: boolean
+}
+
+export async function getTestScreeningRecords(limit = 100, offset = 0): Promise<Response> {
+  return authFetch(resolve(`/admin/screening/test-records?limit=${limit}&offset=${offset}`), { headers: defaultHeaders() })
+}
+
+export async function setTestScreeningRecord(entityKey: string, active: boolean, reason: string, expectedRunId: string): Promise<Response> {
+  return authFetch(resolve(`/admin/screening/test-records/${encodeURIComponent(entityKey)}`), {
+    method: 'PUT', headers: defaultHeaders(),
+    body: JSON.stringify({ active, reason, expected_run_id: expectedRunId }),
+  })
+}
+
 export interface BulkScreeningItem {
   name: string
   dob?: string | null

@@ -6,6 +6,9 @@ import {
   claimReview,
   completeReview,
   getReviewQueue,
+  getTestScreeningRecords,
+  setTestScreeningRecord,
+  type TestScreeningRecord,
   rerunReview,
   type ReviewRerunResponse,
   type ReviewQueueItem,
@@ -82,6 +85,10 @@ export function MatchReviewPage() {
   const [toast, setToast] = useState<string | null>(null)
   const [unclaimedCollapsed, setUnclaimedCollapsed] = useState(false)
   const [queueTotal, setQueueTotal] = useState<number | null>(null)
+  const [testTarget, setTestTarget] = useState<ReviewQueueItem | null>(null)
+  const [testReason, setTestReason] = useState('')
+  const [testRecords, setTestRecords] = useState<TestScreeningRecord[] | null>(null)
+  const [restoreTarget, setRestoreTarget] = useState<TestScreeningRecord | null>(null)
   const latestLoad = useRef(0)
 
   const currentUsername = (user?.username || '').trim().toLowerCase()
@@ -101,6 +108,41 @@ export function MatchReviewPage() {
   const showToast = (message: string) => {
     setToast(message)
     window.setTimeout(() => setToast(null), 2500)
+  }
+
+  const loadTestRecords = async () => {
+    try {
+      const records: TestScreeningRecord[] = []
+      for (let offset = 0; ; offset += 200) {
+        const res = await getTestScreeningRecords(200, offset)
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail ?? 'Unable to load test records')
+        records.push(...(data.items ?? []))
+        if (records.length >= data.total || !(data.items ?? []).length) break
+      }
+      setTestRecords(records)
+    } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load test records') }
+  }
+
+  const saveTestFlag = async () => {
+    const target = testTarget ?? restoreTarget
+    const runId = testTarget?.run_id ?? restoreTarget?.current_run_id
+    if (!target || !runId || testReason.trim().length < 10) {
+      setActionError('A current screening run and a reason of at least 10 characters are required.')
+      return
+    }
+    setActionLoading(true)
+    setActionError(null)
+    try {
+      const res = await setTestScreeningRecord(target.entity_key, !!testTarget, testReason.trim(), runId)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail ?? 'Unable to update test flag')
+      setTestTarget(null); setRestoreTarget(null); setTestReason('')
+      showToast(testTarget ? 'Marked as test data' : 'Monitoring restored')
+      void load({ background: true })
+      if (testRecords !== null) void loadTestRecords()
+    } catch (err) { setActionError(err instanceof Error ? err.message : 'Unable to update test flag') }
+    finally { setActionLoading(false) }
   }
 
   const matchesViewFilters = (item: ReviewQueueItem): boolean => {
@@ -365,6 +407,7 @@ export function MatchReviewPage() {
                     >
                       <BiShow className="h-[13px] w-[13px]" />
                     </button>
+                    {user?.is_admin && <button type="button" onClick={() => { setTestTarget(row); setTestReason(''); setActionError(null) }} className="rounded-lg border border-[#e2e8f0] px-3 py-1.5 text-xs text-[#475569]">Mark test</button>}
                     <button
                       type="button"
                       title="Re-run check"
@@ -452,6 +495,7 @@ export function MatchReviewPage() {
                     >
                       <BiShow className="h-[13px] w-[13px]" />
                     </button>
+                    {user?.is_admin && <button type="button" onClick={() => { setTestTarget(row); setTestReason(''); setActionError(null) }} className="rounded-lg border border-[#e2e8f0] px-3 py-1.5 text-xs text-[#475569]">Mark test</button>}
                     {row.review_status === 'UNREVIEWED' ? (
                       <button
                         type="button"
@@ -470,7 +514,20 @@ export function MatchReviewPage() {
             </div>
           )}
         </Card>
+        {user?.is_admin && <Card className="p-4">
+          <div className="flex items-center justify-between"><div><p className="font-semibold">Test screening records</p><p className="text-xs text-text-secondary">Manage records excluded from monitoring and the review queue.</p></div>
+            <Button variant="secondary" onClick={() => testRecords === null ? void loadTestRecords() : setTestRecords(null)}>{testRecords === null ? 'Show test records' : 'Hide test records'}</Button></div>
+          {testRecords !== null && <div className="mt-3 space-y-2">{testRecords.length === 0 ? <p className="text-sm">No flagged records.</p> : testRecords.map(item => <div key={item.entity_key} className="flex items-center justify-between gap-3 border-t border-border pt-2 text-sm"><div><strong>{item.display_name ?? 'Record unavailable'}</strong> · {item.business_reference}<p className="text-xs text-text-secondary">{item.reason} · {item.actor}{!item.scope_matches ? ' · Record or reference changed; exclusion is inactive' : ''}</p></div><Button variant="secondary" disabled={!item.current_run_id} onClick={() => { setRestoreTarget(item); setTestReason(''); setActionError(null) }}>Restore</Button></div>)}</div>}
+        </Card>}
       </div>
+
+      <Modal isOpen={testTarget !== null || restoreTarget !== null} onClose={() => { setTestTarget(null); setRestoreTarget(null) }} title={testTarget ? 'Mark as test data' : 'Restore monitoring'} footer={<><Button variant="secondary" onClick={() => { setTestTarget(null); setRestoreTarget(null) }}>Cancel</Button><Button disabled={actionLoading} onClick={() => void saveTestFlag()}>{actionLoading ? 'Saving…' : testTarget ? 'Mark as test' : 'Restore'}</Button></>}>
+        <p className="mb-3">{testTarget ? `${testTarget.entity_name} · ${testTarget.business_reference}` : `${restoreTarget?.display_name} · ${restoreTarget?.business_reference}`}</p>
+        <p className="mb-3">{testTarget ? 'Only mark records you have verified are test data. This record and reference will be excluded from monitoring and the review queue; it is not a clearance. If a check is queued or running, wait for it to finish first.' : 'The record will be eligible for monitoring again and may return to the review queue.'}</p>
+        <label htmlFor="test-flag-reason" className="block text-xs font-medium">Reason (at least 10 characters)</label>
+        <textarea id="test-flag-reason" className="mt-1 w-full min-h-[90px] rounded-lg border border-border bg-surface p-2 text-sm" value={testReason} onChange={e => setTestReason(e.target.value)} />
+        {actionError && <ErrorBox message={actionError} />}
+      </Modal>
 
       <Modal
         isOpen={selected !== null}

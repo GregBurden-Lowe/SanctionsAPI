@@ -22,9 +22,10 @@ async def tick(conn, batch_size=100, force=False):
                 SELECT $1,entity_key,jsonb_build_object('name',display_name,
                     'dob',COALESCE(result_json->'Screening Inputs'->>'dob',date_of_birth::text),
                     'country',country_input,'entity_type',entity_type,'business_reference',business_reference)
-                FROM screened_entities''',cycle['cycle_id'])
+                FROM screened_entities s WHERE NOT screening_is_test(s)''',cycle['cycle_id'])
         # Pending work stays durable; no truncated term shortlist or dropped overflow.
         items = await conn.fetch('''SELECT * FROM screening_monitoring_items i WHERE cycle_id=$1 AND job_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM screened_entities s WHERE s.entity_key=i.entity_key AND screening_is_test(s))
             AND NOT EXISTS(SELECT 1 FROM screening_jobs j WHERE j.entity_key=i.entity_key AND j.status IN ('pending','running'))
             ORDER BY entity_key LIMIT $2''', cycle['cycle_id'], max(1,min(batch_size,1000)))
         queued = 0
@@ -38,7 +39,9 @@ async def tick(conn, batch_size=100, force=False):
             queued += 1
         await conn.execute('UPDATE screening_monitoring_cycles SET queued=queued+$2 WHERE cycle_id=$1',cycle['cycle_id'],queued)
         remaining = await conn.fetchval('''SELECT count(*) FROM screening_monitoring_items i LEFT JOIN screening_jobs j USING(job_id)
-            WHERE cycle_id=$1 AND (i.job_id IS NULL OR j.status IN ('pending','running') OR j.job_id IS NULL)''',cycle['cycle_id'])
+            WHERE cycle_id=$1 AND (i.job_id IS NULL OR j.status IN ('pending','running') OR j.job_id IS NULL)
+              AND NOT (i.job_id IS NULL AND EXISTS (SELECT 1 FROM screened_entities s
+                WHERE s.entity_key=i.entity_key AND screening_is_test(s)))''',cycle['cycle_id'])
         failed = await conn.fetchval("SELECT count(*) FROM screening_monitoring_items i JOIN screening_jobs j USING(job_id) WHERE cycle_id=$1 AND j.status='failed'", cycle['cycle_id'])
         if not remaining:
             await conn.execute("UPDATE screening_monitoring_cycles SET status=$2,finished_at=now(),error=$3 WHERE cycle_id=$1",cycle['cycle_id'], 'failed' if failed else 'completed', f'{failed} screening jobs failed; inspect and retry.' if failed else None)

@@ -187,6 +187,78 @@ class InternalDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final['status'],'failed')
             self.assertEqual(final['failed'],3)
 
+    async def test_test_flags_are_reference_scoped_audited_and_excluded_from_monitoring(self):
+        import httpx
+        import api_server
+        from screening_monitoring import tick
+        first = await self.save(key='test-subject', reference='TEST-001')
+        await self.save(key='real-subject', reference='POL-1')
+        pool = await asyncpg.create_pool(os.environ['SANCTIONS_TEST_ADMIN_DSN'], database=self.database, min_size=1, max_size=3)
+        api_server.app.dependency_overrides[api_server.require_admin] = lambda: {'sub':'administrator','is_admin':True}
+        try:
+            with patch.object(screening_db, 'get_pool', AsyncMock(return_value=pool)):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_server.app), base_url='http://test') as client:
+                    url='/admin/screening/test-records/test-subject'
+                    payload={'active':True,'reason':'Synthetic benchmark record','expected_run_id':str(uuid4())}
+                    self.assertEqual((await client.put(url,json=payload)).status_code,409)
+                    payload['expected_run_id']=first['run_id']
+                    self.assertEqual((await client.put(url,json=payload)).status_code,200)
+                    self.assertEqual(await screening_db.count_review_queue(self.conn),1)
+                    self.assertEqual(len(await screening_db.list_ai_triage_candidates(self.conn)),1)
+                    self.assertEqual((await client.get('/admin/screening/test-records')).json()['total'],1)
+                    with patch('screening_monitoring.postgres_manifest',AsyncMock(return_value=manifest())):
+                        cycle=await tick(self.conn)
+                    self.assertEqual(cycle['queued'],1)
+                    self.assertIsNone(await self.conn.fetchval('SELECT job_id FROM screening_monitoring_items WHERE entity_key=$1','test-subject'))
+                    payload.update(active=False,reason='Restore production monitoring')
+                    self.assertEqual((await client.put(url,json=payload)).status_code,200)
+                    self.assertEqual(await screening_db.count_review_queue(self.conn),2)
+                    self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_test_flag_events'),2)
+                    with self.assertRaises(asyncpg.RaiseError):
+                        await self.conn.execute('DELETE FROM screening_test_flag_events')
+                    await screening_db.enqueue_job(self.conn, entity_key='test-subject', name='Jane Smith', date_of_birth='1980',
+                        country='UK', entity_type='Person', requestor='fixture', business_reference='TEST-001', reason_for_check='Periodic Re-Screen')
+                    payload.update(active=True,reason='Synthetic benchmark record')
+                    self.assertEqual((await client.put(url,json=payload)).status_code,409)
+                    await self.conn.execute("UPDATE screening_jobs SET status='failed',finished_at=now()")
+                    with patch('screening_monitoring.postgres_manifest',AsyncMock(return_value=manifest())):
+                        await tick(self.conn)
+                    # The current cycle was snapshotted without the test record; a later cycle will include it.
+                    self.assertIsNone(await self.conn.fetchval('SELECT job_id FROM screening_monitoring_items WHERE entity_key=$1','test-subject'))
+                    self.assertEqual((await client.put(url,json=payload)).status_code,200)
+                    await self.conn.execute('UPDATE screened_entities SET business_reference=$2 WHERE entity_key=$1','test-subject','POL-2')
+                    self.assertEqual(await screening_db.count_review_queue(self.conn),2)
+                    self.assertFalse((await client.get('/admin/screening/test-records')).json()['items'][0]['scope_matches'])
+                    await self.conn.execute('UPDATE screened_entities SET business_reference=$2, country_input=$3 WHERE entity_key=$1','test-subject','TEST-001','France')
+                    self.assertEqual(await screening_db.count_review_queue(self.conn),2)
+        finally:
+            api_server.app.dependency_overrides.clear()
+            await pool.close()
+
+    async def test_flagged_unqueued_item_does_not_stall_existing_cycle(self):
+        from screening_monitoring import tick
+        await self.save(key='a-real'); await self.save(key='b-test', reference='TEST-001')
+        with patch('screening_monitoring.postgres_manifest',AsyncMock(return_value=manifest())):
+            self.assertEqual((await tick(self.conn,batch_size=1))['remaining'],2)
+            await self.conn.execute("""INSERT INTO screening_test_flags(entity_key,business_reference,active,reason,actor,normalized_name,entity_type,date_of_birth,country_input)
+                SELECT entity_key,business_reference,true,$2,$3,normalized_name,entity_type,date_of_birth,country_input
+                FROM screened_entities WHERE entity_key=$1""",'b-test','Synthetic fixture','admin')
+            await self.conn.execute("UPDATE screening_jobs SET status='failed',finished_at=now()")
+            result=await tick(self.conn)
+            self.assertEqual(result['status'],'failed')
+            self.assertEqual(result['remaining'],0)
+            self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_jobs'),1)
+
+    async def test_test_flag_routes_require_admin(self):
+        import httpx
+        import api_server
+        with patch.object(api_server, 'get_current_user', AsyncMock(return_value={'sub':'user','is_admin':False})):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_server.app),base_url='http://test') as client:
+                self.assertEqual((await client.get('/admin/screening/test-records')).status_code,403)
+                response=await client.put('/admin/screening/test-records/subject',json={
+                    'active':True,'reason':'Synthetic benchmark record','expected_run_id':str(uuid4())})
+                self.assertEqual(response.status_code,403)
+
     async def test_postgres_manifest_and_rows_cannot_change_between_type_passes(self):
         from source_assurance import postgres_manifest
         await self.conn.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')

@@ -488,6 +488,8 @@ async def auto_clear_task(conn, triage_id):
         if not task or task['status'] != 'PENDING_REVIEW' or task['effective_recommended_action'] != 'CLEAR':
             return False
         row = await conn.fetchrow('SELECT * FROM screened_entities WHERE entity_key=$1 FOR UPDATE',task['entity_key'])
+        if row and await conn.fetchval('SELECT screening_is_test(s) FROM screened_entities s WHERE s.entity_key=$1', row['entity_key']):
+            return False
         snapshot = decode(task['result_snapshot_json'])
         engine = decode(row['result_json']) if row else {}
         current = dict(engine, run_id=str(row['current_run_id'])) if row else {}
@@ -532,6 +534,8 @@ async def run_ai_triage_batch(conn, *, screening_db_module, trigger_type, trigge
         if auto_clear_enabled() and not retry_failed:
             existing = await conn.fetch("""SELECT triage_id FROM ai_triage_recommendations
                 WHERE status='PENDING_REVIEW' AND effective_recommended_action='CLEAR'
+                AND NOT EXISTS (SELECT 1 FROM screened_entities s
+                  WHERE s.entity_key=ai_triage_recommendations.entity_key AND screening_is_test(s))
                 ORDER BY created_at,triage_id LIMIT $1""",max(1,min(250,int(limit))))
             for row in existing:
                 auto_approved += int(await auto_clear_task(conn,str(row['triage_id'])))

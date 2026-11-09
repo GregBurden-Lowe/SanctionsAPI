@@ -404,6 +404,12 @@ class RefreshRequest(BaseModel):
     )
 
 
+class TestScreeningFlagRequest(BaseModel):
+    active: bool
+    reason: constr(strip_whitespace=True, min_length=10, max_length=500)
+    expected_run_id: str
+
+
 class LoginRequest(BaseModel):
     username: str = Field(..., description="Email (used as username)")
     password: str = Field(..., description="Password")
@@ -2188,6 +2194,70 @@ async def export_mi_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="screening-mi-export-{filename_date}.csv"'},
     )
+
+
+@app.get('/admin/screening/test-records', dependencies=[Depends(require_admin)])
+async def list_test_screening_records(limit: int = 100, offset: int = 0):
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, 'Database unavailable')
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('''SELECT f.entity_key,f.business_reference,f.reason,f.actor,f.updated_at,
+            s.display_name,s.current_run_id,s.business_reference AS current_reference,
+            COALESCE(screening_is_test(s),false) AS scope_matches
+            FROM screening_test_flags f LEFT JOIN screened_entities s USING(entity_key)
+            WHERE f.active ORDER BY f.updated_at DESC,f.entity_key LIMIT $1 OFFSET $2''',
+            max(1,min(limit,200)), max(0,offset))
+        total = await conn.fetchval('SELECT count(*) FROM screening_test_flags WHERE active')
+    return {'items': screening_db._to_json_safe([dict(r) for r in rows]), 'total': total}
+
+
+@app.put('/admin/screening/test-records/{entity_key}', dependencies=[Depends(require_admin)])
+async def set_test_screening_record(entity_key: str, body: TestScreeningFlagRequest,
+                                    payload: dict = Depends(require_admin)):
+    from uuid import UUID
+    try:
+        expected_run = UUID(body.expected_run_id)
+    except ValueError:
+        raise HTTPException(400, 'A valid expected run ID is required')
+    pool = await screening_db.get_pool()
+    if pool is None:
+        raise HTTPException(503, 'Database unavailable')
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if not await conn.fetchval('SELECT pg_try_advisory_xact_lock(720031005)'):
+                raise HTTPException(409, 'Monitoring is updating; please try again')
+            row = await conn.fetchrow('SELECT * FROM screened_entities WHERE entity_key=$1 FOR UPDATE', entity_key)
+            if not row:
+                raise HTTPException(404, 'Screening record not found')
+            if row['current_run_id'] != expected_run:
+                raise HTTPException(409, 'The screening has changed; reload and review it before continuing')
+            if body.active and await conn.fetchval('''SELECT EXISTS(SELECT 1 FROM screening_jobs
+                WHERE entity_key=$1 AND status IN ('pending','running'))''', entity_key):
+                raise HTTPException(409, 'A check is already queued or running for this record. Wait for it to finish, then reload before flagging it.')
+            reference = (row['business_reference'] or '').strip()
+            if not reference:
+                raise HTTPException(409, 'The screening has no business reference to scope this flag')
+            if not body.active:
+                existing = await conn.fetchrow('SELECT * FROM screening_test_flags WHERE entity_key=$1 AND active FOR UPDATE', entity_key)
+                if not existing:
+                    raise HTTPException(409, 'This record is not flagged as test data')
+                reference = existing['business_reference']
+            actor = str(payload.get('sub') or 'unknown')
+            await conn.execute('''INSERT INTO screening_test_flags(entity_key,business_reference,active,reason,actor,
+                normalized_name,entity_type,date_of_birth,country_input)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(entity_key) DO UPDATE SET
+                business_reference=EXCLUDED.business_reference,active=EXCLUDED.active,reason=EXCLUDED.reason,
+                actor=EXCLUDED.actor,normalized_name=EXCLUDED.normalized_name,entity_type=EXCLUDED.entity_type,
+                date_of_birth=EXCLUDED.date_of_birth,country_input=EXCLUDED.country_input,updated_at=now()''',
+                entity_key, reference, body.active, body.reason, actor, row['normalized_name'], row['entity_type'],
+                row['date_of_birth'], row['country_input'])
+            await conn.execute('''INSERT INTO screening_test_flag_events(entity_key,business_reference,active,reason,actor,run_id,identity_scope)
+                VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('normalized_name',$7::text,'entity_type',$8::text,
+                    'date_of_birth',$9::date,'country_input',$10::text))''', entity_key, reference, body.active,
+                body.reason, actor, expected_run, row['normalized_name'], row['entity_type'], row['date_of_birth'], row['country_input'])
+    return {'status':'ok', 'active':body.active, 'business_reference':reference,
+            'message':'Future monitoring excludes the flagged record and reference.' if body.active else 'Monitoring resumes for the record in a subsequent cycle.'}
 
 
 @app.get("/review/queue", dependencies=[Depends(get_current_user)])

@@ -345,6 +345,7 @@ async def ensure_schema(conn) -> None:
         await conn.execute((Path(__file__).parent / "migrations/006_ai_auto_clear.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/007_name_token_index.sql").read_text())
         await conn.execute((Path(__file__).parent / "migrations/008_review_queue_indexes.sql").read_text())
+        await conn.execute((Path(__file__).parent / "migrations/009_test_screening_flags.sql").read_text())
 
 
 async def get_valid_screening(conn, entity_key: str, fingerprint: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -895,6 +896,7 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25, retry_failed: bool
             review_status
         FROM screened_entities
         WHERE status NOT ILIKE 'Cleared%'
+          AND NOT screening_is_test(screened_entities)
           AND (
             status ILIKE 'Fail Sanction%'
             OR COALESCE((result_json->>'Is Sanctioned')::boolean, FALSE) = TRUE
@@ -1565,6 +1567,7 @@ def _review_queue_filter(
     n = 0
     if not include_cleared:
         conditions.append("status NOT ILIKE 'Cleared%'")
+    conditions.append("NOT screening_is_test(screened_entities)")
     review_status_clean = (review_status or "").strip().upper()
     if review_status_clean:
         if review_status_clean == "UNREVIEWED":
