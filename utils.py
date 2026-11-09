@@ -35,6 +35,7 @@ OSN_COLS = [
     "name",         # display name
     "aliases",
     "birth_date",
+    "birth_place",
     "positions",
     "countries",
     "program_ids",
@@ -642,6 +643,7 @@ async def sync_watchlist_entities_postgres(
                     {
                         "aliases": _safe_str(row.get("aliases")),
                         "birth_date": _safe_str(row.get("birth_date")),
+                        "birth_place": _safe_str(row.get("birth_place")),
                         "positions": _safe_str(row.get("positions")),
                         "program_ids": _safe_str(row.get("program_ids")),
                         "sanctions": _safe_str(row.get("sanctions")),
@@ -827,6 +829,7 @@ async def sync_own_watchlists_postgres(
                 {
                     "aliases": aliases_clean,
                     "birth_date": _safe_str(row.get("birth_date")),
+                    "birth_place": _safe_str(row.get("birth_place")),
                     "positions": _safe_str(row.get("positions")),
                     "program_ids": _safe_str(row.get("program_ids")),
                     "sanctions": _safe_str(row.get("sanctions")),
@@ -922,7 +925,7 @@ class ScreeningUnavailableError(RuntimeError):
     """Required source coverage is unavailable; never interpret this as no match."""
 
 
-STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1"
+STANDARD_RULES_VERSION = "evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1"
 
 
 def active_matcher_version() -> str:
@@ -937,7 +940,7 @@ def rules_version_for(backend) -> str:
     """v2 needs the PostgreSQL token index, so Parquet stays on the standard rules."""
     if str(backend) == "postgres_beta" and active_matcher_version() == "v2":
         from name_matching import MATCHER_RULES_VERSION
-        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1-dob-formats-v1"
+        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1"
     return STANDARD_RULES_VERSION
 
 
@@ -1542,15 +1545,20 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             reasons.append("Country differs; country alone does not exclude a name match.")
         elif country_status == "unknown":
             reasons.append("Country evidence is unavailable or was not supplied.")
+        birth_place = _safe_str(raw.get('birth_place') or row.get('birth_place'))
+        source_values = {'name': display_name, 'schema': schema, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}
+        if birth_place:
+            source_values['birth_place'] = birth_place
         evidence.append({
             **({"match_rule": "token_alignment" if hits and matched_index in aligned_indexes else "standard"}
                if token_stats is not None else {}),
             "record_id": _safe_str(row.get("entity_id") or row.get("id")) or None,
-            "source_evidence_hash": hashlib.sha256(json.dumps({'name': display_name, 'schema': schema, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}, sort_keys=True).encode()).hexdigest(),
+            "source_evidence_hash": hashlib.sha256(json.dumps(source_values, sort_keys=True).encode()).hexdigest(),
             "name": display_name, "matched_name": names[matched_index], "matched_alias": bool(matched_index),
             "entity_type": {'vessel': 'Vessel', 'aircraft': 'Aircraft'}.get(schema, entity_type), "source_type": source_type,
             "dataset": _safe_str(row.get("dataset")), "regime": _safe_str(row.get("regime") or _derive_regime_like_row(row)),
             "position": _safe_str(raw.get("positions") or row.get("positions")) or None,
+            **({'birth_place': birth_place} if birth_place else {}),
             "name_score": score, "birth_date": candidate_dob or None, "country": candidate_country or None,
             "all_birth_dates": [d.strip() for d in re.split(r'[;|]', candidate_dob) if d.strip()] if candidate_dob else [],
             "alias_count": len(names) - 1,

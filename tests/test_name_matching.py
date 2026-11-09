@@ -95,14 +95,14 @@ class FlagTests(unittest.TestCase):
         with patch.dict(os.environ):
             os.environ.pop('SCREENING_MATCHER_VERSION', None)
             self.assertEqual(utils.active_matcher_version(), 'v1')
-            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), 'evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1')
 
     def test_v2_applies_only_to_postgres_and_changes_the_fingerprint(self):
         args = ('Jane Smith', None, None, 'Person')
         standard = utils.screening_fingerprint(*args, 'postgres_beta')
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}):
-            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1-dob-links-v1-dob-formats-v1')
-            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1')
+            self.assertEqual(utils.rules_version_for('postgres_beta'), MATCHER_RULES_VERSION + '-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1')
+            self.assertEqual(utils.rules_version_for('worker-original'), 'evidence-v8-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1')
             self.assertNotEqual(utils.screening_fingerprint(*args, 'postgres_beta'), standard)
 
     def test_an_unknown_version_stops_screening(self):

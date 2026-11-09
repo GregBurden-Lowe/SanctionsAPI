@@ -14,6 +14,7 @@ function formatIngestedDate(raw: string | undefined): string {
 
 function formatDisplayDob(raw: string | undefined): string {
   if (!raw) return '—'
+  if (/^unparsed birthdate:/i.test(raw) || /<[^>]+>/.test(raw)) return 'Uninterpretable source entry'
   const ddmmyyyy = raw.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
   if (ddmmyyyy) {
     const d = new Date(parseInt(ddmmyyyy[3]), parseInt(ddmmyyyy[2]) - 1, parseInt(ddmmyyyy[1]))
@@ -210,6 +211,7 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-text-muted">
                       <span>Source: <span className="text-text-secondary">{candidate.dataset || 'Not specified'}</span></span>
                       <span>Type: <span className="text-text-secondary">{candidate.entity_type}</span></span>
+                      {candidate.birth_place && <span>Birthplace: <span className="text-text-secondary">{candidate.birth_place}</span></span>}
                       {candidate.record_id && (
                         <span className="break-all">Record: <span className="font-mono text-text-secondary">{candidate.record_id}</span></span>
                       )}

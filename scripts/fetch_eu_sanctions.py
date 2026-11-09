@@ -96,13 +96,49 @@ def _parse_entity(entity_el: ET.Element) -> dict:
     # Preserve every alternative and its approximation marker. An approximate
     # date must not become an exact date during matching.
     dobs = []
+    birth_places = []
     for bd in entity_el.findall(f"{NS_PREFIX}birthdate"):
         date_val = bd.get("birthdate", "").strip()
         year_val = bd.get("year", "").strip()
-        month_val = bd.get("month", "").strip()
-        value = date_val or (f"{year_val}-{month_val.zfill(2)}" if year_val and month_val.isdigit() else year_val)
+        month_val = (bd.get("monthOfYear") or bd.get("month") or "").strip()
+        day_val = (bd.get("dayOfMonth") or "").strip()
+        range_from = (bd.get("yearRangeFrom") or "").strip()
+        range_to = (bd.get("yearRangeTo") or "").strip()
+        remark = _text(bd.find(f"{NS_PREFIX}remark"))
+        calendar_type = (bd.get("calendarType") or "GREGORIAN").strip().upper()
+        if not any((date_val, year_val, month_val, day_val, range_from, range_to)):
+            location = ', '.join(filter(None, (_attr(bd, 'city'), _attr(bd, 'region'), _attr(bd, 'place'), _attr(bd, 'countryDescription'))))
+            if location:
+                birth_places.append(location)
+            # A remark can contain an age or an incomplete date; retain it as
+            # unknown rather than assuming it only describes the birthplace.
+            if remark:
+                dobs.append('unparsed date details: ' + remark)
+            continue
+        if (range_from or range_to) and (date_val or year_val or month_val or day_val):
+            value = 'unparsed mixed date fields: ' + ' '.join(filter(None, (date_val, year_val, month_val, day_val, range_from, range_to)))
+        elif range_from or range_to:
+            value = f'{range_from} to {range_to}' if range_from and range_to else 'unparsed date range: ' + (range_from or range_to)
+        elif date_val:
+            parts = date_val.split('-')
+            contradictory = len(parts) == 3 and any(
+                submitted and (not submitted.isdigit() or not actual.isdigit() or int(submitted) != int(actual))
+                for submitted, actual in ((year_val, parts[0]), (month_val, parts[1]), (day_val, parts[2]))
+            )
+            value = ('unparsed inconsistent date fields: ' + ' '.join(filter(None, (date_val, year_val, month_val, day_val)))
+                     if contradictory else date_val)
+        elif year_val and month_val.isdigit() and day_val.isdigit():
+            value = f'{year_val}-{month_val.zfill(2)}-{day_val.zfill(2)}'
+        elif year_val and month_val.isdigit() and not day_val:
+            value = f'{year_val}-{month_val.zfill(2)}'
+        elif year_val and not month_val and not day_val:
+            value = year_val
+        else:
+            value = 'unparsed date details: ' + ' '.join(filter(None, (year_val, month_val, day_val)))
+        if calendar_type != 'GREGORIAN':
+            value = f'unparsed {calendar_type} date: {value}'
         if not value:
-            value = "unparsed birthdate: " + ET.tostring(bd, encoding="unicode")
+            value = "unparsed date details"
         if bd.get("circa", "").lower() == "true":
             value = "circa " + value
         dobs.append(value)
@@ -138,6 +174,7 @@ def _parse_entity(entity_el: ET.Element) -> dict:
         "name": canonical_name,
         "aliases": encode_aliases(dict.fromkeys(alias_names)),
         "birth_date": ";".join(dict.fromkeys(dobs)),
+        "birth_place": ";".join(dict.fromkeys(birth_places)),
         "positions": "",
         "countries": ";".join(countries),
         "program_ids": programme,

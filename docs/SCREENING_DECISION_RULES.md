@@ -30,6 +30,8 @@ PostgreSQL and Parquet use the same candidate evaluator. Multi-valued aliases ar
 
 New PostgreSQL imports preserve raw DOB strings, including multiple values and partial precision. Existing rows cannot recover precision already discarded; refresh the watchlist before evaluating precision parity with Parquet. Provider IDs are retained in newly refreshed Parquet files.
 
+EU birth records can contain a birthplace without any date. The importer keeps that location separately instead of treating XML as an unknown DOB. EU month and bounded year-range fields are retained; incomplete ranges, date remarks, approximate ranges and non-Gregorian dates remain unknown unless supported by the evaluator. Contradictory date attributes are unknown. Source refresh, verified PostgreSQL/Parquet publication, existing reviewed-link hash checks and a coordinated API/worker release are required; old runs are not rewritten.
+
 ## DOB policy
 
 | Evidence | Behaviour |

@@ -17,6 +17,35 @@ from utils import _parse_aliases, refresh_opensanctions_data, ScreeningUnavailab
 
 
 class SourceAliasEncodingTests(unittest.TestCase):
+    def test_eu_birthplace_and_partial_date_are_preserved_without_raw_xml(self):
+        from defusedxml import ElementTree as ET
+        from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
+        from utils import _identity_dob_evidence
+        el = ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}"><nameAlias wholeName="Jane Smith"/>
+          <birthdate birthdate="1961-02-11" calendarType="GREGORIAN"/>
+          <birthdate city="Tehran" countryDescription="IRAN" calendarType="GREGORIAN"><regulationSummary/></birthdate>
+          <birthdate birthdate="1949-02-11"/><birthdate birthdate="1952-02-11"/><birthdate birthdate="1953-02-11"/>
+        </sanctionEntity>''')
+        row = _parse_entity(el)
+        self.assertEqual(row['birth_date'], '1961-02-11;1949-02-11;1952-02-11;1953-02-11')
+        self.assertEqual(row['birth_place'], 'Tehran, IRAN')
+        self.assertEqual(_identity_dob_evidence(row['birth_date'], '1994-07-19'), 'conflicting')
+        self.assertEqual(_identity_dob_evidence(row['birth_date'], '1952-02-11'), 'exact')
+        unknown = ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}"><nameAlias wholeName="Jane Smith"/>
+          <birthdate year="1961"/><birthdate city="Tehran"><remark>DOB: 10 October (year unknown)</remark></birthdate>
+        </sanctionEntity>''')
+        self.assertEqual(_identity_dob_evidence(_parse_entity(unknown)['birth_date'], '1994'), 'unknown')
+        incomplete = ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}"><nameAlias wholeName="Jane Smith"/>
+          <birthdate year="1961" monthOfYear="2"/><birthdate yearRangeFrom="1970" yearRangeTo="1972"/>
+          <birthdate yearRangeTo="1980"/><birthdate year="1400" calendarType="ISLAMIC"/>
+        </sanctionEntity>''')
+        values = _parse_entity(incomplete)['birth_date']
+        self.assertIn('1961-02', values)
+        self.assertIn('1970 to 1972', values)
+        self.assertIn('unparsed date range: 1980', values)
+        self.assertIn('unparsed ISLAMIC date: 1400', values)
+        self.assertEqual(_identity_dob_evidence(values, '1994'), 'unknown')
+
     def test_source_parsers_preserve_all_dob_alternatives(self):
         from defusedxml import ElementTree as ET
         from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
@@ -134,7 +163,7 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
                 entity_schema text, name text, name_norm text, birth_date date, dataset text,
                 regime text, raw_json jsonb)''')
             source = '"Jane; Jack" Smith'
-            row = {'id': 'fixture', 'name': 'Jane Smith', 'schema': 'Person', 'dataset': 'UK',
+            row = {'id': 'fixture', 'name': 'Jane Smith', 'schema': 'Person', 'dataset': 'UK', 'birth_place': 'Tehran, IRAN',
                    'source_type': 'sanctions', 'aliases': encode_aliases([source])}
             manifest = {'version': 'published-version', 'ingested_at': datetime.now(timezone.utc).isoformat(),
                         'list_counts': {k: 1 for k in ('UK', 'UN', 'EU', 'OFAC')}}
@@ -146,6 +175,7 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
                 await sync_own_watchlists_postgres(conn, watchlists_parquet_path=str(path))
                 raw = json.loads(await conn.fetchval('SELECT raw_json FROM watchlist_entities'))
                 self.assertEqual(_parse_aliases(raw['aliases']), [source])
+                self.assertEqual(raw['birth_place'], 'Tehran, IRAN')
                 saved = json.loads(await conn.fetchval('SELECT manifest FROM watchlist_source_state WHERE singleton'))
                 self.assertEqual(saved['version'], manifest['version'])
         finally:

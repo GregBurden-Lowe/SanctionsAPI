@@ -34,7 +34,7 @@ OUTPUT_PARQUET = os.path.join(DATA_DIR, "watchlists.parquet")
 
 # Columns must match OSN_COLS in utils.py
 REQUIRED_COLS = [
-    "id", "schema", "name", "aliases", "birth_date", "positions",
+    "id", "schema", "name", "aliases", "birth_date", "birth_place", "positions",
     "countries", "program_ids", "dataset", "sanctions", "source_type",
 ]
 

@@ -59,6 +59,7 @@ export interface CandidateEvidenceItem {
   dataset: string
   name_score: number
   birth_date: string | null
+  birth_place?: string
   all_birth_dates?: string[]
   linked_listing_evidence?: {
     record_ids: string[]
