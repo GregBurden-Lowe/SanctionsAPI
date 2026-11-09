@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import os
 import re
@@ -69,6 +70,7 @@ def _parse_individual(el: ET.Element) -> dict:
 
     # Preserve every alternative, including approximate and unsupported dates.
     dobs = []
+    dob_notes = []
     for dob_el in el.findall("INDIVIDUAL_DATE_OF_BIRTH"):
         date_str = _text(dob_el.find("DATE"))
         year_str = _text(dob_el.find("YEAR"))
@@ -85,6 +87,8 @@ def _parse_individual(el: ET.Element) -> dict:
         elif date_type not in ("", "EXACT"):
             value = date_type.lower() + " " + value
         dobs.append(value)
+        if note:
+            dob_notes.append({'date': value, 'note': note})
 
     # Nationality
     nationalities = []
@@ -114,6 +118,7 @@ def _parse_individual(el: ET.Element) -> dict:
         "name": canonical_name,
         "aliases": encode_aliases(alias_names),
         "birth_date": ";".join(dict.fromkeys(dobs)),
+        "birth_notes": json.dumps(dob_notes, ensure_ascii=False) if dob_notes else "",
         "positions": designation,
         "countries": ";".join(nationalities),
         "program_ids": reference_num,

@@ -34,8 +34,10 @@ OSN_COLS = [
     "schema",       # Person / Organization / Company / LegalEntity
     "name",         # display name
     "aliases",
+    "alias_metadata",
     "birth_date",
     "birth_place",
+    "birth_notes",
     "positions",
     "countries",
     "program_ids",
@@ -642,8 +644,10 @@ async def sync_watchlist_entities_postgres(
                 raw_json = json.dumps(
                     {
                         "aliases": _safe_str(row.get("aliases")),
+                        "alias_metadata": _safe_str(row.get("alias_metadata")),
                         "birth_date": _safe_str(row.get("birth_date")),
                         "birth_place": _safe_str(row.get("birth_place")),
+                        "birth_notes": _safe_str(row.get("birth_notes")),
                         "positions": _safe_str(row.get("positions")),
                         "program_ids": _safe_str(row.get("program_ids")),
                         "sanctions": _safe_str(row.get("sanctions")),
@@ -828,8 +832,10 @@ async def sync_own_watchlists_postgres(
             raw_json = json.dumps(
                 {
                     "aliases": aliases_clean,
+                    "alias_metadata": _safe_str(row.get("alias_metadata")),
                     "birth_date": _safe_str(row.get("birth_date")),
                     "birth_place": _safe_str(row.get("birth_place")),
+                    "birth_notes": _safe_str(row.get("birth_notes")),
                     "positions": _safe_str(row.get("positions")),
                     "program_ids": _safe_str(row.get("program_ids")),
                     "sanctions": _safe_str(row.get("sanctions")),
@@ -1546,9 +1552,25 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         elif country_status == "unknown":
             reasons.append("Country evidence is unavailable or was not supplied.")
         birth_place = _safe_str(raw.get('birth_place') or row.get('birth_place'))
+        alias_metadata = _safe_str(raw.get('alias_metadata') or row.get('alias_metadata'))
+        birth_notes = _safe_str(raw.get('birth_notes') or row.get('birth_notes'))
         source_values = {'name': display_name, 'schema': schema, 'aliases': aliases, 'dob': candidate_dob, 'country': candidate_country, 'dataset': _safe_str(row.get('dataset')), 'regime': _safe_str(row.get('regime') or _derive_regime_like_row(row)), 'position': _safe_str(raw.get('positions') or row.get('positions')), 'program_ids': _safe_str(raw.get('program_ids') or row.get('program_ids')), 'sanctions': _safe_str(raw.get('sanctions') or row.get('sanctions'))}
         if birth_place:
             source_values['birth_place'] = birth_place
+        if alias_metadata:
+            source_values['alias_metadata'] = alias_metadata
+        if birth_notes:
+            source_values['birth_notes'] = birth_notes
+        try:
+            parsed_aliases = json.loads(alias_metadata) if alias_metadata else []
+            matched_alias_metadata = [item for item in parsed_aliases if isinstance(item, dict) and item.get('name') == names[matched_index]] if matched_index and isinstance(parsed_aliases, list) else []
+        except (ValueError, TypeError):
+            matched_alias_metadata = []
+        try:
+            parsed_notes = json.loads(birth_notes) if birth_notes else []
+            parsed_notes = [item for item in parsed_notes if isinstance(item, dict) and isinstance(item.get('note'), str) and isinstance(item.get('date'), str)] if isinstance(parsed_notes, list) else []
+        except (ValueError, TypeError):
+            parsed_notes = []
         evidence.append({
             **({"match_rule": "token_alignment" if hits and matched_index in aligned_indexes else "standard"}
                if token_stats is not None else {}),
@@ -1559,6 +1581,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             "dataset": _safe_str(row.get("dataset")), "regime": _safe_str(row.get("regime") or _derive_regime_like_row(row)),
             "position": _safe_str(raw.get("positions") or row.get("positions")) or None,
             **({'birth_place': birth_place} if birth_place else {}),
+            **({'matched_alias_metadata': matched_alias_metadata} if matched_alias_metadata else {}),
+            **({'birth_notes': parsed_notes} if parsed_notes else {}),
             "name_score": score, "birth_date": candidate_dob or None, "country": candidate_country or None,
             "all_birth_dates": [d.strip() for d in re.split(r'[;|]', candidate_dob) if d.strip()] if candidate_dob else [],
             "alias_count": len(names) - 1,

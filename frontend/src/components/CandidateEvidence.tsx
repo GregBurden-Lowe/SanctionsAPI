@@ -212,10 +212,12 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                       <span>Source: <span className="text-text-secondary">{candidate.dataset || 'Not specified'}</span></span>
                       <span>Type: <span className="text-text-secondary">{candidate.entity_type}</span></span>
                       {candidate.birth_place && <span>Birthplace: <span className="text-text-secondary">{candidate.birth_place}</span></span>}
+                      {candidate.matched_alias_metadata?.map((alias, index) => <span key={`${alias.name}-${index}`}>Alias quality: <span className="text-text-secondary">{alias.quality || 'Not specified'}{alias.type ? ` (${alias.type})` : ''}</span></span>)}
                       {candidate.record_id && (
                         <span className="break-all">Record: <span className="font-mono text-text-secondary">{candidate.record_id}</span></span>
                       )}
                     </div>
+                    {candidate.birth_notes?.map((note, index) => <p key={`${note.date}-${index}`} className="text-[11px] text-text-secondary">DOB source note ({note.date || 'date not specified'}): {note.note}</p>)}
                     {candidate.linked_listing_evidence && (
                       <div className="text-[11px] text-text-secondary space-y-1">
                         <p>Reviewed linked listings: {candidate.linked_listing_evidence.record_ids.join(', ')}</p>

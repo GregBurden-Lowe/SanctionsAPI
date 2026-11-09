@@ -92,6 +92,18 @@ class MatchingEvidenceTests(unittest.TestCase):
         self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(result['Candidate Evidence'][0]['dob_assessment'], 'unknown')
 
+    def test_alias_quality_and_dob_notes_are_evidence_not_clearance_rules(self):
+        item = row('Jane Smith', aliases='Jane Doe', birth_date='1980-01-01',
+                   alias_metadata=json.dumps([{'name':'Jane Doe','type':'a.k.a.','quality':'weak'}]),
+                   birth_notes=json.dumps([{'date':'1980-01-01','note':'from false passport'}]))
+        result = evaluate([item], name='Jane Doe', dob='1980-01-01')
+        self.assertTrue(result['Match Found'])
+        evidence = result['Candidate Evidence'][0]
+        self.assertEqual(evidence['matched_alias_metadata'][0]['quality'], 'weak')
+        self.assertEqual(evidence['birth_notes'][0]['note'], 'from false passport')
+        changed = dict(item, alias_metadata=json.dumps([{'name':'Jane Doe','type':'a.k.a.','quality':'strong'}]))
+        self.assertNotEqual(evidence['source_evidence_hash'], evaluate([changed], name='Jane Doe', dob='1980-01-01')['Candidate Evidence'][0]['source_evidence_hash'])
+
     def test_ofac_written_dates_disambiguate_without_suppressing_name_only_matches(self):
         rows = [dict(name='Abdul RASHID BALUCH', schema='Person', source_type='sanctions', dataset='OFAC', id='ofac-17765', aliases='Qari Abdul RASHID', birth_date='1970 to 1972'),
                 dict(name='Waseem Rauf LOAN', schema='Person', source_type='sanctions', dataset='OFAC', id='ofac-10593', aliases='Abdul Majid RASHID', birth_date='03 Mar 1966')]

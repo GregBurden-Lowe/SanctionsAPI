@@ -17,6 +17,25 @@ from utils import _parse_aliases, refresh_opensanctions_data, ScreeningUnavailab
 
 
 class SourceAliasEncodingTests(unittest.TestCase):
+    def test_source_alias_quality_and_dob_notes_are_preserved_as_metadata(self):
+        from defusedxml import ElementTree as ET
+        from scripts.fetch_ofac_sanctions import _parse_entry, OFAC_NS
+        ofac = ET.fromstring(f'''<sdnEntry xmlns="{OFAC_NS}"><lastName>Jane Smith</lastName><akaList>
+          <aka><type>a.k.a.</type><category>weak</category><lastName>Jane Doe</lastName></aka>
+          <aka><type>a.k.a.</type><category>strong</category><lastName>Jane Brown</lastName></aka>
+        </akaList></sdnEntry>''')
+        item = _parse_entry(ofac, 'OFAC SDN List')
+        self.assertEqual(_parse_aliases(item['aliases']), ['Jane Doe', 'Jane Brown'])
+        self.assertEqual(json.loads(item['alias_metadata']), [
+            {'name':'Jane Doe','type':'a.k.a.','quality':'weak'},
+            {'name':'Jane Brown','type':'a.k.a.','quality':'strong'}])
+        un = ET.fromstring('''<INDIVIDUAL><FIRST_NAME>Jane</FIRST_NAME>
+          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>EXACT</TYPE_OF_DATE><DATE>1979-03-03</DATE><NOTE>from false passport</NOTE></INDIVIDUAL_DATE_OF_BIRTH>
+        </INDIVIDUAL>''')
+        item = _parse_individual(un)
+        self.assertEqual(item['birth_date'], '1979-03-03')
+        self.assertEqual(json.loads(item['birth_notes']), [{'date':'1979-03-03','note':'from false passport'}])
+
     def test_eu_birthplace_and_partial_date_are_preserved_without_raw_xml(self):
         from defusedxml import ElementTree as ET
         from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
@@ -184,11 +203,13 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
         </sanctionEntity>'''))
         uk_dob = _parse_dob(ET.fromstring('<Individual><DOBs><DOB>00/00/1975</DOB></DOBs></Individual>'))
         un = _parse_individual(ET.fromstring('''<INDIVIDUAL><REFERENCE_NUMBER>TEST</REFERENCE_NUMBER><FIRST_NAME>Alex</FIRST_NAME><SECOND_NAME>Brown</SECOND_NAME>
-          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE><FROM_YEAR>1968</FROM_YEAR><TO_YEAR>1973</TO_YEAR></INDIVIDUAL_DATE_OF_BIRTH></INDIVIDUAL>'''))
+          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE><FROM_YEAR>1968</FROM_YEAR><TO_YEAR>1973</TO_YEAR></INDIVIDUAL_DATE_OF_BIRTH>
+          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>EXACT</TYPE_OF_DATE><YEAR>1965</YEAR><NOTE>from false passport</NOTE></INDIVIDUAL_DATE_OF_BIRTH></INDIVIDUAL>'''))
         uk = {'id':'uk-test','name':'Mara Smith','schema':'Person','dataset':'UK Sanctions List (FCDO)',
               'source_type':'sanctions','aliases':'','birth_date':uk_dob}
         ofac = {'id':'ofac-test','name':'Zara Wong','schema':'Person','dataset':'OFAC SDN List',
-                'source_type':'sanctions','aliases':'','birth_date':'03 Mar 1966'}
+                'source_type':'sanctions','aliases':'Zara Young','birth_date':'03 Mar 1966',
+                'alias_metadata':json.dumps([{'name':'Zara Young','type':'a.k.a.','quality':'weak'}])}
         rows = [eu, un, uk, ofac]
         def fetch(*, include_peps, output_path):
             df = fetch_all_watchlists._ensure_cols(pd.DataFrame(rows))
@@ -213,6 +234,10 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
                     raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='eu-eu-test'"))
                     self.assertEqual(raw['birth_date'], expected_dob)
                     self.assertEqual(raw['birth_place'], 'Tehran, IRAN')
+                    ofac_raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='ofac-test'"))
+                    self.assertEqual(json.loads(ofac_raw['alias_metadata'])[0]['quality'], 'weak')
+                    un_raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='un-individual-TEST'"))
+                    self.assertEqual(json.loads(un_raw['birth_notes'])[0]['note'], 'from false passport')
                     for name, dob in [('Jane Doe','1994-07-19'),('Mara Smith','1994-07-19'),('Alex Brown','1994-07-19'),('Zara Wong','1994-07-19')]:
                         result = await run_postgres_check(conn, name=name, dob=dob, country='UK', entity_type='Person')
                         self.assertFalse(result['Match Found'], name)

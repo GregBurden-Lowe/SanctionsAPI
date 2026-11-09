@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import json
 import os
 import re
 from pathlib import Path
@@ -88,6 +89,7 @@ def _parse_entry(entry_el: ET.Element, source_label: str) -> dict:
 
     # Aliases (aka names)
     alias_names = []
+    alias_metadata = []
     aka_list = _find(entry_el, "akaList")
     if aka_list is not None:
         for aka in _findall(aka_list, "aka"):
@@ -96,6 +98,8 @@ def _parse_entry(entry_el: ET.Element, source_label: str) -> dict:
             aka_name = f"{aka_first} {aka_last}".strip() if aka_first else aka_last
             if aka_name:
                 alias_names.append(aka_name)
+                alias_metadata.append({'name': aka_name, 'type': _text(_find(aka, 'type')),
+                                       'quality': _text(_find(aka, 'category'))})
 
     # DOB
     dobs = []
@@ -141,6 +145,7 @@ def _parse_entry(entry_el: ET.Element, source_label: str) -> dict:
         "schema": schema,
         "name": name,
         "aliases": encode_aliases(alias_names),
+        "alias_metadata": json.dumps(alias_metadata, ensure_ascii=False) if alias_metadata else "",
         "birth_date": ";".join(dict.fromkeys(dobs)),
         "positions": title,
         "countries": ";".join(nationalities),

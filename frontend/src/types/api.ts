@@ -60,6 +60,8 @@ export interface CandidateEvidenceItem {
   name_score: number
   birth_date: string | null
   birth_place?: string
+  birth_notes?: Array<{ date: string; note: string }>
+  matched_alias_metadata?: Array<{ name: string; type?: string; quality?: string }>
   all_birth_dates?: string[]
   linked_listing_evidence?: {
     record_ids: string[]

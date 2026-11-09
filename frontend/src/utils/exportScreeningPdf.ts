@@ -244,6 +244,7 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
         ? `<br><small>Alias: ${safe(c.matched_name)}</small>` : ''
       const aliasCountLabel = c.alias_count && c.alias_count > 1
         ? `<br><small>${c.alias_count} aliases listed</small>` : ''
+      const aliasQualityLabel = c.matched_alias_metadata?.map(a => `<br><small>Alias quality: ${safe(a.quality || 'Not specified')}${a.type ? ` (${safe(a.type)})` : ''}</small>`).join('') || ''
       const showDob = (value: string) => /^unparsed birthdate:/i.test(value) || /<[^>]+>/.test(value) ? 'Uninterpretable source entry' : value
       const dobDisplay = c.all_birth_dates && c.all_birth_dates.length > 1
         ? safe(c.all_birth_dates.map(showDob).join('; '))
@@ -252,9 +253,9 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
         ? `<br><small>Linked records: ${safe(c.linked_listing_evidence.record_ids.join(', '))}; review: ${safe(c.linked_listing_evidence.review_reference)} (${safe(c.linked_listing_evidence.reviewed_by)})<br>${Object.entries(c.linked_listing_evidence.birth_dates_by_record).map(([id, dates]) => `${safe(id)}: ${safe(dates || 'No DOB recorded')}`).join('<br>')}</small>`
         : ''
       sec5Rows.push([
-        `${safe(c.name)}${aliasLabel}${aliasCountLabel}<br><small>${safe(c.dataset)}</small>${c.birth_place ? `<br><small>Birthplace: ${safe(c.birth_place)}</small>` : ''}${linked}`,
+        `${safe(c.name)}${aliasLabel}${aliasCountLabel}${aliasQualityLabel}<br><small>${safe(c.dataset)}</small>${c.birth_place ? `<br><small>Birthplace: ${safe(c.birth_place)}</small>` : ''}${linked}`,
         safe(String(c.name_score) + '/100'),
-        dobDisplay + `<br><small>${dobMatch}</small>`,
+        dobDisplay + `<br><small>${dobMatch}</small>` + (c.birth_notes?.map(n => `<br><small>DOB source note (${safe(n.date)}): ${safe(n.note)}</small>`).join('') || ''),
         safe(c.country || '—') + `<br><small>${ctryMatch}</small>`,
         disp,
       ])
