@@ -108,17 +108,20 @@ def main(stop_event=None):
             try:
                 recover_expired(conn, max_attempts)
                 conn.commit()
-                # Claim one pending job
+                # Hold automatic full-population/delta jobs without blocking
+                # interactive or manually submitted screening jobs.
+                from screening_monitoring import reconciliation_paused
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         """
                         SELECT job_id, entity_key, name, date_of_birth, country, entity_type, requestor, business_reference, reason_for_check, reason, refresh_run_id, force_rescreen
                         FROM screening_jobs
                         WHERE status = 'pending'
+                          AND (NOT %s OR COALESCE(reason, '') NOT IN ('all_sources_reconciliation', 'uk_delta_rescreen'))
                         ORDER BY created_at
                         LIMIT 1
                         FOR UPDATE SKIP LOCKED
-                        """
+                        """, (reconciliation_paused(),)
                     )
                     row = cur.fetchone()
                 if row is None:

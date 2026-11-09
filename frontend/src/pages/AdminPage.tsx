@@ -9,6 +9,8 @@ import {
   getAiTriageHealth,
   getMatchingConfig,
   getRescreenSummary,
+  reconciliationPauseStatus,
+  setReconciliationPause,
   listAiTriageRuns,
   refreshOpensanctions,
   runAiTriage,
@@ -34,6 +36,34 @@ export function AdminPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
+  const [reconciliationPaused, setReconciliationPaused] = useState<boolean | null>(null)
+  const [reconciliationBusy, setReconciliationBusy] = useState(false)
+  const [reconciliationError, setReconciliationError] = useState<string | null>(null)
+
+  const loadReconciliation = async () => {
+    try {
+      const res = await reconciliationPauseStatus()
+      if (!res.ok) throw new Error('Unable to load re-screening status.')
+      const data = await res.json() as { paused: boolean }
+      setReconciliationPaused(data.paused)
+      setReconciliationError(null)
+    } catch (error) {
+      setReconciliationError(error instanceof Error ? error.message : 'Unable to load re-screening status.')
+    }
+  }
+
+  const changeReconciliation = async (paused: boolean) => {
+    setReconciliationBusy(true)
+    setReconciliationError(null)
+    try {
+      const res = await setReconciliationPause(paused)
+      if (!res.ok) throw new Error('Unable to update re-screening status.')
+      const data = await res.json() as { paused: boolean }
+      setReconciliationPaused(data.paused)
+    } catch (error) {
+      setReconciliationError(error instanceof Error ? error.message : 'Unable to update re-screening status.')
+    } finally { setReconciliationBusy(false) }
+  }
 
   const [aiHealth, setAiHealth] = useState<AiTriageHealthResponse | null>(null)
   const [aiRuns, setAiRuns] = useState<AiTriageRun[]>([])
@@ -65,6 +95,7 @@ export function AdminPage() {
 
   useEffect(() => {
     void loadSummary()
+    void loadReconciliation()
   }, [])
 
   const loadMatchingConfig = async () => {
@@ -259,6 +290,15 @@ export function AdminPage() {
         <SectionHeader title="Admin tools" />
         <RetentionPreview />
         <AcceptanceExport />
+        <Card>
+          <CardHeader><CardTitle>Automatic re-screening</CardTitle></CardHeader>
+          <CardBody className="space-y-3">
+            <p className="text-sm text-text-secondary">{reconciliationPaused === null ? 'Checking status…' : reconciliationPaused ? 'Paused. Queued automatic re-screens are retained until resumed.' : 'Running. Automatic re-screens are processed as normal.'}</p>
+            <p className="text-xs text-text-secondary">Ordinary screening jobs continue. A job already running when paused may finish.</p>
+            {reconciliationError && <ErrorBox message={reconciliationError} />}
+            {reconciliationPaused !== null && <Button type="button" variant="secondary" disabled={reconciliationBusy} onClick={() => void changeReconciliation(!reconciliationPaused)}>{reconciliationBusy ? 'Updating…' : reconciliationPaused ? 'Resume automatic re-screening' : 'Pause automatic re-screening'}</Button>}
+          </CardBody>
+        </Card>
         <Card>
           <CardHeader>
             <CardTitle>Data refresh mode</CardTitle>

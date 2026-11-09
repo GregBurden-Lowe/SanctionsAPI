@@ -1,12 +1,36 @@
 """Durable, paginated full-population reconciliation across all supported sources."""
 import json
+import os
 from datetime import datetime, timezone
 
 from source_assurance import decode, require_current, parquet_manifest, postgres_manifest
 
 
+def reconciliation_pause_path():
+    return os.path.join(os.environ.get('SANCTIONS_DATA_DIR', 'data'), '.reconciliation-paused')
+
+
+def reconciliation_paused():
+    return os.path.exists(reconciliation_pause_path())
+
+
+def set_reconciliation_paused(paused):
+    path = reconciliation_pause_path()
+    if paused:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8'):
+            pass
+    else:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 async def tick(conn, batch_size=100, force=False):
     import screening_db
+    if reconciliation_paused():
+        return {'status': 'paused', 'queued': 0}
     coverage = require_current(await postgres_manifest(conn))
     async with conn.transaction():
         if not await conn.fetchval('SELECT pg_try_advisory_xact_lock(720031005)'):
@@ -52,7 +76,7 @@ async def tick(conn, batch_size=100, force=False):
 
 async def summary(conn):
     from source_assurance import postgres_manifest, assess
-    return {'postgres': assess(await postgres_manifest(conn)), 'parquet': assess(parquet_manifest()),
+    return {'reconciliation_paused': reconciliation_paused(), 'postgres': assess(await postgres_manifest(conn)), 'parquet': assess(parquet_manifest()),
             'monitor': dict(await conn.fetchrow('SELECT * FROM screening_monitoring_state WHERE singleton') or {}),
             'refresh': dict(await conn.fetchrow('SELECT * FROM screening_source_health WHERE singleton') or {}),
             'cycles': [dict(r) for r in await conn.fetch('SELECT * FROM screening_monitoring_cycles ORDER BY started_at DESC LIMIT 10')]}

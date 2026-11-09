@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import logging
 import os
+import re
 import sys
 import defusedxml.ElementTree as ET
 from datetime import datetime
@@ -72,8 +73,14 @@ def _parse_individual(el: ET.Element) -> dict:
         date_str = _text(dob_el.find("DATE"))
         year_str = _text(dob_el.find("YEAR"))
         date_type = _text(dob_el.find("TYPE_OF_DATE")).upper()
+        from_year = _text(dob_el.find("FROM_YEAR"))
+        to_year = _text(dob_el.find("TO_YEAR"))
+        note = _text(dob_el.find("NOTE"))
         value = date_str or year_str
-        if not value:
+        if (date_type == "BETWEEN" and not value and not note
+                and re.fullmatch(r"\d{4}", from_year) and re.fullmatch(r"\d{4}", to_year)):
+            value = f"{from_year} to {to_year}"
+        elif not value:
             value = "unparsed " + " ".join(f"{_tag.tag}={_text(_tag)}" for _tag in dob_el if _text(_tag))
         elif date_type not in ("", "EXACT"):
             value = date_type.lower() + " " + value

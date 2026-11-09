@@ -46,6 +46,27 @@ class SourceAliasEncodingTests(unittest.TestCase):
         self.assertIn('unparsed ISLAMIC date: 1400', values)
         self.assertEqual(_identity_dob_evidence(values, '1994'), 'unknown')
 
+    def test_uk_placeholder_dates_keep_only_known_precision(self):
+        from defusedxml import ElementTree as ET
+        from scripts.fetch_uk_sanctions import _parse_dob
+        individual = ET.fromstring('<Individual><DOBs><DOB>00/00/1975</DOB><DOB>15/08/19yy</DOB><DOB>15/00/1975</DOB><DOB>00/02/1975</DOB></DOBs></Individual>')
+        self.assertEqual(_parse_dob(individual), '1975;15/08/19yy;15/00/1975;1975-02')
+
+    def test_un_year_ranges_require_both_bounds_and_no_uncertainty_note(self):
+        from defusedxml import ElementTree as ET
+        from utils import _identity_dob_evidence
+        el = ET.fromstring('''<INDIVIDUAL><FIRST_NAME>Jane</FIRST_NAME>
+          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE><FROM_YEAR>1968</FROM_YEAR><TO_YEAR>1973</TO_YEAR></INDIVIDUAL_DATE_OF_BIRTH>
+        </INDIVIDUAL>''')
+        value = _parse_individual(el)['birth_date']
+        self.assertEqual(value, '1968 to 1973')
+        self.assertEqual(_identity_dob_evidence(value, '1970'), 'compatible')
+        self.assertEqual(_identity_dob_evidence(value, '1994'), 'conflicting')
+        el = ET.fromstring('''<INDIVIDUAL><FIRST_NAME>Jane</FIRST_NAME>
+          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE><FROM_YEAR>1968</FROM_YEAR><TO_YEAR>1973</TO_YEAR><NOTE>Approximately</NOTE></INDIVIDUAL_DATE_OF_BIRTH>
+        </INDIVIDUAL>''')
+        self.assertEqual(_identity_dob_evidence(_parse_individual(el)['birth_date'], '1994'), 'unknown')
+
     def test_source_parsers_preserve_all_dob_alternatives(self):
         from defusedxml import ElementTree as ET
         from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
@@ -143,6 +164,64 @@ class SourceAliasEncodingTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv('SANCTIONS_TEST_ADMIN_DSN'), 'Requires isolated local PostgreSQL')
 class SourceImportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successive_refreshes_preserve_corrected_birth_evidence_through_postgres_matching(self):
+        import sys
+        import asyncpg
+        from defusedxml import ElementTree as ET
+        from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
+        from scripts.fetch_uk_sanctions import _parse_dob
+        from scripts.rehearse_history_migration import local_dsn
+        from screening_policy import run_postgres_check
+        from utils import sync_own_watchlists_postgres
+
+        scripts_dir = str(Path(__file__).resolve().parents[1] / 'scripts')
+        sys.path.insert(0, scripts_dir)
+        self.addCleanup(sys.path.remove, scripts_dir)
+        import fetch_all_watchlists
+        eu = _parse_entity(ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}" logicalId="eu-test"><subjectType code="person"/>
+          <nameAlias wholeName="Jane Doe"/><birthdate birthdate="1961-02-11"/>
+          <birthdate city="Tehran" countryDescription="IRAN"/><birthdate birthdate="1952-02-11"/>
+        </sanctionEntity>'''))
+        uk_dob = _parse_dob(ET.fromstring('<Individual><DOBs><DOB>00/00/1975</DOB></DOBs></Individual>'))
+        un = _parse_individual(ET.fromstring('''<INDIVIDUAL><REFERENCE_NUMBER>TEST</REFERENCE_NUMBER><FIRST_NAME>Alex</FIRST_NAME><SECOND_NAME>Brown</SECOND_NAME>
+          <INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE><FROM_YEAR>1968</FROM_YEAR><TO_YEAR>1973</TO_YEAR></INDIVIDUAL_DATE_OF_BIRTH></INDIVIDUAL>'''))
+        uk = {'id':'uk-test','name':'Mara Smith','schema':'Person','dataset':'UK Sanctions List (FCDO)',
+              'source_type':'sanctions','aliases':'','birth_date':uk_dob}
+        ofac = {'id':'ofac-test','name':'Zara Wong','schema':'Person','dataset':'OFAC SDN List',
+                'source_type':'sanctions','aliases':'','birth_date':'03 Mar 1966'}
+        rows = [eu, un, uk, ofac]
+        def fetch(*, include_peps, output_path):
+            df = fetch_all_watchlists._ensure_cols(pd.DataFrame(rows))
+            df.to_parquet(output_path, index=False)
+            return df
+
+        dsn = local_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'])
+        admin = await asyncpg.connect(dsn); database = 'sanctions_refresh_' + uuid4().hex; conn = None; created = False
+        try:
+            await admin.execute(f'CREATE DATABASE "{database}"'); created = True
+            conn = await asyncpg.connect(dsn, database=database)
+            await conn.execute('CREATE EXTENSION pg_trgm')
+            await conn.execute('''CREATE TABLE watchlist_entities(source_type text, entity_id text, entity_schema text,
+                name text, name_norm text, birth_date date, dataset text, regime text, raw_json jsonb)''')
+            with tempfile.TemporaryDirectory() as folder, patch('utils.DATA_DIR', folder), \
+                 patch('utils.OWN_PARQUET', str(Path(folder) / 'watchlists.parquet')), \
+                 patch.object(fetch_all_watchlists, 'fetch_all', side_effect=fetch):
+                for expected_dob in ('1961-02-11;1952-02-11', '1961-02-11;1952-02-11;1953-02-11'):
+                    eu['birth_date'] = expected_dob
+                    refresh_opensanctions_data()
+                    await sync_own_watchlists_postgres(conn, watchlists_parquet_path=str(Path(folder) / 'watchlists.parquet'))
+                    raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='eu-eu-test'"))
+                    self.assertEqual(raw['birth_date'], expected_dob)
+                    self.assertEqual(raw['birth_place'], 'Tehran, IRAN')
+                    for name, dob in [('Jane Doe','1994-07-19'),('Mara Smith','1994-07-19'),('Alex Brown','1994-07-19'),('Zara Wong','1994-07-19')]:
+                        result = await run_postgres_check(conn, name=name, dob=dob, country='UK', entity_type='Person')
+                        self.assertFalse(result['Match Found'], name)
+                    self.assertTrue((await run_postgres_check(conn, name='Jane Doe', dob=None, country='UK', entity_type='Person'))['Match Found'])
+        finally:
+            if conn: await conn.close()
+            if created: await admin.execute(f'DROP DATABASE "{database}"')
+            await admin.close()
+
     async def test_import_preserves_encoded_alias_and_published_version(self):
         import asyncpg
         import pyarrow as pa

@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import unittest
+import tempfile
 from uuid import uuid4
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -32,6 +33,21 @@ class ScreeningSafetyTests(unittest.TestCase):
         self.assertNotEqual(fp(), fp(name='Jane B Smith'))
         self.assertNotEqual(fp(), fp(country='US'))
         self.assertNotEqual(fp(), fp(backend='postgres_beta'))
+
+
+class ReconciliationPauseApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_can_pause_and_resume_with_shared_flag(self):
+        import httpx
+        api_server.app.dependency_overrides[api_server.require_admin] = lambda: {'sub': 'admin'}
+        self.addCleanup(api_server.app.dependency_overrides.clear)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'SANCTIONS_DATA_DIR': directory}):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_server.app), base_url='http://test') as client:
+                self.assertFalse((await client.get('/admin/screening/reconciliation-pause')).json()['paused'])
+                self.assertTrue((await client.post('/admin/screening/reconciliation-pause?paused=true')).json()['paused'])
+                self.assertTrue((await client.get('/admin/screening/reconciliation-pause')).json()['paused'])
+                self.assertFalse((await client.post('/admin/screening/reconciliation-pause?paused=false')).json()['paused'])
+                api_server.app.dependency_overrides.clear()
+                self.assertIn((await client.post('/admin/screening/reconciliation-pause?paused=true')).status_code, (401, 403))
 
 
 @unittest.skipUnless(os.getenv('SANCTIONS_TEST_ADMIN_DSN'), 'Set SANCTIONS_TEST_ADMIN_DSN for isolated PostgreSQL integration tests')
@@ -167,6 +183,29 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status['result']['Screening Inputs']['country'], 'United Kingdom')
             status = await screening_db.get_job_status(conn, explicit['job_id'])
             self.assertEqual(status['result']['Screening Inputs']['country'], 'France')
+
+    async def test_paused_reconciliation_keeps_manual_jobs_running_and_resumes(self):
+        import screening_worker
+        from screening_monitoring import set_reconciliation_paused, tick
+        from psycopg2.extensions import make_dsn
+        worker_dsn = make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)
+        async with self.pool.acquire() as conn:
+            held = await screening_db.enqueue_job(conn, 'held', 'Held Person', None, None, 'Person', 'Alice', 'HELD', 'Periodic Re-Screen', reason='all_sources_reconciliation', force_rescreen=True)
+            manual = await screening_db.enqueue_job(conn, 'manual', 'Manual Person', None, None, 'Person', 'Alice', 'MANUAL', 'Client Onboarding')
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'DATABASE_URL': worker_dsn, 'SANCTIONS_DATA_DIR': directory}), \
+             patch('screening_worker.run_postgres_job', new=postgres_job(Mock(return_value=sample()), self.source_manifest)), \
+             patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+            set_reconciliation_paused(True)
+            async with self.pool.acquire() as conn:
+                self.assertEqual((await tick(conn, force=True))['status'], 'paused')
+            with self.assertRaises(KeyboardInterrupt): screening_worker.main()
+            async with self.pool.acquire() as conn:
+                self.assertEqual((await screening_db.get_job_status(conn, held))['status'], 'pending')
+                self.assertEqual((await screening_db.get_job_status(conn, manual))['status'], 'completed')
+            set_reconciliation_paused(False)
+            with self.assertRaises(KeyboardInterrupt): screening_worker.main()
+            async with self.pool.acquire() as conn:
+                self.assertEqual((await screening_db.get_job_status(conn, held))['status'], 'completed')
 
     async def test_migration_reentry_and_legacy_backfill(self):
         first = await self.check(self.request())

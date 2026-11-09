@@ -94,10 +94,10 @@ def _parse_dob(ind_el: ET.Element) -> str:
         parts = raw.split("/")
         if len(parts) == 3:
             day, month, year = parts
-            day = "" if day.lower() == "dd" else day
-            month = "" if month.lower() == "mm" else month
+            day = "" if day.lower() in ("dd", "00") else day
+            month = "" if month.lower() in ("mm", "00") else month
             year = "" if year.lower() == "yyyy" else year
-            if year:
+            if re.fullmatch(r"\d{4}", year) and not (day and not month):
                 if month and day:
                     raw = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                 elif month:

@@ -3096,6 +3096,21 @@ async def reconcile_screening():
         return await tick(conn, force=True)
 
 
+@app.get('/admin/screening/reconciliation-pause', dependencies=[Depends(require_admin)])
+async def reconciliation_pause_status():
+    from screening_monitoring import reconciliation_paused
+    return {'paused': reconciliation_paused()}
+
+
+@app.post('/admin/screening/reconciliation-pause', dependencies=[Depends(require_admin)])
+async def set_reconciliation_pause(request: Request, paused: bool, payload: dict = Depends(require_admin)):
+    from screening_monitoring import set_reconciliation_paused
+    set_reconciliation_paused(paused)
+    audit_log('admin', action='reconciliation_pause_changed', actor=payload.get('sub'),
+              resource='screening_reconciliation', outcome='success', ip=_client_ip(request), extra={'paused': paused})
+    return {'paused': paused}
+
+
 # Server-side Companies House integration routes (API key remains backend-only).
 app.include_router(companies_house_router, dependencies=[Depends(get_current_user)])
 

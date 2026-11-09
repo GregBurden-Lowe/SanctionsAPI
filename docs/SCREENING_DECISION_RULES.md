@@ -32,6 +32,8 @@ New PostgreSQL imports preserve raw DOB strings, including multiple values and p
 
 EU birth records can contain a birthplace without any date. The importer keeps that location separately instead of treating XML as an unknown DOB. EU month and bounded year-range fields are retained; incomplete ranges, date remarks, approximate ranges and non-Gregorian dates remain unknown unless supported by the evaluator. Contradictory date attributes are unknown. Source refresh, verified PostgreSQL/Parquet publication, existing reviewed-link hash checks and a coordinated API/worker release are required; old runs are not rewritten.
 
+UK date placeholders `00` or `dd`/`mm` are retained at their available year or month precision; malformed partial years and a day without a month remain unparseable. UN `BETWEEN` dates are treated as inclusive year ranges only when both bounds are present and there is no qualifying note; ranges with notes remain unknown.
+
 ## DOB policy
 
 | Evidence | Behaviour |
