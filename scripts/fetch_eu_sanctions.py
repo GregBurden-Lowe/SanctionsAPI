@@ -17,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -97,6 +98,7 @@ def _parse_entity(entity_el: ET.Element) -> dict:
     # date must not become an exact date during matching.
     dobs = []
     birth_places = []
+    birth_notes = []
     for bd in entity_el.findall(f"{NS_PREFIX}birthdate"):
         date_val = bd.get("birthdate", "").strip()
         year_val = bd.get("year", "").strip()
@@ -114,6 +116,7 @@ def _parse_entity(entity_el: ET.Element) -> dict:
             # unknown rather than assuming it only describes the birthplace.
             if remark:
                 dobs.append('unparsed date details: ' + remark)
+                birth_notes.append({'date': '', 'note': remark})
             continue
         if (range_from or range_to) and (date_val or year_val or month_val or day_val):
             value = 'unparsed mixed date fields: ' + ' '.join(filter(None, (date_val, year_val, month_val, day_val, range_from, range_to)))
@@ -142,6 +145,8 @@ def _parse_entity(entity_el: ET.Element) -> dict:
         if bd.get("circa", "").lower() == "true":
             value = "circa " + value
         dobs.append(value)
+        if remark:
+            birth_notes.append({'date': value, 'note': remark})
 
     # Citizenship / nationality
     countries = []
@@ -175,6 +180,7 @@ def _parse_entity(entity_el: ET.Element) -> dict:
         "aliases": encode_aliases(dict.fromkeys(alias_names)),
         "birth_date": ";".join(dict.fromkeys(dobs)),
         "birth_place": ";".join(dict.fromkeys(birth_places)),
+        "birth_notes": json.dumps(birth_notes, ensure_ascii=False) if birth_notes else "",
         "positions": "",
         "countries": ";".join(countries),
         "program_ids": programme,

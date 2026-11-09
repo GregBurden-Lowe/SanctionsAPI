@@ -217,7 +217,7 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                         <span className="break-all">Record: <span className="font-mono text-text-secondary">{candidate.record_id}</span></span>
                       )}
                     </div>
-                    {candidate.birth_notes?.map((note, index) => <p key={`${note.date}-${index}`} className="text-[11px] text-text-secondary">DOB source note ({note.date || 'date not specified'}): {note.note}</p>)}
+                    {candidate.birth_notes?.map((note, index) => <p key={`${note.date}-${index}`} className="text-[11px] text-text-secondary">Birth record note ({note.date || 'date not specified'}): {note.note}</p>)}
                     {candidate.linked_listing_evidence && (
                       <div className="text-[11px] text-text-secondary space-y-1">
                         <p>Reviewed linked listings: {candidate.linked_listing_evidence.record_ids.join(', ')}</p>

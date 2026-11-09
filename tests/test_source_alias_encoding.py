@@ -41,13 +41,14 @@ class SourceAliasEncodingTests(unittest.TestCase):
         from scripts.fetch_eu_sanctions import _parse_entity, EU_NS
         from utils import _identity_dob_evidence
         el = ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}"><nameAlias wholeName="Jane Smith"/>
-          <birthdate birthdate="1961-02-11" calendarType="GREGORIAN"/>
+          <birthdate birthdate="1961-02-11" calendarType="GREGORIAN"><remark>Then USSR</remark></birthdate>
           <birthdate city="Tehran" countryDescription="IRAN" calendarType="GREGORIAN"><regulationSummary/></birthdate>
           <birthdate birthdate="1949-02-11"/><birthdate birthdate="1952-02-11"/><birthdate birthdate="1953-02-11"/>
         </sanctionEntity>''')
         row = _parse_entity(el)
         self.assertEqual(row['birth_date'], '1961-02-11;1949-02-11;1952-02-11;1953-02-11')
         self.assertEqual(row['birth_place'], 'Tehran, IRAN')
+        self.assertEqual(json.loads(row['birth_notes']), [{'date':'1961-02-11','note':'Then USSR'}])
         self.assertEqual(_identity_dob_evidence(row['birth_date'], '1994-07-19'), 'conflicting')
         self.assertEqual(_identity_dob_evidence(row['birth_date'], '1952-02-11'), 'exact')
         unknown = ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}"><nameAlias wholeName="Jane Smith"/>
@@ -198,7 +199,7 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(sys.path.remove, scripts_dir)
         import fetch_all_watchlists
         eu = _parse_entity(ET.fromstring(f'''<sanctionEntity xmlns="{EU_NS}" logicalId="eu-test"><subjectType code="person"/>
-          <nameAlias wholeName="Jane Doe"/><birthdate birthdate="1961-02-11"/>
+          <nameAlias wholeName="Jane Doe"/><birthdate birthdate="1961-02-11"><remark>Then USSR</remark></birthdate>
           <birthdate city="Tehran" countryDescription="IRAN"/><birthdate birthdate="1952-02-11"/>
         </sanctionEntity>'''))
         uk_dob = _parse_dob(ET.fromstring('<Individual><DOBs><DOB>00/00/1975</DOB></DOBs></Individual>'))
@@ -234,6 +235,7 @@ class SourceImportTests(unittest.IsolatedAsyncioTestCase):
                     raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='eu-eu-test'"))
                     self.assertEqual(raw['birth_date'], expected_dob)
                     self.assertEqual(raw['birth_place'], 'Tehran, IRAN')
+                    self.assertEqual(json.loads(raw['birth_notes'])[0]['note'], 'Then USSR')
                     ofac_raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='ofac-test'"))
                     self.assertEqual(json.loads(ofac_raw['alias_metadata'])[0]['quality'], 'weak')
                     un_raw = json.loads(await conn.fetchval("SELECT raw_json FROM watchlist_entities WHERE entity_id='un-individual-TEST'"))

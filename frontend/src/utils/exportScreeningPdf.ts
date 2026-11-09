@@ -255,7 +255,7 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
       sec5Rows.push([
         `${safe(c.name)}${aliasLabel}${aliasCountLabel}${aliasQualityLabel}<br><small>${safe(c.dataset)}</small>${c.birth_place ? `<br><small>Birthplace: ${safe(c.birth_place)}</small>` : ''}${linked}`,
         safe(String(c.name_score) + '/100'),
-        dobDisplay + `<br><small>${dobMatch}</small>` + (c.birth_notes?.map(n => `<br><small>DOB source note (${safe(n.date)}): ${safe(n.note)}</small>`).join('') || ''),
+        dobDisplay + `<br><small>${dobMatch}</small>` + (c.birth_notes?.map(n => `<br><small>Birth record note (${safe(n.date)}): ${safe(n.note)}</small>`).join('') || ''),
         safe(c.country || '—') + `<br><small>${ctryMatch}</small>`,
         disp,
       ])
