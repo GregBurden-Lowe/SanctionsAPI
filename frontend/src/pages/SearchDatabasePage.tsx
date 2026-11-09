@@ -150,7 +150,7 @@ export function SearchDatabasePage() {
     setRerunError(null)
     setRerunSuccess(null)
     setRerunDob(row.date_of_birth ?? '')
-    setRerunCountry(row.country_input ?? '')
+    setRerunCountry(row.country_input || 'United Kingdom')
   }
 
   const handleRerunCheck = async () => {
@@ -221,7 +221,7 @@ export function SearchDatabasePage() {
       const updatedRow: ScreenedEntity = {
         ...detailRow,
         date_of_birth: isPerson ? dobTrim : detailRow.date_of_birth,
-        country_input: isOrganization ? countryTrim : detailRow.country_input,
+        country_input: nextResult['Screening Inputs']?.country ?? (isOrganization ? countryTrim : detailRow.country_input || 'United Kingdom'),
         result_json: nextResult,
         status: nextStatus,
         risk_level: nextRiskLevel,

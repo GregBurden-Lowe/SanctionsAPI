@@ -6,6 +6,7 @@ import { useAuth } from '@/context/AuthContext'
 type ParsedRow = {
   name: string
   dob?: string
+  country?: string
   entity_type: 'Person' | 'Organization'
   requestor: string
   business_reference: string
@@ -49,6 +50,7 @@ function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[];
     const requestor = cols[3] || fallbackRequestor
     const business_reference = cols[4] ?? ''
     const reason_for_check_raw = cols[5] ?? ''
+    const country = cols[6] ?? ''
 
     if (!name) {
       errors.push(`Row ${i + 1}: name is required.`)
@@ -71,6 +73,7 @@ function parseCsv(text: string, fallbackRequestor: string): { rows: ParsedRow[];
     rows.push({
       name,
       dob: dob || undefined,
+      country: country || undefined,
       entity_type,
       requestor,
       business_reference: business_reference.trim(),
@@ -120,6 +123,7 @@ export function BulkScreeningPage() {
       const payload: BulkScreeningItem[] = parsed.rows.map((r) => ({
         name: r.name,
         dob: r.dob ?? null,
+        country: r.country ?? null,
         entity_type: r.entity_type,
         requestor: r.requestor,
         business_reference: r.business_reference,
@@ -149,7 +153,7 @@ export function BulkScreeningPage() {
           </CardHeader>
           <CardBody className="space-y-4">
             <p className="text-sm text-text-secondary">
-              CSV columns: <code>name,dob,entity_type,requestor,business_reference,reason_for_check</code>. Header row optional. If <code>requestor</code> is blank, Requested By is used.
+              CSV columns: <code>name,dob,entity_type,requestor,business_reference,reason_for_check,country</code>. Header row optional. If <code>requestor</code> is blank, Requested By is used. Country is optional and defaults to United Kingdom.
             </p>
             <Input
               label="Requested By"

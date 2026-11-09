@@ -21,6 +21,11 @@ def sample():
 
 
 class ScreeningSafetyTests(unittest.TestCase):
+    def test_country_default_and_explicit_override_share_fingerprint(self):
+        args = ('Jane Smith', None)
+        self.assertEqual(screening_fingerprint(*args, None, 'Person', 'postgres_beta'), screening_fingerprint(*args, 'United Kingdom', 'Person', 'postgres_beta'))
+        self.assertNotEqual(screening_fingerprint(*args, 'France', 'Person', 'postgres_beta'), screening_fingerprint(*args, None, 'Person', 'postgres_beta'))
+
     def test_fingerprint_preserves_matching_inputs(self):
         fp = lambda name='Jane A Smith', country='UK', dob='01-02-1980', backend='original': screening_fingerprint(name, dob, country, 'Person', backend)
         self.assertEqual(fp(), fp(dob='1980-02-01'))
@@ -96,6 +101,19 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncpg.RaiseError):
                 await conn.execute("UPDATE screening_runs SET result_json='{}'::jsonb")
 
+    async def test_missing_country_defaults_on_person_and_company_and_preserves_explicit_input(self):
+        for kind, country in [('Person', None), ('Organization', '  '), ('Person', 'France')]:
+            request = self.request(f'{kind}-{country}'); request.name = 'Test ' + kind + str(country); request.entity_type = kind; request.country = country
+            result = await self.check(request)
+            expected = 'France' if country == 'France' else 'United Kingdom'
+            self.assertEqual(self.match.await_args.kwargs['country'], expected)
+            self.assertEqual(result['Screening Inputs']['country'], expected)
+            async with self.pool.acquire() as conn:
+                stored = await conn.fetchrow('SELECT country_input FROM screened_entities WHERE entity_key=$1', result['entity_key'])
+                self.assertEqual(stored['country_input'], expected)
+                original = await screening_history.get_request(conn, result['request_id'])
+                self.assertEqual(original['inputs']['country'], country)
+
     async def test_invalid_date_and_failed_write_never_return_clear(self):
         data = self.request(); data.dob = '31-02-1980'
         invalid = await api_server._check_opensanctions_impl(data)
@@ -124,6 +142,31 @@ class ScreeningHistoryDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row['status'], 'completed')
             await conn.execute('DELETE FROM screening_jobs WHERE job_id=$1::uuid', job)
             self.assertEqual(await conn.fetchval('SELECT count(*) FROM screening_requests WHERE job_id=$1::uuid', job), 1)
+
+    async def test_internal_queue_and_existing_jobs_use_country_default(self):
+        import screening_worker
+        from psycopg2.extensions import make_dsn
+        worker_dsn = make_dsn(os.environ['SANCTIONS_TEST_ADMIN_DSN'], dbname=self.database)
+        item = api_server.InternalScreeningRequest(name='Default Person', entity_type='Person', country=None,
+            requestor='Alice', business_reference='BATCH-UK', reason_for_check='Client Onboarding')
+        async with self.pool.acquire() as conn:
+            submitted = await api_server._internal_screening_outcome(conn, item)
+            queued = await conn.fetchrow('SELECT country FROM screening_jobs WHERE job_id=$1::uuid', submitted['job_id'])
+            self.assertEqual(queued['country'], 'United Kingdom')
+            await conn.execute('UPDATE screening_jobs SET country=NULL WHERE job_id=$1::uuid', submitted['job_id'])
+            other = item.model_copy(update={'name': 'Explicit Company', 'entity_type': 'Organization', 'country': 'France', 'business_reference': 'BATCH-FR'})
+            explicit = await api_server._internal_screening_outcome(conn, other)
+        with patch.dict(os.environ, {'DATABASE_URL': worker_dsn}), patch('screening_worker.run_postgres_job', new=postgres_job(matcher := Mock(return_value=sample()), self.source_manifest)), patch('screening_worker.time.sleep', side_effect=KeyboardInterrupt):
+            for _ in range(2):
+                with self.assertRaises(KeyboardInterrupt):
+                    screening_worker.main()
+        self.assertEqual([call.kwargs['country'] for call in matcher.call_args_list], ['United Kingdom', 'United Kingdom', 'France', 'France'])
+        async with self.pool.acquire() as conn:
+            status = await screening_db.get_job_status(conn, submitted['job_id'])
+            self.assertEqual(status['status'], 'completed')
+            self.assertEqual(status['result']['Screening Inputs']['country'], 'United Kingdom')
+            status = await screening_db.get_job_status(conn, explicit['job_id'])
+            self.assertEqual(status['result']['Screening Inputs']['country'], 'France')
 
     async def test_migration_reentry_and_legacy_backfill(self):
         first = await self.check(self.request())

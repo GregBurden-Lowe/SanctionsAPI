@@ -264,7 +264,7 @@ export function MatchReviewPage() {
     setRerunTarget(row)
     setRerunEntityType((row.entity_type || '').toLowerCase() === 'organization' ? 'Organization' : 'Person')
     setRerunDob(row.date_of_birth ?? '')
-    setRerunCountry(row.country_input ?? '')
+    setRerunCountry(row.country_input || 'United Kingdom')
     setRerunMessage(null)
     setActionError(null)
   }

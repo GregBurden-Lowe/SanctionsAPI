@@ -944,7 +944,7 @@ def screening_fingerprint(name, dob, country, entity_type, backend):
     # Preserve all name tokens; entity keys are only legacy grouping identifiers.
     from linked_listings import REVIEWED_LINKS
     payload = {"name": _normalize_text(name), "dob": _normalize_dob(dob),
-               "country": _normalize_country(country), "entity_type": (entity_type or "Person").lower(),
+               "country": _normalize_country(effective_screening_country(country)), "entity_type": (entity_type or "Person").lower(),
                "backend": backend, "rules_version": rules_version_for(backend), "matching_config": get_matching_config(),
                "reviewed_links": REVIEWED_LINKS}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -978,6 +978,11 @@ def _normalize_dob(dob: Optional[str]) -> Optional[str]:
             except ValueError:
                 return None
     return None
+
+
+def effective_screening_country(country: Optional[str]) -> str:
+    """Use the operational default only when no country was supplied."""
+    return country.strip() if isinstance(country, str) and country.strip() else "United Kingdom"
 
 
 def _normalize_country(country: Optional[str]) -> Optional[str]:
@@ -1602,6 +1607,7 @@ async def _retrieve_candidates_v2(conn, name, entity_type, full_dob, limit):
 
 async def perform_postgres_watchlist_check(conn, name, dob, country=None, entity_type="Person", requestor=None,
                                           candidate_limit=2000, log_search=True, include_peps=False, submitted_entity_type=None):
+    country = effective_screening_country(country)
     if not await conn.fetchval("SELECT to_regclass('public.watchlist_entities') IS NOT NULL"):
         raise ScreeningUnavailableError("Watchlist data is unavailable.")
     sources = await conn.fetch("SELECT DISTINCT source_type FROM watchlist_entities")

@@ -43,6 +43,8 @@ An exact DOB supports review; it is not identity proof. Unknown information is n
 
 ## Country policy
 
+For new person and organisation searches, including API, bulk and worker jobs, an omitted or blank country defaults to `United Kingdom`. A supplied country is preserved. This is a business default, not a verified statement of nationality or residence; the Channel Islands are not part of the UK. Existing queued jobs with no country use the default when executed, and historical request inputs remain unchanged. Screening results record the effective country.
+
 Country is supporting evidence. Compatibility, conflict and unknown values are displayed. A differing country alone **does not clear a name match** because it is not a unique identity identifier. Semicolon/comma-separated country values are compared separately.
 
 These conservative changes can increase the review queue and require analyst acceptance before deployment.

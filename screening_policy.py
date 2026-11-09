@@ -1,5 +1,5 @@
 """Entity-type policy for interactive and background screening (sanctions only)."""
-from utils import detect_company_likeness, build_input_classification
+from utils import detect_company_likeness, build_input_classification, effective_screening_country
 
 
 def _result_priority(result: dict) -> int:
@@ -71,6 +71,7 @@ def _merge_dual_type_results(
 
 
 def check_plan(name, dob, country, entity_type):
+    country = effective_screening_country(country)
     return [
         dict(name=name, dob=dob, country=country, entity_type='Person'),
         dict(name=name, dob=None, country=country, entity_type='Organization'),

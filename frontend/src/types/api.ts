@@ -99,6 +99,7 @@ export interface SourceCoverage {
 }
 
 export interface OpCheckResponse {
+  'Screening Inputs'?: { name?: string; dob?: string | null; country?: string | null; entity_type?: string; backend?: string };
   'Source Coverage'?: SourceCoverage;
   'Screening Guidance'?: { finding: string; identity_confirmed: boolean; next_actions: string[]; limitations?: string[] };
   'Monitoring Change'?: { previous_run_id?: string; added_candidates: string[]; removed_candidates: string[]; changed_candidates: string[]; message: string };

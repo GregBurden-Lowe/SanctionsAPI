@@ -53,7 +53,7 @@ export function ScreeningPage() {
   const inFlight = useRef(false)
   const [name, setName] = useState(retry?.inputs.name || '')
   const [dob, setDob] = useState(retry?.inputs.dob || '')
-  const [country, setCountry] = useState(retry?.inputs.country || '')
+  const [country, setCountry] = useState(retry?.inputs.country || 'United Kingdom')
   const [entityType, setEntityType] = useState<'Person' | 'Organization'>(retry?.inputs.entity_type === 'Organization' ? 'Organization' : 'Person')
   const [businessReference, setBusinessReference] = useState(
     retry?.inputs.business_reference || sessionStorage.getItem('screening_last_business_reference') || ''
@@ -76,7 +76,7 @@ export function ScreeningPage() {
     setError(null)
     const nameTrim = name.trim()
     const dobTrim = dob.trim()
-    const countryTrim = country.trim()
+    const countryTrim = country.trim() || 'United Kingdom'
     const businessReferenceTrim = businessReference.trim()
     const requestorTrim = requestor.trim()
     if (!nameTrim) {
@@ -195,16 +195,15 @@ export function ScreeningPage() {
                       placeholder="DD-MM-YYYY or YYYY"
                     />
                   </div>
-                  {entityType === 'Organization' && (
-                    <div className="md:col-span-2">
-                      <Input
-                        label="Country (optional)"
-                        value={country}
-                        onChange={(e) => setCountry(e.target.value)}
-                        placeholder="e.g. UK"
-                      />
-                    </div>
-                  )}
+                  <div className="md:col-span-2">
+                    <Input
+                      label="Country (defaults to United Kingdom)"
+                      value={country}
+                      onChange={(e) => setCountry(e.target.value)}
+                      placeholder="United Kingdom"
+                    />
+                    <p className="mt-1 text-xs text-text-secondary">Default for UK and Channel Islands business; change it if a different country is known.</p>
+                  </div>
                   <div className="md:col-span-2">
                     <Input
                       label="Business reference *"
@@ -301,12 +300,10 @@ function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) 
             <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
             <dd className="text-text-primary mt-0.5">{searchDetails.searchDob?.trim() ? searchDetails.searchDob : 'Not provided'}</dd>
           </div>
-          {searchDetails.entityType === 'Organization' && (
-            <div>
-              <dt className="text-xs font-medium text-text-muted">Country</dt>
-              <dd className="text-text-primary mt-0.5">{searchDetails.searchCountry?.trim() ? searchDetails.searchCountry : 'Not provided'}</dd>
-            </div>
-          )}
+          <div>
+            <dt className="text-xs font-medium text-text-muted">Country</dt>
+            <dd className="text-text-primary mt-0.5">{searchDetails.searchCountry?.trim() ? searchDetails.searchCountry : 'Not provided'}</dd>
+          </div>
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Reason for check</dt>
             <dd className="text-text-primary mt-0.5">{searchDetails.reasonForCheck || '—'}</dd>
@@ -408,7 +405,7 @@ export function ScreeningResultPage() {
       const nextSearch: SearchDetails = {
         ...searchDetails,
         searchDob: personRerunEnabled ? dobTrim : searchDetails.searchDob,
-        searchCountry: organizationRerunEnabled ? countryTrim : searchDetails.searchCountry,
+        searchCountry: nextResult['Screening Inputs']?.country ?? (organizationRerunEnabled ? countryTrim : searchDetails.searchCountry || 'United Kingdom'),
       }
       const nextPayload: ScreeningResultState = { result: nextResult, searchDetails: nextSearch }
       setResult(nextResult)

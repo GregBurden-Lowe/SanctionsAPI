@@ -125,6 +125,7 @@ export async function setTestScreeningRecord(entityKey: string, active: boolean,
 export interface BulkScreeningItem {
   name: string
   dob?: string | null
+  country?: string | null
   entity_type?: string
   requestor: string
   business_reference: string

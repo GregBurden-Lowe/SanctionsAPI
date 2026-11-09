@@ -378,7 +378,7 @@ app.add_middleware(
 class OpCheckRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
-    country: Optional[str] = Field(None, description="Country (optional, organization checks)")
+    country: Optional[str] = Field(None, description="Country for person or organization; defaults to United Kingdom when omitted")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     business_reference: constr(strip_whitespace=True, min_length=1) = Field(..., description="Business reference (required)")
     reason_for_check: Literal[
@@ -498,7 +498,7 @@ class AiTriageDecisionRequest(BaseModel):
 class InternalScreeningRequest(BaseModel):
     name: str = Field(..., description="Full name or organization to screen")
     dob: Optional[str] = Field(None, description="Date of birth (YYYY-MM-DD, DD-MM-YYYY, or YYYY) or null")
-    country: Optional[str] = Field(None, description="Country (optional, organization checks)")
+    country: Optional[str] = Field(None, description="Country for person or organization; defaults to United Kingdom when omitted")
     entity_type: Optional[str] = Field("Person", description="'Person' or 'Organization'")
     business_reference: constr(strip_whitespace=True, min_length=1) = Field(..., description="Business reference (required)")
     reason_for_check: Literal[
@@ -1657,7 +1657,8 @@ async def _execute_screening(data: OpCheckRequest):
 
     name = data.name.strip()
     dob = (data.dob.strip() if isinstance(data.dob, str) else data.dob) or None
-    country = (data.country.strip() if isinstance(data.country, str) else data.country) or None
+    from utils import effective_screening_country
+    country = effective_screening_country(data.country)
     entity_type = (data.entity_type or "Person")
     entity_type_norm = entity_type.strip().lower()
     if entity_type_norm not in ("person", "organization"):
@@ -2407,7 +2408,7 @@ async def rerun_review(
 ):
     """
     Re-run screening for a claimed review item using additional disambiguation data.
-    Person requires dob. Organization requires country.
+    Person requires dob. Country defaults to the stored country or United Kingdom.
     If rerun result is Cleared, mark review as COMPLETED automatically.
     """
     pool = await screening_db.get_pool()
@@ -2434,11 +2435,10 @@ async def rerun_review(
     entity_type = (body.entity_type or original_entity_type).strip() or "Person"
     type_norm = entity_type.strip().lower()
     rerun_dob = (body.dob.strip() if isinstance(body.dob, str) else body.dob) or None
-    rerun_country = (body.country.strip() if isinstance(body.country, str) else body.country) or None
+    from utils import effective_screening_country
+    rerun_country = effective_screening_country(body.country or row.get("country_input"))
     if type_norm == "person" and not rerun_dob:
         raise HTTPException(status_code=400, detail="Date of birth is required for Person re-run")
-    if type_norm == "organization" and not rerun_country:
-        raise HTTPException(status_code=400, detail="Country is required for Organization re-run")
 
     audit_log(
         "review",
@@ -2459,7 +2459,7 @@ async def rerun_review(
     op_req = OpCheckRequest(
         name=str(row.get("display_name") or ""),
         dob=rerun_dob if type_norm == "person" else (row.get("date_of_birth") or None),
-        country=rerun_country if type_norm == "organization" else None,
+        country=rerun_country or row.get("country_input") or None,
         entity_type=entity_type,
         business_reference=str(row.get("business_reference") or "").strip() or key,
         reason_for_check=row.get("reason_for_check") or "Ad-Hoc Compliance Review",
@@ -2753,7 +2753,8 @@ async def _internal_screening_execute(conn, item: InternalScreeningRequest) -> d
     if not business_reference:
         return {"status": "error", "error": "missing_business_reference"}
     dob = (item.dob.strip() if isinstance(item.dob, str) else item.dob) or None
-    country = (item.country.strip() if isinstance(item.country, str) else item.country) or None
+    from utils import effective_screening_country
+    country = effective_screening_country(item.country)
     entity_type = (item.entity_type or "Person")
 
     if dob and _normalize_dob(dob) is None:

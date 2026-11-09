@@ -131,7 +131,8 @@ def main(stop_event=None):
                 entity_key = row["entity_key"]
                 name = row["name"]
                 dob = row["date_of_birth"]
-                country = (row.get("country") or "").strip() or None
+                from utils import effective_screening_country
+                country = effective_screening_country(row.get("country"))
                 entity_type = row["entity_type"] or "Person"
                 requestor = row["requestor"] or ""
                 business_reference = (row.get("business_reference") or "").strip()
