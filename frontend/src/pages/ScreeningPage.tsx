@@ -280,43 +280,59 @@ type ScreeningResultState = {
   searchDetails: SearchDetails
 }
 
-function SearchDetailsCard({ searchDetails }: { searchDetails: SearchDetails }) {
+function effectiveSearchDetails(result: OpCheckResponse, search: SearchDetails): SearchDetails {
+  const inputs = result['Screening Inputs'] ?? result['Engine Result']?.['Screening Inputs']
+  if (!inputs) return search
+  return {
+    ...search,
+    searchName: inputs.name ?? search.searchName,
+    entityType: inputs.entity_type ?? search.entityType,
+    searchDob: 'dob' in inputs ? inputs.dob ?? '' : search.searchDob,
+    searchCountry: 'country' in inputs ? inputs.country ?? '' : search.searchCountry,
+    searchBackend: (inputs.backend as SearchDetails['searchBackend']) ?? search.searchBackend,
+  }
+}
+
+export function ScreeningInputsCard({ result, searchDetails }: { result: OpCheckResponse; searchDetails: SearchDetails }) {
+  const details = effectiveSearchDetails(result, searchDetails)
+  const hasRecordedInputs = Boolean(result['Screening Inputs'] ?? result['Engine Result']?.['Screening Inputs'])
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Original search details</CardTitle>
+        <CardTitle>Screening details</CardTitle>
       </CardHeader>
       <CardBody>
         <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Name or organization</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.searchName || '—'}</dd>
+            <dd className="text-text-primary mt-0.5">{details.searchName || '—'}</dd>
           </div>
           <div>
             <dt className="text-xs font-medium text-text-muted">Entity type</dt>
-            <dd className="text-text-primary mt-0.5">{formatEntityTypeLabel(searchDetails.entityType || '—')}</dd>
+            <dd className="text-text-primary mt-0.5">{formatEntityTypeLabel(details.entityType || '—')}</dd>
           </div>
           <div>
             <dt className="text-xs font-medium text-text-muted">Date of birth</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.searchDob?.trim() ? searchDetails.searchDob : 'Not provided'}</dd>
+            <dd className="text-text-primary mt-0.5">{details.searchDob?.trim() ? details.searchDob : 'Not provided'}</dd>
           </div>
           <div>
             <dt className="text-xs font-medium text-text-muted">Country</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.searchCountry?.trim() ? searchDetails.searchCountry : 'Not provided'}</dd>
+            <dd className="text-text-primary mt-0.5">{details.searchCountry?.trim() ? details.searchCountry : 'Not provided'}</dd>
           </div>
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Reason for check</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.reasonForCheck || '—'}</dd>
+            <dd className="text-text-primary mt-0.5">{details.reasonForCheck || '—'}</dd>
           </div>
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Requestor</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.requestor || '—'}</dd>
+            <dd className="text-text-primary mt-0.5">{details.requestor || '—'}</dd>
           </div>
           <div className="sm:col-span-2">
             <dt className="text-xs font-medium text-text-muted">Business reference</dt>
-            <dd className="text-text-primary mt-0.5">{searchDetails.businessReference || '—'}</dd>
+            <dd className="text-text-primary mt-0.5">{details.businessReference || '—'}</dd>
           </div>
         </dl>
+        {!hasRecordedInputs && <p className="mt-3 text-xs text-text-muted">This older result does not contain a complete snapshot of the screened inputs. Available recorded details are shown.</p>}
       </CardBody>
     </Card>
   )
@@ -427,6 +443,7 @@ export function ScreeningResultPage() {
             Run another check
           </Button>
         </div>
+        <ScreeningInputsCard result={result} searchDetails={searchDetails} />
         {rerunEnabled && (
           <Card>
             <CardHeader>
@@ -464,8 +481,7 @@ export function ScreeningResultPage() {
             </CardBody>
           </Card>
         )}
-        <ResultCard result={result} searchDetails={searchDetails} />
-        <SearchDetailsCard searchDetails={searchDetails} />
+        <ResultCard result={result} searchDetails={searchDetails} showScreeningInputs={false} />
       </div>
     </div>
   )
@@ -540,10 +556,13 @@ function getOutcome(result: OpCheckResponse): {
 export function ResultCard({
   result,
   searchDetails,
+  showScreeningInputs = true,
 }: {
   result: OpCheckResponse
   searchDetails: SearchDetails
+  showScreeningInputs?: boolean
 }) {
+  searchDetails = effectiveSearchDetails(result, searchDetails)
   const summary = result['Check Summary']
   const outcome = getOutcome(result)
   const { list: sourceList } = parseSourceList(summary?.Source)
@@ -650,6 +669,7 @@ export function ResultCard({
 
   return (
     <div className="space-y-4">
+      {showScreeningInputs && <ScreeningInputsCard result={result} searchDetails={searchDetails} />}
       {/* Outcome bar */}
       <div className={`flex flex-col gap-3 rounded-[13px] border px-5 py-4 sm:flex-row sm:items-center ${outcomeBar.bar}`}>
         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${outcomeBar.icon}`}>

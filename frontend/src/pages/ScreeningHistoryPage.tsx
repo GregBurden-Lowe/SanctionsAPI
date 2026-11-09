@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Button, Card, CardBody, ErrorBox, Input, SectionHeader } from '@/components'
 import { screeningHistory, screeningRequest } from '@/api/client'
-import { ResultCard } from '@/pages/ScreeningPage'
+import { ResultCard, ScreeningInputsCard } from '@/pages/ScreeningPage'
 import type { OpCheckResponse, ReviewDecision } from '@/types/api'
 
 type HistoryItem = {
@@ -95,10 +95,15 @@ export function ScreeningRequestPage() {
     {error && <ErrorBox message={error} />}
     {!item && !error && <p>Loading record…</p>}
     {item && input && <>
+      {item.status === 'completed' && item.response_json?.['Check Summary'] && <ScreeningInputsCard result={item.response_json} searchDetails={{
+        searchName: input.name || '', searchDob: input.dob || '', searchCountry: input.country || '', entityType: input.entity_type || 'Person',
+        businessReference: input.business_reference || '', reasonForCheck: input.reason_for_check || '', requestor: input.requestor || '', searchBackend: input.search_backend,
+      }} />}
       <Card><CardBody><dl className="grid grid-cols-2 gap-3 text-sm">
         <dt>Requested</dt><dd>{date(item.requested_at)}</dd><dt>Screened</dt><dd>{date(item.screened_at)}</dd>
         <dt>Business reference</dt><dd>{item.business_reference || '—'}</dd><dt>Authenticated actor</dt><dd>{item.actor || 'Not recorded'}</dd>
         <dt>Requested by</dt><dd>{input.requestor || '—'}</dd><dt>Status</dt><dd>{item.status}{item.reused ? ' · Previous result reused' : ''}</dd>
+        {!input.country && item.response_json?.['Screening Inputs']?.country && <><dt>Country submitted</dt><dd>Not supplied; the screened country is shown above.</dd></>}
         <dt>Request ID</dt><dd className="break-all">{item.request_id}</dd>
       </dl></CardBody></Card>
       {item.source === 'legacy_snapshot' && <p>This is a legacy snapshot, not a reconstructed search history. Earlier overwritten requests and authenticated actor information are unavailable.</p>}
@@ -115,7 +120,7 @@ export function ScreeningRequestPage() {
       {item.status === 'completed' && item.response_json?.['Check Summary'] && <ResultCard result={{ ...item.response_json, request_id: item.request_id }} searchDetails={{
         searchName: input.name || '', searchDob: input.dob || '', searchCountry: input.country || '', entityType: input.entity_type || 'Person',
         businessReference: input.business_reference || '', reasonForCheck: input.reason_for_check || '', requestor: input.requestor || '', searchBackend: input.search_backend,
-      }} />}
+      }} showScreeningInputs={false} />}
     </>}
   </div>
 }

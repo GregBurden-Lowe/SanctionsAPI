@@ -12,7 +12,7 @@ import {
 } from '@/components'
 import { markFalsePositive, opcheck, searchScreened } from '@/api/client'
 import type { ScreenedEntity } from '@/types/api'
-import { ResultCard } from '@/pages/ScreeningPage'
+import { ResultCard, ScreeningInputsCard } from '@/pages/ScreeningPage'
 import { useAuth } from '@/context/AuthContext'
 
 function formatDate(iso: string | null): string {
@@ -364,6 +364,15 @@ export function SearchDatabasePage() {
       >
         {detailRow && (
           <div className="space-y-4">
+            <ScreeningInputsCard result={detailRow.result_json} searchDetails={{
+              searchName: detailRow.display_name,
+              entityType: detailRow.entity_type,
+              searchDob: detailRow.date_of_birth ?? '',
+              searchCountry: detailRow.country_input ?? '',
+              businessReference: detailRow.business_reference ?? '',
+              reasonForCheck: detailRow.reason_for_check ?? '',
+              requestor: detailRow.last_requestor ?? '',
+            }} />
             {overrideError && <ErrorBox message={overrideError} />}
             {overrideSuccess && (
               <p className="text-sm text-semantic-success">{overrideSuccess}</p>
@@ -426,6 +435,7 @@ export function SearchDatabasePage() {
             </p>
             <ResultCard
               result={{ ...detailRow.result_json, entity_key: detailRow.entity_key }}
+              showScreeningInputs={false}
               searchDetails={{
                 searchName: detailRow.display_name,
                 entityType: detailRow.entity_type,
