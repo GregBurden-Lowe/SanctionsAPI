@@ -1567,7 +1567,7 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             reasons = ["Some name parts are similar, but other parts differ or are missing; identity requires review."]
         else:
             reasons = ["Name comparison passed the decision rules; identity requires review."]
-        if hits and matched_index in aligned_indexes:
+        if hits and matched_index in aligned_indexes and not (name_rule and name_rule.startswith('ambiguous_')):
             reasons.append("Name parts align word by word, allowing for spelling variation or omitted names.")
         if matched_index:
             reasons.append(f'Matched a listed alias: “{names[matched_index]}”.')
