@@ -25,12 +25,22 @@ The legacy single-stack Compose configuration does not itself set `RELEASE_ID`. 
 python scripts/execute_release_rescreen.py \
   --inventory /secure/operator/path/release-rescreen-inventory.json \
   --inventory-sha256 INVENTORY_SHA256 \
-  --rules-version evidence-v8 \
+  --rules-version RUNTIME_RULES_VERSION \
   --release-id VERIFIED_RELEASE_ID \
   --old-writers-drained \
   --output /secure/operator/path/release-rescreen-result.json \
   --execute
 ```
+
+Requests whose saved screening is flagged as test data appear in the inventory with the issue `flagged_as_test_data`. The executor leaves them out, reports them as `skipped_test_data`, and does not count them as needing attention. Flag test records before taking the inventory: a record flagged afterwards is not re-screened either, but is reported as unresolved until the inventory is regenerated.
+
+`RUNTIME_RULES_VERSION` is the exact version the release runtime stamps on results. It names every rule set in force and depends on `SCREENING_MATCHER_VERSION` and `SCREENING_EVIDENCE_GRADES`, so read it from the release runtime with its environment, not from this document:
+
+```sh
+python -c "from utils import rules_version_for; print(rules_version_for('postgres_beta'))"
+```
+
+The executor refuses to start if the value given differs from what the runtime stamps.
 
 The executor verifies the hash, database name, database OID and server address/port, time window, original requests, runtime release ID and matching rules version. A failover or changed database endpoint requires a new inventory; endpoint checks alone do not prove target identity, so the operator must also verify the target. It executes each identical input group once through its recorded backend with required current source coverage; it does not reuse old matching results. PostgreSQL-origin checks remain PostgreSQL checks and Parquet-origin checks remain Parquet checks. Each original request receives its own linked immutable result and business reference. Historical results and review decisions remain in the ledger. Automatic candidate-decision reuse is disabled for these new results so that newly detected candidates receive fresh review.
 

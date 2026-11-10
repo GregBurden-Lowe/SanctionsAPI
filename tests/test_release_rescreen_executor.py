@@ -11,9 +11,15 @@ import asyncpg
 import screening_db
 from scripts.execute_release_rescreen import execute, screen, ACTOR, SOURCE
 from scripts.plan_release_rescreen import preview, parse_time
-from utils import _empty_no_match_result, stamp_screening_result
+from utils import _empty_no_match_result, rules_version_for, stamp_screening_result
 
 DSN=os.environ.get('SANCTIONS_TEST_ADMIN_DSN')
+
+
+def rules():
+    """The version the runtime stamps on results, which the executor must be given exactly."""
+    return rules_version_for('postgres_beta')
+
 
 @unittest.skipUnless(DSN,'Requires isolated local PostgreSQL')
 class RescreenTests(unittest.IsolatedAsyncioTestCase):
@@ -57,11 +63,11 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         plan,old_run=await self.seed()
         old=await self.conn.fetchval('SELECT result_json FROM screening_runs WHERE run_id=$1',old_run)
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())) as matcher:
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
             self.assertEqual(matcher.await_count,1)
             self.assertEqual(report['counts']['completed'],2)
             self.assertEqual(report['status'],'complete')
-            again=await execute(self.conn,plan,'evidence-v8')
+            again=await execute(self.conn,plan,rules())
             self.assertEqual(matcher.await_count,1)
             self.assertEqual(again['counts']['already_completed'],2)
         rows=await self.conn.fetch("SELECT * FROM screening_requests WHERE source=$1",SOURCE)
@@ -81,8 +87,8 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
                 'Alice','REF-1','Client Onboarding',newer)
         new_current=UUID(newer['run_id'])
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())):
-            report=await execute(self.conn,plan,'evidence-v8')
-            again=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
+            again=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['history_only'],1)
         self.assertEqual(again['status'],'needs_attention')
         self.assertEqual(await self.conn.fetchval('SELECT current_run_id FROM screened_entities WHERE entity_key=$1','entity'),new_current)
@@ -93,13 +99,13 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_and_active_job_leave_existing_results_unchanged(self):
         plan,old_run=await self.seed(references=('REF-1',))
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=RuntimeError('unavailable'))):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['status'],'needs_attention')
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
         self.assertEqual(await self.conn.fetchval('SELECT current_run_id FROM screened_entities WHERE entity_key=$1','entity'),old_run)
         await screening_db.enqueue_job(self.conn,'entity','Jane Smith',None,None,'Person','Alice','REF-1','Client Onboarding')
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())) as matcher:
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['unresolved'],1)
         self.assertEqual(matcher.await_count,0)
 
@@ -109,7 +115,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
             await screening_db.enqueue_job(self.conn,'entity','Jane Smith',None,None,'Person','Alice','REF-1','Client Onboarding')
             return self.result()
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=race)):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['unresolved'],1)
         self.assertEqual(await self.conn.fetchval('SELECT current_run_id FROM screened_entities WHERE entity_key=$1','entity'),old_run)
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
@@ -118,7 +124,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         plan,old_run=await self.seed(references=('REF-1',))
         await self.conn.execute("UPDATE screened_entities SET review_status='COMPLETED', review_outcome='Reviewed' WHERE entity_key='entity'")
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['history_only'],1)
         row=await self.conn.fetchrow("SELECT current_run_id,review_status,review_outcome FROM screened_entities WHERE entity_key='entity'")
         self.assertEqual(row['current_run_id'],old_run)
@@ -132,7 +138,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         await write_decision(self.conn,row,'reviewer','False Positive - Proceeded','Prior reviewed decision')
         plan=await preview(parse_time('2026-11-02T00:00:00+00:00'))
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['status'],'complete')
         saved=await self.conn.fetchrow('SELECT outcome,notes,run_id FROM screening_review_decisions WHERE run_id=$1',old_run)
         self.assertEqual(saved['notes'],'Prior reviewed decision')
@@ -145,7 +151,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         await self.conn.execute("UPDATE screened_entities SET review_status='IN_REVIEW',review_claimed_by='Alice' WHERE entity_key='entity'")
         plan=await preview(parse_time('2026-11-02T00:00:00+00:00'))
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['history_only'],1)
         self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
         self.assertEqual(await self.conn.fetchval("SELECT review_claimed_by FROM screened_entities WHERE entity_key='entity'"),'Alice')
@@ -162,7 +168,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
             return describe_change(*args)
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())), \
              patch('scripts.execute_release_rescreen.describe_change',side_effect=fail_after_publication_started):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['unresolved'],2)
         self.assertEqual(await self.conn.fetchval("SELECT count(*) FROM screening_requests WHERE source=$1",SOURCE),0)
         self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
@@ -171,7 +177,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         plan,old_run=await self.seed(references=('REF-1',))
         await self.conn.execute("UPDATE screening_requests SET status='failed' WHERE request_id=$1",UUID(plan['cases'][0]['request_id']))
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())) as matcher:
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['unresolved'],1)
         self.assertEqual(matcher.await_count,0)
         self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
@@ -182,11 +188,75 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
             await execute(self.conn,plan,'evidence-v7')
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
 
+    async def test_long_rules_version_and_dob_required_result_are_published(self):
+        import utils
+        from name_matching import TokenStats
+        plan,_=await self.seed(references=('REF-1',))
+        with patch.dict(os.environ,{'SCREENING_MATCHER_VERSION':'v2','SCREENING_EVIDENCE_GRADES':'enforce'}):
+            version=rules()
+            self.assertGreater(len(version),60)
+            self.assertTrue(version.endswith('-evidence-grades-v2'))
+            def waiting(*_):
+                row=dict(name='Jane Maria Brown',schema='Person',source_type='sanctions',dataset='fixture',id='listed-1')
+                result=utils._evaluate_watchlist_rows('Jane Maria Smith',None,None,'Person',[row],'fixture',
+                    token_stats=TokenStats({},100),submitted_entity_type='Person')
+                stamp_screening_result(result,'Jane Smith',None,None,'Person','postgres_beta')
+                result['Source Coverage']={'status':'current','version':'fixture'}
+                return result
+            self.assertEqual(waiting()['Check Summary']['Status'],utils.DOB_REQUIRED_STATUS)
+            with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=waiting)):
+                report=await execute(self.conn,plan,version)
+                again=await execute(self.conn,plan,version)
+        self.assertEqual(report['status'],'complete')
+        self.assertEqual(report['details'][0]['new_status'],utils.DOB_REQUIRED_STATUS)
+        self.assertEqual(again['counts']['already_completed'],1)
+        row=await self.conn.fetchrow("SELECT status,result_json FROM screened_entities WHERE entity_key='entity'")
+        self.assertEqual(row['status'],utils.DOB_REQUIRED_STATUS)
+        self.assertTrue(json.loads(row['result_json'])['Is Sanctioned'])
+        self.assertEqual([i['entity_key'] for i in await screening_db.list_review_queue(self.conn,queue='awaiting_dob')],['entity'])
+
+    async def flag_as_test(self, run):
+        async with self.conn.transaction():
+            await screening_db.set_test_flag(self.conn, entity_key='entity', expected_run=run, active=True,
+                                             reason='Benchmark record, not a customer.', actor='admin')
+
+    async def test_records_flagged_as_test_data_are_left_out(self):
+        _,old_run=await self.seed()
+        await self.flag_as_test(old_run)
+        plan=await preview(parse_time('2026-11-02T00:00:00+00:00'))
+        self.assertEqual(plan['counts']['flagged_as_test_data'],2)
+        self.assertTrue(all('flagged_as_test_data' in c['issues'] for c in plan['cases']))
+        with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())) as matcher:
+            report=await execute(self.conn,plan,rules())
+        self.assertEqual(matcher.await_count,0)
+        self.assertEqual(report['counts'],{'skipped_test_data':2})
+        self.assertEqual(report['status'],'complete')                     # test data is not something to resolve
+        self.assertEqual({d['status'] for d in report['details']},{'skipped_test_data'})
+        self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
+        self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
+
+    async def test_record_flagged_after_the_inventory_is_not_rescreened(self):
+        plan,old_run=await self.seed(references=('REF-1',))
+        await self.flag_as_test(old_run)
+        with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())) as matcher:
+            report=await execute(self.conn,plan,rules())
+        self.assertEqual(matcher.await_count,0)
+        self.assertEqual(report['status'],'needs_attention')
+        self.assertIn('flagged as test data',report['details'][0]['reason'])
+        self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
+
+    async def test_malformed_rules_version_is_rejected(self):
+        plan,_=await self.seed(references=('REF-1',))
+        for bad in ('','evidence v8','evidence-v8;drop','x'*201):
+            with self.assertRaisesRegex(ValueError,'Invalid rules version'):
+                await execute(self.conn,plan,bad)
+        self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
+
     async def test_changed_database_endpoint_is_rejected_before_screening(self):
         plan,_=await self.seed(references=('REF-1',))
         plan['database_identity']['oid']='0'
         with self.assertRaisesRegex(ValueError,'database endpoint'):
-            await execute(self.conn,plan,'evidence-v8')
+            await execute(self.conn,plan,rules())
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
 
     async def test_one_group_can_link_distinct_entity_keys_without_merging_history(self):
@@ -199,7 +269,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
             VALUES('/opcheck',$1::jsonb,'REF-3','completed',$2,'2026-11-02T12:00:00+00')''',json.dumps(inputs),UUID(result['run_id']))
         plan=await preview(parse_time('2026-11-02T00:00:00+00:00'))
         with patch('scripts.execute_release_rescreen.screen',AsyncMock(side_effect=lambda *a:self.result())) as matcher:
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(matcher.await_count,1)
         self.assertEqual(report['counts']['completed'],2)
         rows=await self.conn.fetch('''SELECT r.entity_key,r.run_id FROM screening_requests q
@@ -210,12 +280,12 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_backend_dispatch_uses_selected_backend_without_cache(self):
         inp={'name':'Jane Smith','dob':None,'country':None,'entity_type':'Person','backend':'postgres_beta'}
         with patch('scripts.execute_release_rescreen.run_postgres_check',AsyncMock(return_value=_empty_no_match_result('fixture'))) as pg:
-            got=await screen(self.conn,inp,'evidence-v8')
+            got=await screen(self.conn,inp,rules())
             self.assertEqual(got['Screening Inputs']['backend'],'postgres_beta')
             self.assertTrue(pg.await_args.kwargs['require_assurance'])
         inp['backend']='original'
         with patch('scripts.execute_release_rescreen.run_postgres_check',AsyncMock(return_value=_empty_no_match_result('fixture'))) as pg:
-            got=await screen(self.conn,inp,'evidence-v8')
+            got=await screen(self.conn,inp,rules())
             self.assertEqual(got['Screening Inputs']['backend'],'postgres_beta')
             self.assertTrue(pg.await_args.kwargs['require_assurance'])
 
@@ -234,10 +304,10 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
                   'list_counts':{k:1 for k in ('UK','UN','EU','OFAC')}}
         await self.conn.execute("INSERT INTO watchlist_source_state(singleton,manifest) VALUES(true,$1::jsonb) ON CONFLICT(singleton) DO UPDATE SET manifest=excluded.manifest",json.dumps(manifest))
         args={'name':'Jane Smith','dob':None,'country':None,'entity_type':'Person','backend':'postgres_beta'}
-        result=await screen(self.conn,args,'evidence-v8')
+        result=await screen(self.conn,args,rules())
         self.assertTrue(result['Is Sanctioned'])
         self.assertEqual(result['Source Coverage']['version'],'fixture')
-        report=await execute(self.conn,plan,'evidence-v8')
+        report=await execute(self.conn,plan,rules())
         self.assertEqual(report['status'],'complete')
         self.assertEqual(await self.conn.fetchval("SELECT status FROM screened_entities WHERE entity_key='entity'"),'Fail Sanction')
 
@@ -247,7 +317,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
                                    WHERE business_reference='REF-1' AND source='/opcheck'""")
         plan=await preview(parse_time('2026-11-02T00:00:00+00:00'))
         with patch('scripts.execute_release_rescreen.screen',AsyncMock()) as matcher:
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['status'],'needs_attention')
         self.assertEqual(report['counts']['unresolved'],1)
         self.assertEqual(matcher.await_count,0)
@@ -255,14 +325,14 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_source_never_changes_current_record(self):
         plan,old_run=await self.seed(references=('REF-1',))
         with patch('scripts.execute_release_rescreen.run_postgres_check',AsyncMock(side_effect=RuntimeError('source is stale'))):
-            report=await execute(self.conn,plan,'evidence-v8')
+            report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['unresolved'],1)
         self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
 
     async def test_real_missing_source_never_changes_current_record(self):
         plan,old_run=await self.seed(references=('REF-1',))
-        report=await execute(self.conn,plan,'evidence-v8')
+        report=await execute(self.conn,plan,rules())
         self.assertEqual(report['counts']['unresolved'],1)
         self.assertEqual(await self.conn.fetchval("SELECT current_run_id FROM screened_entities WHERE entity_key='entity'"),old_run)
         self.assertEqual(await self.conn.fetchval('SELECT count(*) FROM screening_requests WHERE source=$1',SOURCE),0)
@@ -291,7 +361,7 @@ class RescreenTests(unittest.IsolatedAsyncioTestCase):
         try:
             await other.fetchval("SELECT pg_advisory_lock(hashtext('sanctions:release-rescreen'))")
             with self.assertRaisesRegex(RuntimeError,'executor is running'):
-                await execute(self.conn,plan,'evidence-v8')
+                await execute(self.conn,plan,rules())
         finally:
             await other.execute("SELECT pg_advisory_unlock(hashtext('sanctions:release-rescreen'))")
             await other.close()

@@ -18,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils import _normalize_dob, _normalize_text
 
 
+TEST_DATA_ISSUE = 'flagged_as_test_data'
+
+
 def parse_time(value):
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
@@ -80,6 +83,9 @@ def make_plan(rows, start, cutoff):
             issues.append('missing_business_reference')
         if row['active_jobs']:
             issues.append('active_job_for_entity')
+        if row.get('test_flagged'):
+            # Marked as test data: the executor leaves it out, as monitoring does.
+            issues.append(TEST_DATA_ISSUE)
         counts.update(issues or ['eligible'])
         group_id = None
         if (name and _normalize_text(name) and (not dob or _normalize_dob(dob))
@@ -122,7 +128,8 @@ async def preview(start):
                        e.status AS current_status,e.review_status,e.review_decision,e.review_claimed_by,e.review_claimed_at,
                        e.review_claimed_run_id,e.review_completed_at,e.review_outcome,e.review_notes,e.manual_override_stale,
                        EXISTS(SELECT 1 FROM screening_jobs j WHERE j.entity_key=r.entity_key
-                              AND j.status IN ('pending','running')) AS active_jobs
+                              AND j.status IN ('pending','running')) AS active_jobs,
+                       COALESCE(screening_is_test(e), false) AS test_flagged
                 FROM screening_requests q LEFT JOIN screening_runs r ON r.run_id=q.run_id
                 LEFT JOIN screened_entities e ON e.entity_key=r.entity_key
                 WHERE q.requested_at >= $1 AND q.requested_at < $2 AND q.source <> 'release_rescreen'

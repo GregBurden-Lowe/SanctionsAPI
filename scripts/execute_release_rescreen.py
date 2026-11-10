@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import screening_db
 from screening_guidance import describe_change
 from screening_policy import run_postgres_check
-from scripts.plan_release_rescreen import database_identity, make_plan, parse_time, review_fingerprint, write_private
+from scripts.plan_release_rescreen import (TEST_DATA_ISSUE, database_identity, make_plan, parse_time,
+                                           review_fingerprint, write_private)
 from utils import _empty_no_match_result, _normalize_text, stamp_screening_result
 
 ACTOR = 'system:release-rescreen'
@@ -30,6 +31,9 @@ SOURCE = 'release_rescreen'
 BLOCKING_ISSUES = {'request_not_completed', 'legacy_snapshot_not_original_request',
                    'missing_run_or_entity_key', 'missing_or_unsupported_inputs',
                    'invalid_dob', 'backend_not_recorded', 'backend_mismatch', 'missing_business_reference'}
+
+
+FLAGGED_SINCE_INVENTORY = 'A record was flagged as test data after the inventory was taken; regenerate the inventory'
 
 
 class GuardFailure(RuntimeError):
@@ -100,7 +104,8 @@ async def load_cases(conn, cases, plan):
                e.status AS current_status,e.review_status,e.review_decision,e.review_claimed_by,e.review_claimed_at,
                e.review_claimed_run_id,e.review_completed_at,e.review_outcome,e.review_notes,e.manual_override_stale,
                EXISTS(SELECT 1 FROM screening_jobs j WHERE j.entity_key=r.entity_key
-                      AND j.status IN ('pending','running')) AS active_jobs
+                      AND j.status IN ('pending','running')) AS active_jobs,
+               COALESCE(screening_is_test(e), false) AS test_flagged
         FROM screening_requests q LEFT JOIN screening_runs r ON r.run_id=q.run_id
         LEFT JOIN screened_entities e ON e.entity_key=r.entity_key
         WHERE q.request_id=ANY($1::uuid[]) ORDER BY q.requested_at,q.request_id''',ids)
@@ -136,6 +141,8 @@ async def publish_group(conn, plan, cases, result, rules):
             raise GuardFailure('Original request is no longer eligible')
         if any(fresh[c['request_id']]['issues'] and 'active_job_for_entity' in fresh[c['request_id']]['issues'] for c in cases):
             raise GuardFailure('An active screening job exists')
+        if any(TEST_DATA_ISSUE in fresh[c['request_id']]['issues'] for c in cases):
+            raise GuardFailure(FLAGGED_SINCE_INVENTORY)
         existing=await already_done(conn,cases,rules)
         if existing:
             if len(existing)==len(cases) and completed(existing):
@@ -215,7 +222,9 @@ async def publish_group(conn, plan, cases, result, rules):
 
 async def execute(conn, plan, rules):
     valid_plan(plan)
-    if not re.fullmatch(r'[A-Za-z0-9._-]{1,60}',rules):
+    # Rules versions name every rule set in force, so they run well past 60
+    # characters. The limit only bounds the idempotency key and the report.
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,200}',rules):
         raise ValueError('Invalid rules version')
     probe=_empty_no_match_result('version check')
     stamp_screening_result(probe,'Version Check',None,None,'Person','postgres_beta')
@@ -232,6 +241,11 @@ async def execute(conn, plan, rules):
     try:
         totals=Counter(); details=[]; groups={}
         for case in plan['cases']:
+            if TEST_DATA_ISSUE in case.get('issues',[]):
+                # Test data is left exactly as it is; this is not a failure to resolve.
+                totals['skipped_test_data']+=1
+                details.append({'request_id':case['request_id'],'status':'skipped_test_data'})
+                continue
             blockers=BLOCKING_ISSUES.intersection(case.get('issues',[]))
             if not case.get('group_id') or blockers:
                 totals['unresolved']+=1
@@ -260,6 +274,8 @@ async def execute(conn, plan, rules):
                     raise GuardFailure('Original request is no longer eligible')
                 if any('active_job_for_entity' in fresh[c['request_id']]['issues'] for c in cases):
                     raise GuardFailure('An active screening job exists')
+                if any(TEST_DATA_ISSUE in fresh[c['request_id']]['issues'] for c in cases):
+                    raise GuardFailure(FLAGGED_SINCE_INVENTORY)
                 result=await screen(conn,cases[0]['inputs'],rules)
                 published=await publish_group(conn,plan,cases,result,rules)
                 totals.update({k:v for k,v in published.items() if k != 'details'})

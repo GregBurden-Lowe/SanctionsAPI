@@ -398,6 +398,56 @@ async def get_screened_entity_identity(conn, entity_key: str) -> Optional[Dict[s
     return dict(row)
 
 
+class FlagRefused(Exception):
+    """A test-data flag was not changed; `status` is the HTTP status the admin endpoint returns."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+async def set_test_flag(conn, *, entity_key: str, expected_run, active: bool, reason: str, actor: str) -> str:
+    """Mark or restore one screening as test data. Call inside a transaction.
+
+    The admin endpoint and the bulk script share these rules: the record must
+    still be on the expected run, must have a business reference to scope the
+    flag, and cannot be flagged while a check is queued or running. Every
+    change writes an immutable event. Returns the business reference used.
+    """
+    if not await conn.fetchval('SELECT pg_try_advisory_xact_lock(720031005)'):
+        raise FlagRefused(409, 'Monitoring is updating; please try again')
+    row = await conn.fetchrow('SELECT * FROM screened_entities WHERE entity_key=$1 FOR UPDATE', entity_key)
+    if not row:
+        raise FlagRefused(404, 'Screening record not found')
+    if row['current_run_id'] != expected_run:
+        raise FlagRefused(409, 'The screening has changed; reload and review it before continuing')
+    if active and await conn.fetchval("""SELECT EXISTS(SELECT 1 FROM screening_jobs
+        WHERE entity_key=$1 AND status IN ('pending','running'))""", entity_key):
+        raise FlagRefused(409, 'A check is already queued or running for this record. Wait for it to finish, then reload before flagging it.')
+    reference = (row['business_reference'] or '').strip()
+    if not reference:
+        raise FlagRefused(409, 'The screening has no business reference to scope this flag')
+    if not active:
+        existing = await conn.fetchrow('SELECT * FROM screening_test_flags WHERE entity_key=$1 AND active FOR UPDATE', entity_key)
+        if not existing:
+            raise FlagRefused(409, 'This record is not flagged as test data')
+        reference = existing['business_reference']
+    await conn.execute("""INSERT INTO screening_test_flags(entity_key,business_reference,active,reason,actor,
+        normalized_name,entity_type,date_of_birth,country_input)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(entity_key) DO UPDATE SET
+        business_reference=EXCLUDED.business_reference,active=EXCLUDED.active,reason=EXCLUDED.reason,
+        actor=EXCLUDED.actor,normalized_name=EXCLUDED.normalized_name,entity_type=EXCLUDED.entity_type,
+        date_of_birth=EXCLUDED.date_of_birth,country_input=EXCLUDED.country_input,updated_at=now()""",
+        entity_key, reference, active, reason, actor, row['normalized_name'], row['entity_type'],
+        row['date_of_birth'], row['country_input'])
+    await conn.execute("""INSERT INTO screening_test_flag_events(entity_key,business_reference,active,reason,actor,run_id,identity_scope)
+        VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('normalized_name',$7::text,'entity_type',$8::text,
+            'date_of_birth',$9::date,'country_input',$10::text))""", entity_key, reference, active,
+        reason, actor, expected_run, row['normalized_name'], row['entity_type'], row['date_of_birth'], row['country_input'])
+    return reference
+
+
 async def find_awaiting_dob_entity(conn, *, normalized_name: str, business_reference: str) -> Optional[str]:
     """The open person screening, for this name and business reference, that is waiting for a date of birth."""
     return await conn.fetchval(
