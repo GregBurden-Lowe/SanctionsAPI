@@ -212,9 +212,19 @@ class PostgresRetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.check('Arkadii ROTINBERG'))['Match Found'])
         with patch.dict(os.environ, {'SCREENING_MATCHER_VERSION': 'v2'}):
             found = await self.check('Arkadii ROTINBERG')
+            self.assertTrue(found['Match Found'])
             self.assertEqual(found['Candidate Evidence'][0]['record_id'], 'person')
-            self.assertEqual(found['Candidate Evidence'][0]['match_rule'], 'token_alignment')
-            self.assertTrue(any('word by word' in reason for reason in found['Candidate Evidence'][0]['reasons']))
+            # The v10 coverage rules do not pair "Arkadii" with "Arkady", so this
+            # variant is kept as an ambiguous review candidate capped at 69, not
+            # reported as a word-by-word alignment.
+            self.assertEqual(found['Candidate Evidence'][0]['match_rule'], 'ambiguous_name_review')
+            self.assertLessEqual(found['Candidate Evidence'][0]['name_score'], 69)
+            # With grades enforced it must stay an alert, not wait for a date of birth.
+            with patch.dict(os.environ, {'SCREENING_EVIDENCE_GRADES': 'enforce'}):
+                enforced = await self.check('Arkadii ROTINBERG')
+            self.assertEqual(enforced['Check Summary']['Status'], 'Fail Sanction')
+            self.assertEqual(enforced['Candidate Evidence'][0]['disposition'], 'potential_match')
+            self.assertNotEqual(enforced['Candidate Evidence'][0]['evidence_grade'], 'weak')
             for name, entity_type, expected in (('Babbar Khalsa', 'Organization', 'greek'), ('Volga Group', 'Organization', 'company')):
                 result = await self.check(name, entity_type)
                 self.assertIn(expected, [item['record_id'] for item in result['Candidate Evidence']])

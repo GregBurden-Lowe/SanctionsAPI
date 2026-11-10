@@ -2,7 +2,8 @@
 import shadow_matching
 import utils
 from evidence_grading import (BELOW_ALERT_THRESHOLD, DOB_REQUIRED, LISTED_DOB_NOT_COMPARABLE, NO_DOB_SUPPLIED,
-                              POSSIBLE, STRONG, WEAK, apply_shadow_policy, grade_person_name, recording)
+                              POSSIBLE, STRONG, WEAK, apply_shadow_policy, grade_person_name, recording,
+                              transliteration_variant)
 from name_matching import TokenStats
 
 
@@ -48,7 +49,26 @@ def test_unexplained_search_word_is_weak():
                              ('Olga Morozov', 'Oleg Viktorovich MOROZOV'),
                              ('Sana Rahman', 'Abdul Rahman S. Taha'),
                              ('Mr Ethan Marlow', 'Marlow E'),
+                             ('Alexander Petrov', 'Alexei Petrovich MAYOROV')]:
+        assert grade(query, candidate) == WEAK
+
+
+def test_transliteration_variant_explains_a_search_word():
+    # The matcher's own word test does not pair these, but only a vowel spelling differs.
+    for query, candidate in [('Arkadii Rotinberg', 'Arkady Romanovich ROTENBERG'),
+                             ('Dmitrii Medvedev', 'Dmitry Anatolyevich MEDVEDEV'),
                              ('Dareem Zanem', 'Darim Mansur AL-ZANIMI')]:
+        assert grade(query, candidate) != WEAK
+    for a, b in [('arkadii', 'arkady'), ('dmitrii', 'dmitry'), ('mikhail', 'mihail'), ('zanem', 'zanimi')]:
+        assert transliteration_variant(a, b) and transliteration_variant(b, a)
+
+
+def test_different_names_are_not_transliteration_variants():
+    # Different consonants, or a short word where a vowel change is usually another name.
+    for a, b in [('olga', 'oleg'), ('chen', 'chun'), ('ming', 'mingguo'), ('carter', 'carver'), ('saleh', 'faleh'),
+                 ('alexander', 'alexei'), ('hernandez', 'fernandez'), ('orion12', 'orion13')]:
+        assert not transliteration_variant(a, b)
+    for query, candidate in [('Olga Morozov', 'Oleg Viktorovich MOROZOV'), ('Chen Kim', 'KIM Chun-sam')]:
         assert grade(query, candidate) == WEAK
 
 

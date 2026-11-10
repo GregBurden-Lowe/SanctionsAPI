@@ -10,7 +10,7 @@
 | `annotate` | Each person candidate carries `evidence_grade` (`strong`, `possible`, `weak`) and `evidence_grade_detail`. No decision, status, score or ordering changes, and the rules version is unchanged. |
 | `enforce` | Also applies the policy below. The rules version gains `-evidence-grades-v2`, so earlier results are not reused. |
 
-A candidate is `weak` when a searched word is not explained by the listed name and the listed name is not wholly accounted for either. `evidence_grading.py` has the exact rules. Under `enforce`, only weak person candidates of a search submitted as a person change:
+A candidate is `weak` when a searched word is not explained by the listed name and the listed name is not wholly accounted for either. A word counts as explained when the name rules pair it, or when it is a transliteration variant of a listed word: the consonants agree and only vowel spellings differ, as in "Arkadii"/"Arkady". `evidence_grading.py` has the exact rules. Under `enforce`, only weak person candidates of a search submitted as a person change:
 
 | Situation | Candidate disposition | Search outcome if nothing else alerts |
 |---|---|---|
@@ -30,9 +30,9 @@ Workflow:
 - If the date of birth cannot be obtained, an analyst claims the item and records an outcome in the normal way. Nothing escalates automatically, so the awaiting list needs an owner.
 - A date of birth arriving through a background job under a different entity key does not close the waiting record; resolve it from the review queue.
 
-`scripts/shadow_grade_replay.py --live` replays cases with `enforce` against the grades-off result. On the captured 502-case queue (10 November 2026 snapshot), cases needing analyst review fell from 267 to 199, 52 became date of birth required and 16 no longer alerted. All 31 cases an earlier review marked as needing corroboration stayed an alert (23) or became date of birth required (8). None of this is validated on independently labelled cases.
+`scripts/shadow_grade_replay.py --live` replays cases with `enforce` against the grades-off result. On the captured 502-case queue (10 November 2026 snapshot), cases needing analyst review fell from 267 to 203, 48 became date of birth required and 16 no longer alerted. All 31 cases an earlier review marked as needing corroboration stayed an alert (24) or became date of birth required (7). None of this is validated on independently labelled cases.
 
-To switch on: deploy, set `SCREENING_EVIDENCE_GRADES=enforce`, restart the API and worker, then run the controlled re-screen so open results are replaced. To switch off, remove the setting and restart; results produced under `enforce` keep their own rules version and are not reused.
+To switch on: deploy, set `SCREENING_EVIDENCE_GRADES=enforce`, restart the API and worker, then run the controlled re-screen (`docs/RELEASE_RESCREEN.md`) with the runtime's rules version so open results are replaced. To switch off, remove the setting and restart; results produced under `enforce` keep their own rules version and are not reused.
 
 ## Name coverage update, 10 November 2026
 

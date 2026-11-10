@@ -41,6 +41,8 @@ from contextlib import contextmanager
 import copy
 import re
 
+from rapidfuzz.distance import JaroWinkler
+
 from shadow_matching import align, words
 
 STRONG, POSSIBLE, WEAK = 'strong', 'possible', 'weak'
@@ -65,6 +67,27 @@ _PATRONYMIC = re.compile(r'(ovich|evich|ovna|evna|ichna|ovych|ivna|ogly|oglu|kyz
 _PATRONYMIC_LIKE = re.compile(r'(ich|vna|chna|vych|vic|vitj|ogly|oglu|uly|kyzy|qizi)$')
 
 
+def _consonant_pattern(word):
+    """The word with each run of vowels reduced to a placeholder and doubled letters merged."""
+    word = re.sub(r'(.)\1+', r'\1', word.replace('kh', 'h').replace('ks', 'x').replace('ph', 'f'))
+    return re.sub(r'[aeiouy]+', '*', word)
+
+
+def transliteration_variant(a, b):
+    """Two spellings of one name whose consonants agree in order and position.
+
+    "Arkadii"/"Arkady" and "Dmitrii"/"Dmitry" fall below the matcher's own
+    word thresholds because the ending changes length, yet only the spelling
+    of a vowel differs. A final vowel may be present on one side only
+    ("Zanem"/"Zanimi"). Short words are excluded: in a four-letter name a
+    different vowel is usually a different name ("Chen"/"Chun", "Olga"/"Oleg").
+    """
+    if min(len(a), len(b)) < 5 or not (a.isalpha() and b.isalpha()):
+        return False
+    return (_consonant_pattern(a).rstrip('*') == _consonant_pattern(b).rstrip('*')
+            and JaroWinkler.similarity(a, b) >= 0.85)
+
+
 def grade_person_name(query, candidate):
     """Grade one listed name or alias against the search name: (grade, detail)."""
     q, c = words(query), words(candidate)
@@ -86,6 +109,15 @@ def grade_person_name(query, candidate):
             kept.append((i, j))
     kept_query = {i for i, _ in kept}
     kept_listed = {j for _, j in kept}
+    # A transliteration variant explains a search word even when the matcher's
+    # stricter word test did not pair it.
+    for i, word in enumerate(q):
+        if i in kept_query:
+            continue
+        for j, listed in enumerate(c):
+            if j not in kept_listed and transliteration_variant(word, listed):
+                kept.append((i, j)); kept_query.add(i); kept_listed.add(j)
+                break
     unmatched_query = [word for i, word in enumerate(q) if i not in kept_query]
     # Omitted patronymics and stray listed initials are normal, not differences.
     unmatched_listed = [word for j, word in enumerate(c)
