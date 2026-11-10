@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from rapidfuzz.distance import JaroWinkler
 
-MATCHER_RULES_VERSION = "evidence-v9-matching-v2"
+MATCHER_RULES_VERSION = "evidence-v10-matching-v2"
 
 PERSON_TOKEN_SIMILARITY = 0.86     # two words of 4+ letters align at or above this
 ORG_TOKEN_SIMILARITY = 0.90        # stricter: company words are less variable

@@ -1515,6 +1515,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             from name_matching import refine_hits
             hits, aligned_indexes = refine_hits(name, names, hits, has_dob=bool(_normalize_dob(dob)),
                                                 entity_type=entity_type, stats=token_stats)
+            from shadow_matching import apply_rules
+            hits, aligned_indexes = apply_rules(name, names, hits, aligned_indexes, entity_type, submitted_entity_type)
         # A single listed vessel word cannot establish a match to a multi-word
         # person query. Keep complete names and all organisation searches eligible.
         partial_vessel = schema == 'vessel' and (submitted_entity_type or '').lower() == 'person'
@@ -1555,8 +1557,16 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         elif not weak_name_with_dob:
             continue
         excluded = dob_status == "conflicting"
-        reasons = (["A single-word name or alias matched a search token and the full date of birth agrees; review required."]
-                   if weak_name_with_dob else ["Name comparison passed the decision rules; the displayed similarity also reflects the full name."])
+        name_rule = None
+        if hits and token_stats is not None:
+            from shadow_matching import evaluate as evaluate_name_rule
+            _, name_rule = evaluate_name_rule(name, names[matched_index], entity_type, submitted_entity_type)
+        if weak_name_with_dob:
+            reasons = ["A single-word name or alias matched a search token and the full date of birth agrees; review required."]
+        elif name_rule and name_rule.startswith('ambiguous_'):
+            reasons = ["Some name parts are similar, but other parts differ or are missing; identity requires review."]
+        else:
+            reasons = ["Name comparison passed the decision rules; identity requires review."]
         if hits and matched_index in aligned_indexes:
             reasons.append("Name parts align word by word, allowing for spelling variation or omitted names.")
         if matched_index:
@@ -1596,7 +1606,7 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         except (ValueError, TypeError):
             parsed_notes = []
         evidence.append({
-            **({"match_rule": "token_alignment" if hits and matched_index in aligned_indexes else "standard"}
+            **({"match_rule": name_rule if name_rule and name_rule.startswith('ambiguous_') else "token_alignment" if hits and matched_index in aligned_indexes else "standard"}
                if token_stats is not None else {}),
             "record_id": _safe_str(row.get("entity_id") or row.get("id")) or None,
             "source_evidence_hash": hashlib.sha256(json.dumps(source_values, sort_keys=True).encode()).hexdigest(),

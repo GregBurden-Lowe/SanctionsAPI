@@ -1,5 +1,13 @@
 # Matcher v2
 
+## Name coverage update, 10 November 2026
+
+The `evidence-v10-matching-v2` rules apply the coverage assessment in `shadow_matching.py` to retrieved name hits for each candidate's type. Unlike the historical v2 description below, this can remove a standard name hit and can add a sufficiently aligned organisation name. Some incomplete or conflicting name combinations remain potential matches for review at scores capped at 69 or 79. These scores are heuristics, not identity probabilities. Comparable conflicting dates of birth still exclude a person candidate; missing dates do not. Unsupported scripts remain fail-closed. This change affects future screenings; historical decisions are not automatically changed.
+
+The offline 54-case review retained the 15 previously missed corroboration-priority cases but also restored five weaker overlaps. On 40 constructed different-surname searches, alerts were 40 for the previous production rules, 5 for the earlier shadow, and 34 for this update. These deliberately difficult cases are not independently verified identity labels or a production alert-rate estimate. Broader recall and multilingual retrieval remain unvalidated.
+
+## Historical v2 baseline
+
 Matcher v2 compares names word by word and uses name and word indexes for candidate retrieval. It is the production matcher. `SCREENING_MATCHER_VERSION` defaults to `v1` in code, and production sets `v2`.
 
 Any value other than `v1` or `v2` stops screening with no clearance. Results record `evidence-v9-matching-v2` as their rules version, which is part of the screening fingerprint, so earlier results are not reused.
