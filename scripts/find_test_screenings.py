@@ -11,8 +11,10 @@ for it falls inside the selection. One that anyone else has also searched is
 `needs_review`, because the same name may belong to a real customer. A name is
 never enough on its own: --listed-names-only only narrows a selection.
 
-Requests made by monitoring are not recorded as requests, so a later
-monitoring re-screen does not make a benchmark record look real.
+Monitoring re-screens are recorded as `background_job` requests with a
+`system:` requestor. They are the system re-checking a record that already
+exists, so they are never selected and never count as someone else searching.
+A background job with any other requestor is a real submission and does count.
 """
 import argparse
 import asyncio
@@ -28,6 +30,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.plan_release_rescreen import database_identity, decode, parse_time, write_private
 
 INVENTORY_KIND = 'test_screening_candidates'
+# References an earlier monitoring generation wrote onto the records it re-screened.
+SYSTEM_REFERENCE_PREFIXES = ('MONITOR-', 'UK-DELTA-')
+
+
+def is_system_request(request):
+    """The system re-screening an existing record, as opposed to someone searching for it."""
+    if request['source'] == 'release_rescreen':
+        return True
+    if request['source'] != 'background_job':
+        return False
+    requestor = str(decode(request['inputs']).get('requestor') or '')
+    return requestor.startswith('system:') or (request['business_reference'] or '').startswith(SYSTEM_REFERENCE_PREFIXES)
 
 
 def selection_from(args):
@@ -87,7 +101,7 @@ async def find(conn, selection):
             FROM screening_requests q LEFT JOIN screening_runs r ON r.run_id=q.run_id
             WHERE q.requested_at >= $1 AND q.requested_at < $2 AND q.source <> 'release_rescreen'
             ORDER BY q.requested_at,q.request_id''', start, end)
-        chosen = [row for row in in_window if is_selected(row, selection)]
+        chosen = [row for row in in_window if not is_system_request(row) and is_selected(row, selection)]
         chosen_ids = {row['request_id'] for row in chosen}
         by_entity = {}
         unsaved = 0
@@ -98,13 +112,19 @@ async def find(conn, selection):
             by_entity.setdefault(row['entity_key'], []).append(row)
         keys = sorted(by_entity)
         # Every recorded request for these screenings, at any time, to see who else searched them.
-        everyone = await conn.fetch('''SELECT q.request_id,q.requested_at,r.entity_key
+        everyone = await conn.fetch('''SELECT q.request_id,q.requested_at,q.actor,q.source,q.inputs,
+                   q.business_reference,r.entity_key
             FROM screening_requests q JOIN screening_runs r ON r.run_id=q.run_id
-            WHERE r.entity_key=ANY($1::text[]) AND q.source <> 'release_rescreen' ''', keys)
-        outside = {}
+            WHERE r.entity_key=ANY($1::text[])''', keys)
+        outside, outside_from, system = {}, {}, Counter()
         for row in everyone:
-            if row['request_id'] not in chosen_ids:
-                outside.setdefault(row['entity_key'], []).append(row['requested_at'])
+            if row['request_id'] in chosen_ids:
+                continue
+            if is_system_request(row):
+                system[row['entity_key']] += 1
+                continue
+            outside.setdefault(row['entity_key'], []).append(row['requested_at'])
+            outside_from.setdefault(row['entity_key'], Counter())[f"{row['source']} / {row['actor'] or 'no login'}"] += 1
         saved = {row['entity_key']: row for row in await conn.fetch('''SELECT s.entity_key,s.display_name,s.normalized_name,
                    s.entity_type,s.date_of_birth,s.country_input,s.business_reference,s.last_requestor,s.status,
                    s.review_status,s.review_outcome,s.current_run_id,s.last_screened_at,
@@ -152,7 +172,9 @@ async def find(conn, selection):
                      'requestors': sorted({str(decode(r['inputs']).get('requestor') or '') for r in requests}),
                      'business_references': sorted({r['business_reference'] or '' for r in requests}),
                      'requests_outside_selection': len(others),
+                     'outside_selection_by_source_and_login': dict(outside_from.get(key, {})),
                      'latest_request_outside_selection': others[-1].isoformat() if others else None,
+                     'system_rescreens_ignored': system[key],
                      'name_is_exactly_listed': exact}
             if row is not None:
                 entry.update({'display_name': row['display_name'], 'entity_type': row['entity_type'],
@@ -168,6 +190,7 @@ async def find(conn, selection):
                 'database_identity': await database_identity(conn),
                 'requests_in_window': len(in_window), 'requests_selected': len(chosen),
                 'selected_requests_without_a_saved_screening': unsaved,
+                'system_rescreens_ignored': sum(system.values()),
                 'counts': dict(counts), 'entities': entities,
                 'notes': ['Read-only inventory. Nothing was flagged, changed or deleted.',
                           'Eligible means every recorded request for the screening is inside the selection; '

@@ -28,7 +28,7 @@ from uuid import UUID
 import asyncpg
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import screening_db
-from scripts.find_test_screenings import INVENTORY_KIND
+from scripts.find_test_screenings import INVENTORY_KIND, is_system_request
 from scripts.plan_release_rescreen import database_identity, parse_time, write_private
 
 ACTOR_PREFIX = 'bulk-test-flag:'
@@ -61,10 +61,10 @@ async def flag_one(conn, entry, cutoff, reason, actor, execute):
                     WHERE entity_key=$1 AND active)''', entry['entity_key']):
                 return 'skipped', 'already_flagged'
             # A request recorded after the report may be a real search that reused this result.
-            if await conn.fetchval('''SELECT EXISTS(SELECT 1 FROM screening_requests q
+            later = await conn.fetch('''SELECT q.source,q.inputs,q.business_reference FROM screening_requests q
                     JOIN screening_runs r ON r.run_id=q.run_id
-                    WHERE r.entity_key=$1 AND q.requested_at >= $2 AND q.source <> 'release_rescreen')''',
-                    entry['entity_key'], cutoff):
+                    WHERE r.entity_key=$1 AND q.requested_at >= $2''', entry['entity_key'], cutoff)
+            if any(not is_system_request(row) for row in later):
                 return 'skipped', 'requested_again_since_the_report'
             await screening_db.set_test_flag(conn, entity_key=entry['entity_key'],
                                              expected_run=UUID(entry['current_run_id']), active=True,

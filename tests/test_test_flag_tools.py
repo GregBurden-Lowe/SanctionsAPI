@@ -64,10 +64,16 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
                                             reference, 'Ad-Hoc Compliance Review', result)
         return UUID(result['run_id'])
 
-    async def request(self, run, actor='bench-key', when=IN_WINDOW, reference='BENCH-1'):
+    async def request(self, run, actor='bench-key', when=IN_WINDOW, reference='BENCH-1', source='/opcheck',
+                      requestor='Benchmark Runner'):
         await self.conn.execute('''INSERT INTO screening_requests(actor,source,inputs,business_reference,status,run_id,requested_at)
-            VALUES($1,'/opcheck',$2::jsonb,$3,'completed',$4,$5::timestamptz)''', actor,
-            json.dumps({'requestor': 'Benchmark Runner'}), reference, run, when)
+            VALUES($1,$2,$3::jsonb,$4,'completed',$5,$6::timestamptz)''', actor, source,
+            json.dumps({'requestor': requestor}), reference, run, when)
+
+    async def monitoring(self, run, when=IN_WINDOW, reference='BENCH-1'):
+        """What a monitoring re-screen leaves in the request history."""
+        await self.request(run, actor=None, when=when, reference=reference, source='background_job',
+                           requestor='system:source-monitoring')
 
     async def seed(self):
         runs = {}
@@ -114,6 +120,31 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         # Selecting the whole window makes the real user's request part of the selection too.
         everything = {e['entity_key']: e['status'] for e in (await self.inventory(window_only=True))['entities']}
         self.assertEqual(everything['real'], 'eligible')
+
+    async def test_monitoring_rescreens_are_neither_selected_nor_counted_as_someone_else(self):
+        runs = await self.seed()
+        for _ in range(3):
+            await self.monitoring(runs['only-bench'])
+        await self.monitoring(runs['real'], reference='POLICY-7')
+        await self.monitoring(runs['old-bench'], reference='UK-DELTA-0a1b2c3d')     # an older monitoring generation
+        internal = await self.screening('internal-job', 'Hotel Eight')
+        await self.request(internal)
+        await self.request(internal, actor=None, source='background_job', requestor='Claims Team', reference='CLAIM-5')
+        report = await self.inventory()
+        found = {e['entity_key']: e for e in report['entities']}
+        self.assertEqual((found['only-bench']['status'], found['only-bench']['system_rescreens_ignored']), ('eligible', 3))
+        # A background job somebody submitted is a real request for that record.
+        self.assertEqual(found['internal-job']['status'], 'needs_review')
+        self.assertEqual(found['internal-job']['outside_selection_by_source_and_login'], {'background_job / no login': 1})
+        # Selecting the whole window must not sweep up records that were only monitored in it.
+        everything = {e['entity_key'] for e in (await self.inventory(window_only=True))['entities']}
+        self.assertNotIn('old-bench', everything)
+        self.assertEqual(report['system_rescreens_ignored'], 3)
+        # A monitoring request recorded after the report does not block the flag.
+        await self.monitoring(runs['only-bench'], when=datetime.fromisoformat('2099-01-01T00:00:00+00:00'))
+        done = await flag_all(self.conn, report, REASON, 'greg', execute=True)
+        self.assertIn('only-bench', await self.flags())
+        self.assertEqual(done['counts']['flagged'], 1)
 
     async def test_dry_run_changes_nothing_and_execute_flags_only_eligible_records(self):
         await self.seed()

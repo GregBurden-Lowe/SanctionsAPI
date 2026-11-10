@@ -22,7 +22,7 @@ python scripts/find_test_screenings.py \
 sha256sum /secure/operator/path/test-screenings.json
 ```
 
-Each screening is `eligible` only when every recorded request for it is inside the selection. One that anyone else also searched is `needs_review`, as is one with a queued or running check, no business reference, or an earlier flag that no longer applies. Monitoring re-screens are not recorded as requests, so they do not change this. Read the report before going further: eligible means the selection explains the record, not that the record is proven to be test data.
+Each screening is `eligible` only when every recorded request for it is inside the selection. One that anyone else also searched is `needs_review`, as is one with a queued or running check, no business reference, or an earlier flag that no longer applies. Monitoring re-screens are recorded as `background_job` requests with a `system:` requestor (or, from an earlier generation, a `MONITOR-` or `UK-DELTA-` reference). They are never selected and do not count as someone else searching; the report shows how many were ignored. A background job with any other requestor is a real submission and does count. Read the report before going further: eligible means the selection explains the record, not that the record is proven to be test data.
 
 `scripts/flag_test_screenings.py` flags the eligible entries with the same rules and audit events as Match Review. Without `--execute` it is a dry run: every check runs and is rolled back.
 
