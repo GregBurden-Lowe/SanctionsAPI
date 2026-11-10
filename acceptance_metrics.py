@@ -40,7 +40,9 @@ def score_cases(cases, backend='postgres'):
             assessment = 'incomplete'
         elif positive:
             result = actual.get('result', {})
-            ids = {str(c.get('record_id')) for c in result.get('Candidate Evidence', []) if c.get('disposition') == 'potential_match'}
+            # A candidate awaiting a date of birth is not cleared, so it counts as detected.
+            ids = {str(c.get('record_id')) for c in result.get('Candidate Evidence', [])
+                   if c.get('disposition') in ('potential_match', 'dob_required')}
             if wanted <= ids and actual.get('outcome') == expected:
                 counts['true_positive'] += 1
                 assessment = 'expected_candidates_detected'

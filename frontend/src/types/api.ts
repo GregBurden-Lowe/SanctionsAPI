@@ -75,8 +75,28 @@ export interface CandidateEvidenceItem {
   country: string | null
   dob_assessment: 'exact' | 'compatible' | 'conflicting' | 'unknown' | 'not_applicable'
   country_assessment: 'compatible' | 'conflicting' | 'unknown'
-  disposition: 'potential_match' | 'excluded'
+  disposition: 'potential_match' | 'excluded' | 'dob_required' | 'below_alert_threshold'
+  /** Why the graded policy changed the disposition; present only when it did. */
+  disposition_reason?: string
+  /** How much of the name is explained; present only when evidence grades are switched on. */
+  evidence_grade?: 'strong' | 'possible' | 'weak'
+  evidence_grade_detail?: {
+    graded_name?: string
+    unmatched_search_words?: string[]
+    unmatched_listed_words?: string[]
+    spelling_differences?: string[][]
+    initials?: string[][]
+    patronymic_pairs_set_aside?: string[][]
+    reason?: string
+  }
   reasons: string[]
+}
+
+/** Status of a screening that is not cleared and needs a date of birth before analyst review. */
+export const DOB_REQUIRED_STATUS = 'Fail Sanction - DOB Required'
+
+export function isDobRequiredStatus(status: string | null | undefined): boolean {
+  return (status ?? '').startsWith(DOB_REQUIRED_STATUS)
 }
 
 export interface ReviewDecision {
@@ -110,7 +130,7 @@ export interface OpCheckResponse {
   'Engine Result'?: OpCheckResponse;
   'Review Decision'?: ReviewDecision;
   'Candidate Evidence'?: CandidateEvidenceItem[];
-  'Candidate Evidence Summary'?: { evaluated_name_matches: number; potential_matches: number; excluded: number; display_truncated: boolean };
+  'Candidate Evidence Summary'?: { evaluated_name_matches: number; potential_matches: number; excluded: number; display_truncated: boolean; dob_required?: number; below_alert_threshold?: number };
   'Decision Explanation'?: string;
   request_id?: string;
   run_id?: string;
@@ -182,6 +202,7 @@ export interface ReviewQueueItem {
   date_of_birth: string | null
   country_input: string | null
   decision: string
+  dob_required?: boolean
   business_reference: string | null
   reason_for_check: string | null
   screening_user: string | null

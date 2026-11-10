@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Replay searches locally and report what the shadow evidence grades would change.
 
-Each search runs once through the unchanged matcher on a disposable local
-PostgreSQL database built from a pinned Parquet snapshot. The shadow result is
-that same result with weak person candidates marked `dob_required` or
-`below_alert_threshold` (see evidence_grading.py). Nothing is written to
-production, and no live decision, queue entry or screening history is created.
+Each search runs through the matcher with evidence grades off, on a disposable
+local PostgreSQL database built from a pinned Parquet snapshot. By default the
+comparison is that same result with the graded policy applied as a shadow
+(see evidence_grading.py). With --live the search is run a second time with
+SCREENING_EVIDENCE_GRADES=enforce, so the comparison is what the matcher
+itself returns. Nothing is written to production, and no live decision, queue
+entry or screening history is created.
 
 Cases come from scripts/shadow_review_replay.py: its constructed controls, and
 its queue sample and analyst-reviewed cases when --queue is given. Output has
@@ -64,6 +66,33 @@ def all_queue_cases(snapshot):
     return cases
 
 
+def live_comparison(baseline, live):
+    """Describe a live enforce result against the grades-off result, in the shadow's terms."""
+    changed = [{'matched_name': item.get('matched_name'), 'reason': item['disposition_reason'],
+                'disposition': item['disposition'], 'record_id': item.get('record_id'),
+                'previous_score': item.get('name_score'), 'entity_type': item.get('entity_type'),
+                'dob_assessment': item.get('dob_assessment'), 'match_rule': item.get('match_rule')}
+               for item in live.get('Candidate Evidence', []) if item.get('disposition_reason')]
+    before = {h.get('record_id') for h in eligible_hits(baseline)}
+    counts = Counter(item.get('evidence_grade') for item in live.get('Candidate Evidence', [])
+                     if item.get('record_id') in before and item.get('evidence_grade'))
+    live_summary = live.get('Candidate Evidence Summary') or {}
+    base_summary = baseline.get('Candidate Evidence Summary') or {}
+    if utils.is_dob_required_result(live):
+        outcome = evidence_grading.DOB_REQUIRED
+    elif baseline.get('Match Found') and not live.get('Match Found'):
+        outcome = 'no_alert'
+    elif live_summary.get('potential_matches', 0) < base_summary.get('potential_matches', 0):
+        outcome = 'fewer_candidates'
+    else:
+        outcome = 'unchanged'
+    live['Shadow Evidence Grades'] = {
+        'rules': live.get('Matching Rules Version') or 'live-enforce', 'outcome': outcome,
+        'dob_required': live_summary.get('dob_required', 0), 'demoted': live_summary.get('below_alert_threshold', 0),
+        'person_potential_matches_by_grade': {grade: counts.get(grade, 0) for grade in ('strong', 'possible', 'weak')}}
+    return changed
+
+
 def tally(entries):
     """Counts only, so the summary carries no names."""
     done = [e for e in entries if e['status'] == 'complete']
@@ -73,7 +102,11 @@ def tally(entries):
         item = {
             'cases': len(group),
             'searches_alerting_now': sum(bool(e['baseline'].get('Match Found')) for e in group),
-            'searches_alerting_under_shadow': sum(bool(e['shadow'].get('Match Found')) for e in group),
+            # A screening that needs a date of birth is flagged like an alert in live mode,
+            # so analyst work is counted without it.
+            'searches_alerting_under_shadow': sum(
+                bool(e['shadow'].get('Match Found'))
+                and e['shadow']['Shadow Evidence Grades']['outcome'] != evidence_grading.DOB_REQUIRED for e in group),
             'searches_needing_dob_under_shadow': sum(
                 e['shadow']['Shadow Evidence Grades']['outcome'] == evidence_grading.DOB_REQUIRED for e in group),
             'shadow_outcomes': dict(Counter(e['shadow']['Shadow Evidence Grades']['outcome'] for e in group)),
@@ -119,6 +152,7 @@ async def run(args):
     utils.MATCHING_CONFIG_PATH = str(out / 'matching_config.json')
     private_write(Path(utils.MATCHING_CONFIG_PATH), {'custom_generic_words': []})
     os.environ['SCREENING_MATCHER_VERSION'] = 'v2'
+    os.environ['SCREENING_EVIDENCE_GRADES'] = 'off'
 
     cases, strata, queue_population = [], {}, 0
     if queue_path:
@@ -135,7 +169,9 @@ async def run(args):
                'source_sha256': hashlib.sha256(snapshot_path.read_bytes()).hexdigest(),
                'queue_sha256': hashlib.sha256(queue_path.read_bytes()).hexdigest() if queue_path else None,
                'baseline_rules': utils.rules_version_for('postgres_beta'),
-               'shadow_rules': evidence_grading.SHADOW_RULES_VERSION,
+               'shadow_rules': ('live-enforce' + utils.EVIDENCE_GRADES_RULES_SUFFIX if args.live
+                                else evidence_grading.SHADOW_RULES_VERSION),
+               'mode': 'live' if args.live else 'shadow',
                'grading_code_sha256': hashlib.sha256((ROOT / 'evidence_grading.py').read_bytes()).hexdigest(),
                'queue_population': queue_population, 'strata_sizes': strata, 'control_set': args.controls,
                'cases': len(cases), 'local_python': platform.python_version(), 'status': 'running'}
@@ -165,14 +201,28 @@ async def run(args):
                 try:
                     baseline = await run_postgres_check(conn, **case['inputs'], log_search=False,
                                                         require_assurance=True)
-                    shadow, demoted = evidence_grading.apply_shadow_policy(
-                        baseline, grades, submitted_type=case['inputs'].get('entity_type'), dob=case['inputs'].get('dob'))
+                    if args.live:
+                        os.environ['SCREENING_EVIDENCE_GRADES'] = 'enforce'
+                        try:
+                            shadow = await run_postgres_check(conn, **case['inputs'], log_search=False,
+                                                              require_assurance=True)
+                        finally:
+                            os.environ['SCREENING_EVIDENCE_GRADES'] = 'off'
+                        demoted = live_comparison(baseline, shadow)
+                    else:
+                        shadow, demoted = evidence_grading.apply_shadow_policy(
+                            baseline, grades, submitted_type=case['inputs'].get('entity_type'), dob=case['inputs'].get('dob'))
                     entry.update(status='complete', baseline=baseline, shadow=shadow, removed_candidate_names=demoted,
                                  added_candidate_names=[], ambiguous_candidate_names=[])
                     if case['kind'] == 'queue':
                         entry['saved_result'] = case['saved_result']
                     if 'target_id' in case:
                         for label, result in (('baseline', baseline), ('shadow', shadow)):
+                            # Awaiting a date of birth is still open, so the target is not lost.
+                            open_ids = {h.get('record_id') for h in result.get('Candidate Evidence', [])
+                                        if h.get('source_type') == 'sanctions'
+                                        and h.get('disposition') in ('potential_match', evidence_grading.DOB_REQUIRED)}
+                            entry[label + '_target_open'] = case['target_id'] in open_ids
                             found = case['target_id'] in {h.get('record_id') for h in eligible_hits(result)}
                             entry[label + '_target_found'] = found
                             entry[label + '_target_unknown'] = not found and bool(
@@ -201,6 +251,8 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=Path, required=True, help='pinned watchlists Parquet snapshot')
     parser.add_argument('--source-version', help='refuse to run unless the snapshot has this version')
     parser.add_argument('--queue', type=Path, help='private captured queue JSON (optional)')
+    parser.add_argument('--live', action='store_true',
+                        help='compare against the matcher run with SCREENING_EVIDENCE_GRADES=enforce, not the shadow policy')
     parser.add_argument('--all-queue', action='store_true',
                         help='replay every open queue entry instead of the stratified sample')
     parser.add_argument('--output', type=Path, required=True, help='new private directory outside the repository')

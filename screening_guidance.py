@@ -12,6 +12,8 @@ def enrich_result(result):
     potential = [item for item in candidates if item.get('disposition') == 'potential_match']
     actions = []
     inputs = result.get('Screening Inputs', {})
+    from utils import is_dob_required_result
+    dob_required = is_dob_required_result(result)
     if potential:
         actions.append('Review each potential candidate and record identity evidence and a reason for the decision.')
         is_person = inputs.get('entity_type', '').lower() == 'person'
@@ -41,10 +43,15 @@ def enrich_result(result):
             actions.append('Confirm the company registration number and review relevant directors and ownership relationships.')
         if result.get('Is Sanctioned'):
             actions.append('Escalate unresolved sanctions candidates to Compliance before making a clearance decision.')
+    elif dob_required:
+        actions.append('Obtain the date of birth and re-run this screening with it. Do not proceed until it is resolved.')
+        actions.append('If a date of birth cannot be obtained: have an analyst review the listed candidates and '
+                       'escalate to Compliance before proceeding.')
     else:
         actions.append('No potential match under these rules. Apply your normal business controls and retain this screening record.')
     result['Screening Guidance'] = {
-        'finding': 'potential_sanctions_match' if result.get('Is Sanctioned') else 'no_potential_match',
+        'finding': ('date_of_birth_required' if dob_required and not potential
+                    else 'potential_sanctions_match' if result.get('Is Sanctioned') else 'no_potential_match'),
         'identity_confirmed': False, 'next_actions': actions,
         'limitations': ['Name similarity is not an identity probability.', 'Missing information is not conflicting evidence.'],
     }
@@ -79,8 +86,10 @@ def describe_change(result, previous, previous_run_id=None):
     if isinstance(previous, str):
         previous = json.loads(previous)
     def index(value):
+        # A candidate awaiting a date of birth is still open, so a move between
+        # the two open dispositions is not reported as removed or added.
         return {str(c.get('record_id') or c.get('name'))+'|'+str(c.get('source_type')): c
-                for c in (value or {}).get('Candidate Evidence', []) if c.get('disposition') == 'potential_match'}
+                for c in (value or {}).get('Candidate Evidence', []) if c.get('disposition') in ('potential_match', 'dob_required')}
     old, new = index(previous), index(result)
     added = sorted(new.keys()-old.keys())
     removed = sorted(old.keys()-new.keys())

@@ -1,4 +1,4 @@
-import type { OpCheckResponse, CandidateEvidenceItem } from '@/types/api'
+import { isDobRequiredStatus, type OpCheckResponse, type CandidateEvidenceItem } from '@/types/api'
 import type { SearchDetails } from '@/utils/exportScreeningPdf'
 import { Card, CardBody, CardHeader, CardTitle } from '@/components'
 import { BiCheckCircle, BiXCircle, BiMinus } from 'react-icons/bi'
@@ -51,6 +51,26 @@ function CountryBadge({ assessment }: { assessment: CandidateEvidenceItem['count
   return <span className={`rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${cls}`}>{label}</span>
 }
 
+const DISPOSITION_LABEL: Record<CandidateEvidenceItem['disposition'], { label: string; cls: string; dot: string }> = {
+  potential_match:       { label: 'Potential match',       cls: 'bg-semantic-error/10 text-semantic-error border-semantic-error/25',       dot: 'bg-semantic-error' },
+  dob_required:          { label: 'DOB required',          cls: 'bg-semantic-warning/10 text-semantic-warning border-semantic-warning/25', dot: 'bg-semantic-warning' },
+  below_alert_threshold: { label: 'Below alert threshold', cls: 'bg-surface text-text-muted border-border',                                dot: 'bg-text-muted' },
+  excluded:              { label: 'Excluded',              cls: 'bg-surface text-text-muted border-border',                                dot: 'bg-text-muted' },
+}
+
+function GradeBadge({ candidate }: { candidate: CandidateEvidenceItem }) {
+  const grade = candidate.evidence_grade
+  if (!grade) return null
+  const detail = candidate.evidence_grade_detail
+  const unmatched = detail?.unmatched_search_words ?? []
+  const title = grade === 'weak'
+    ? (unmatched.length ? `Not matched in the listed name: ${unmatched.join(', ')}` : 'Only a single listed word matched; the date of birth agrees.')
+    : grade === 'possible' ? 'Every searched word is explained, with several differences or omissions.'
+    : 'Every searched word is explained, with at most one difference.'
+  const cls = grade === 'strong' ? 'text-text-primary border-border bg-surface' : 'text-text-muted border-border bg-surface'
+  return <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-medium cursor-default ${cls}`} title={title}>Name evidence: {grade}</span>
+}
+
 export function CandidateEvidence({ result, search }: { result: OpCheckResponse; search: SearchDetails }) {
   const evidence = result['Candidate Evidence']
   if (!evidence) return null
@@ -65,14 +85,21 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
   const evaluated = (summary?.evaluated_name_matches ?? evidence.length)
 
   const hasMatch = potentialMatches > 0
-  const VerdictIcon = hasMatch ? BiXCircle : BiMinus
-  const verdictColor = hasMatch ? 'text-semantic-error' : 'text-text-muted'
+  const dobRequired = summary?.dob_required ?? 0
+  // Not cleared: the search cannot be assessed until a date of birth is supplied.
+  const needsDob = !hasMatch && (dobRequired > 0 || isDobRequiredStatus(result['Check Summary']?.Status))
+  const VerdictIcon = hasMatch || needsDob ? BiXCircle : BiMinus
+  const verdictColor = hasMatch ? 'text-semantic-error' : needsDob ? 'text-semantic-warning' : 'text-text-muted'
 
   const finding = hasMatch
     ? `${potentialMatches} potential match${potentialMatches !== 1 ? 'es' : ''} — review required`
-    : 'No potential match identified'
+    : needsDob
+      ? `Date of birth required — ${dobRequired || 'some'} candidate${dobRequired === 1 ? '' : 's'} cannot be assessed without it`
+      : 'No potential match identified'
   const nextAction = guidance?.next_actions?.[0]
-    ?? (hasMatch ? 'Review the candidate evidence and verify identity before proceeding.' : 'Apply normal business controls and retain this screening record.')
+    ?? (hasMatch ? 'Review the candidate evidence and verify identity before proceeding.'
+      : needsDob ? 'Obtain the date of birth and re-run this screening. This is not a clearance.'
+      : 'Apply normal business controls and retain this screening record.')
 
   return (
     <Card>
@@ -107,10 +134,10 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
         )}
 
         {/* Verdict row */}
-        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : 'border-border bg-app/60'}`}>
+        <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${hasMatch ? 'border-semantic-error/25 bg-semantic-error/5' : needsDob ? 'border-semantic-warning/25 bg-semantic-warning/5' : 'border-border bg-app/60'}`}>
           <VerdictIcon className={`mt-0.5 h-4 w-4 shrink-0 ${verdictColor}`} aria-hidden />
           <div className="min-w-0 flex-1">
-            <p className={`text-[13px] font-semibold leading-snug ${hasMatch ? 'text-semantic-error' : 'text-text-primary'}`}>
+            <p className={`text-[13px] font-semibold leading-snug ${hasMatch ? 'text-semantic-error' : needsDob ? 'text-semantic-warning' : 'text-text-primary'}`}>
               {finding}
             </p>
             <p className="text-[12px] text-text-secondary mt-0.5 leading-snug">{nextAction}</p>
@@ -131,6 +158,9 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
             <p className="text-[11px] text-text-muted leading-relaxed">
               {potentialMatches} match{potentialMatches !== 1 ? 'es' : ''}
             </p>
+            {dobRequired > 0 && (
+              <p className="text-[11px] text-text-muted leading-relaxed">{dobRequired} need a DOB</p>
+            )}
             {excluded > 0 && (
               <p className="text-[11px] text-text-muted leading-relaxed">{excluded} excluded</p>
             )}
@@ -153,6 +183,7 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
             {evidence.map((candidate, i) => {
               const isPotentialMatch = candidate.disposition === 'potential_match'
               const isHighConfidence = isPotentialMatch && candidate.name_score >= 90
+              const dispositionStyle = DISPOSITION_LABEL[candidate.disposition] ?? DISPOSITION_LABEL.excluded
               return (
                 <details
                   key={`${candidate.record_id || candidate.name}-${candidate.entity_type}-${i}`}
@@ -160,7 +191,7 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                   open={i === 0 && isHighConfidence}
                 >
                   <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-app/60 [&::-webkit-details-marker]:hidden">
-                    <span className={`h-2 w-2 shrink-0 rounded-full ${isPotentialMatch ? 'bg-semantic-error' : 'bg-text-muted'}`} />
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${dispositionStyle.dot}`} />
                     <span className="min-w-0 flex-1 flex items-baseline gap-1.5 overflow-hidden">
                       <span className="text-[13px] font-medium text-text-primary truncate">{candidate.name}</span>
                       {candidate.matched_alias && (
@@ -168,8 +199,9 @@ export function CandidateEvidence({ result, search }: { result: OpCheckResponse;
                       )}
                     </span>
                     <span className="shrink-0 text-[11px] text-text-muted">Sanctions</span>
-                    <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${isPotentialMatch ? 'bg-semantic-error/10 text-semantic-error border-semantic-error/25' : 'bg-surface text-text-muted border-border'}`}>
-                      {isPotentialMatch ? 'Potential match' : 'Excluded'}
+                    <GradeBadge candidate={candidate} />
+                    <span className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-semibold ${dispositionStyle.cls}`}>
+                      {dispositionStyle.label}
                     </span>
                     <span className="shrink-0 text-[11px] text-text-muted tabular-nums">{candidate.name_score}/100</span>
                   </summary>

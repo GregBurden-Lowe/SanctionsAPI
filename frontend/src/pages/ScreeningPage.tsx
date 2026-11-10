@@ -18,7 +18,7 @@ import {
 } from '@/components'
 import { opcheck, type OpCheckParams } from '@/api/client'
 import { useAuth } from '@/context/AuthContext'
-import type { OpCheckResponse, ApiErrorResponse } from '@/types/api'
+import { isDobRequiredStatus, type OpCheckResponse, type ApiErrorResponse } from '@/types/api'
 import type { TopMatch } from '@/types/api'
 import { generateScreeningPdf } from '@/utils/exportScreeningPdf'
 import type { SearchDetails } from '@/utils/exportScreeningPdf'
@@ -536,6 +536,13 @@ function getOutcome(result: OpCheckResponse): {
     return {
       heading: 'Cleared — discounted as false positive',
       detail: 'An analyst resolved this as a false positive. Original engine findings are preserved below.',
+      semantic: 'warning',
+    }
+  }
+  if (isDobRequiredStatus(status)) {
+    return {
+      heading: 'Date of birth required — not cleared',
+      detail: 'Part of this name matches a listed name and no date of birth was supplied. Obtain the date of birth and screen again before proceeding.',
       semantic: 'warning',
     }
   }

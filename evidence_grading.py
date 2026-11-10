@@ -1,9 +1,8 @@
-"""Shadow-only evidence grades for name candidates. Not imported by the API or worker.
+"""Evidence grades for person name candidates.
 
-Today every surviving candidate produces the same alert, whether the name is
-exact or one search word found nothing to match. This module grades how much
-of a person name is actually explained and reports what a graded policy would
-do, without changing any live decision:
+Without grades every surviving candidate produces the same alert, whether the
+name is exact or one search word found nothing to match. This module grades
+how much of a person name is actually explained:
 
     strong    every search word is explained, with at most one difference
     possible  every search word is explained, with several differences; or the
@@ -11,12 +10,18 @@ do, without changing any live decision:
     weak      a search word is not explained and the listed name is not
               wholly accounted for either
 
-Shadow policy, version 2. It changes only weak person candidates on searches
+The live matcher uses the grades only when SCREENING_EVIDENCE_GRADES is set:
+`annotate` records the grade on each candidate and changes no decision;
+`enforce` also applies the policy below. With the setting absent or `off`,
+this module is not imported by the API or worker. The same policy can be
+replayed as a shadow over unchanged results (scripts/shadow_grade_replay.py).
+
+Policy, version 2. It changes only weak person candidates on searches
 submitted as a person:
 
     date of birth agrees (exact or compatible)   stays an alert
-    no date of birth was supplied                `dob_required`: neither an
-                                                 alert nor a clearance; the
+    no date of birth was supplied                `dob_required`: not cleared and
+                                                 not yet an analyst alert; the
                                                  search needs a date of birth
     date of birth supplied, listing has none
     that can be compared                         `below_alert_threshold`: kept
@@ -29,10 +34,8 @@ candidate; on the captured review queue that removed the alert from 14 of 31
 cases a reviewer had marked as needing corroboration, all of them searches
 with no date of birth or submitted as an organisation.
 
-Grades are heuristics, not probabilities of identity, and neither changed
-disposition is a clearance. Nothing here is validated on independently
-labelled cases. Used only by scripts/shadow_grade_replay.py and
-tests/test_evidence_grading.py.
+Grades are heuristics, not probabilities of identity, and `dob_required` is
+never a clearance. Nothing here is validated on independently labelled cases.
 """
 from contextlib import contextmanager
 import copy
@@ -48,12 +51,13 @@ NO_DOB_SUPPLIED = 'weak_name_no_date_of_birth_supplied'
 LISTED_DOB_NOT_COMPARABLE = 'weak_name_listed_date_of_birth_not_comparable'
 _RANK = {WEAK: 0, POSSIBLE: 1, STRONG: 2}
 _CORROBORATING_DOB = ('exact', 'compatible')
-_REASON_TEXT = {
-    NO_DOB_SUPPLIED: 'Shadow policy: a search word is unmatched and no date of birth was supplied; '
-                     'a date of birth is required before this can be assessed.',
-    LISTED_DOB_NOT_COMPARABLE: 'Shadow policy: a search word is unmatched and the listing has no date of birth '
+REASON_TEXT = {
+    NO_DOB_SUPPLIED: 'Part of the searched name is unmatched and no date of birth was supplied; '
+                     'a date of birth is required before this candidate can be assessed.',
+    LISTED_DOB_NOT_COMPARABLE: 'Part of the searched name is unmatched and the listing has no date of birth '
                                'that can be compared; kept as evidence, not an alert.',
 }
+FALLBACK_DETAIL = {'reason': 'single_word_with_exact_date_of_birth'}
 
 # A listed word with one of these endings is a patronymic, not a family name.
 _PATRONYMIC = re.compile(r'(ovich|evich|ovna|evna|ichna|ovych|ivna|ogly|oglu|kyzy)$')
@@ -117,18 +121,28 @@ def best_person_grade(query, names, hits):
     return best
 
 
+def is_person_submission(submitted_type):
+    """Only an input that is exactly "Person" counts; anything else is left alone."""
+    return str(submitted_type or '').strip().lower() == 'person'
+
+
+def graded_disposition(grade, dob_assessment, *, person_submitted, dob_supplied):
+    """Policy for one person candidate that is currently a potential match."""
+    if grade != WEAK or not person_submitted or dob_assessment in _CORROBORATING_DOB:
+        return 'potential_match', None
+    if not dob_supplied:
+        return DOB_REQUIRED, NO_DOB_SUPPLIED
+    return BELOW_ALERT_THRESHOLD, LISTED_DOB_NOT_COMPARABLE
+
+
 def shadow_disposition(evidence, grade, *, person_submitted, dob_supplied):
     """Disposition under the shadow policy, with the reason code when it changes."""
     if evidence.get('disposition') != 'potential_match' or evidence.get('entity_type') != 'Person':
         return evidence.get('disposition'), None
     # No grade means no name was accepted: the single-word, exact-date-of-birth
     # fallback. It is weak by construction and already corroborated.
-    grade = grade or WEAK
-    if grade != WEAK or not person_submitted or evidence.get('dob_assessment') in _CORROBORATING_DOB:
-        return 'potential_match', None
-    if not dob_supplied:
-        return DOB_REQUIRED, NO_DOB_SUPPLIED
-    return BELOW_ALERT_THRESHOLD, LISTED_DOB_NOT_COMPARABLE
+    return graded_disposition(grade or WEAK, evidence.get('dob_assessment'),
+                              person_submitted=person_submitted, dob_supplied=dob_supplied)
 
 
 def apply_shadow_policy(result, grades, *, submitted_type, dob):
@@ -140,7 +154,7 @@ def apply_shadow_policy(result, grades, *, submitted_type, dob):
     else leaves every candidate as it is. The input result is not modified.
     """
     import utils
-    person_submitted = str(submitted_type or '').strip().lower() == 'person'
+    person_submitted = is_person_submission(submitted_type)
     dob_supplied = bool(utils._normalize_dob(dob)) if dob else False
     shadow = copy.deepcopy(result)
     evidence = shadow.get('Candidate Evidence') or []
@@ -161,7 +175,7 @@ def apply_shadow_policy(result, grades, *, submitted_type, dob):
                                                  dob_supplied=dob_supplied)
         if reason:
             item['disposition'] = disposition
-            item['reasons'] = list(item.get('reasons') or []) + [_REASON_TEXT[reason]]
+            item['reasons'] = list(item.get('reasons') or []) + ['Shadow policy: ' + REASON_TEXT[reason]]
             changed.append({'matched_name': item.get('matched_name'), 'reason': reason, 'disposition': disposition,
                             'record_id': item.get('record_id'), 'previous_score': item.get('name_score'),
                             'entity_type': 'Person', 'dob_assessment': item.get('dob_assessment'),

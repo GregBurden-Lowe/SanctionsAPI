@@ -964,11 +964,37 @@ def active_matcher_version() -> str:
     return version
 
 
+DOB_REQUIRED_STATUS = "Fail Sanction - DOB Required"
+EVIDENCE_GRADES_RULES_SUFFIX = "-evidence-grades-v2"
+_DISPOSITION_ORDER = {"potential_match": 0, "dob_required": 1, "below_alert_threshold": 2}
+
+
+def evidence_grades_mode() -> str:
+    """How the v2 matcher uses evidence grades: off, annotate (record only) or enforce."""
+    mode = os.getenv("SCREENING_EVIDENCE_GRADES", "off").strip().lower()
+    if mode not in {"off", "annotate", "enforce"}:
+        raise ScreeningUnavailableError("Matching configuration is invalid. No clearance issued.")
+    return mode
+
+
+def is_dob_required_result(result) -> bool:
+    """A screening that is not cleared and needs a date of birth before analyst review.
+
+    The status keeps the "Fail Sanction" prefix, and the result keeps the same
+    flags as any other alert, so anything unaware of this outcome still treats
+    it as an unresolved potential match.
+    """
+    summary = result.get("Check Summary") if isinstance(result, dict) else None
+    return isinstance(summary, dict) and str(summary.get("Status") or "").startswith(DOB_REQUIRED_STATUS)
+
+
 def rules_version_for(backend) -> str:
     """v2 needs the PostgreSQL token index, so Parquet stays on the standard rules."""
     if str(backend) == "postgres_beta" and active_matcher_version() == "v2":
         from name_matching import MATCHER_RULES_VERSION
-        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1"
+        # Enforced grades change decisions, so earlier results must not be reused.
+        grades = EVIDENCE_GRADES_RULES_SUFFIX if evidence_grades_mode() == "enforce" else ""
+        return MATCHER_RULES_VERSION + "-vessel-types-v1-dob-links-v1-dob-formats-v1-eu-birth-v1" + grades
     return STANDARD_RULES_VERSION
 
 
@@ -1496,6 +1522,8 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
     evidence = []
     suggestions = {}
     et = (entity_type or "Person").strip().lower()
+    # Grades build on the v2 name rules, so they are unavailable without them.
+    grades_mode = evidence_grades_mode() if token_stats is not None and et == 'person' else 'off'
     for row in rows:
         raw = row.get("raw_json") or {}
         if isinstance(raw, str):
@@ -1557,6 +1585,12 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
         elif not weak_name_with_dob:
             continue
         excluded = dob_status == "conflicting"
+        grade_record = None
+        if grades_mode != 'off':
+            from evidence_grading import FALLBACK_DETAIL, WEAK, best_person_grade
+            # No accepted name means the single-word, exact-date-of-birth fallback.
+            grade_record = best_person_grade(name, names, hits) if hits else {
+                'grade': WEAK, 'graded_name': names[matched_index], 'detail': dict(FALLBACK_DETAIL)}
         name_rule = None
         if hits and token_stats is not None:
             from shadow_matching import evaluate as evaluate_name_rule
@@ -1620,18 +1654,39 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
             "name_score": score, "birth_date": candidate_dob or None, "country": candidate_country or None,
             "all_birth_dates": [d.strip() for d in re.split(r'[;|]', candidate_dob) if d.strip()] if candidate_dob else [],
             "alias_count": len(names) - 1,
+            **({'evidence_grade': grade_record['grade'],
+                'evidence_grade_detail': {'graded_name': grade_record['graded_name'], **grade_record['detail']}}
+               if grade_record else {}),
             "dob_assessment": dob_status, "country_assessment": country_status,
             "disposition": "excluded" if excluded else "potential_match", "reasons": reasons,
         })
     if et == 'person':
         from linked_listings import apply_reviewed_links
         apply_reviewed_links(evidence, dob, _identity_dob_evidence)
-    evidence.sort(key=lambda x: (x['disposition'] != 'potential_match', -x['name_score'], x['name']))
+    if grades_mode == 'enforce':
+        # After linked listings, which can change a candidate's date-of-birth outcome.
+        from evidence_grading import REASON_TEXT, graded_disposition, is_person_submission
+        person_submitted = is_person_submission(submitted_entity_type)
+        dob_supplied = bool(_normalize_dob(dob))
+        for item in evidence:
+            if item['disposition'] != 'potential_match' or 'evidence_grade' not in item:
+                continue
+            disposition, reason = graded_disposition(item['evidence_grade'], item['dob_assessment'],
+                                                     person_submitted=person_submitted, dob_supplied=dob_supplied)
+            if reason:
+                item.update(disposition=disposition, disposition_reason=reason)
+                item['reasons'].append(REASON_TEXT[reason])
+    evidence.sort(key=lambda x: (_DISPOSITION_ORDER.get(x['disposition'], 3), -x['name_score'], x['name']))
     sanctions = [e for e in evidence if e['disposition'] == 'potential_match' and e['source_type'] == 'sanctions']
+    needs_dob = [e for e in evidence if e['disposition'] == 'dob_required' and e['source_type'] == 'sanctions']
     result = _empty_no_match_result(source_label)
     result['Top Matches'] = sorted(suggestions.items(), key=lambda x: (-x[1], x[0]))[:5]
     result['Candidate Evidence'] = evidence[:50]
     result['Candidate Evidence Summary'] = {'evaluated_name_matches': len(evidence), 'potential_matches': len(sanctions), 'excluded': sum(e['disposition'] == 'excluded' for e in evidence), 'display_truncated': len(evidence) > 50}
+    if grades_mode == 'enforce':
+        result['Candidate Evidence Summary'].update(
+            dob_required=len(needs_dob),
+            below_alert_threshold=sum(e['disposition'] == 'below_alert_threshold' for e in evidence))
     result['Decision Explanation'] = 'No potential match identified under the current matching rules. This is not proof of identity.'
     if sanctions:
         best = sanctions[0]
@@ -1642,6 +1697,19 @@ def _evaluate_watchlist_rows(name, dob, country, entity_type, rows, source_label
                        'Risk Level': 'High Risk'})
         result['Check Summary'].update(Status='Fail Sanction', Source='; '.join(dict.fromkeys(e['dataset'] or source_label for e in sanctions)))
         result['Decision Explanation'] = 'Potential sanctions match; analyst verification is required.'
+    elif needs_dob:
+        # Not a clearance. The flags stay those of an alert so that nothing
+        # treats this as cleared; the status says what is needed to resolve it.
+        best = needs_dob[0]
+        score = best['name_score']
+        result.update({'Sanctions Name': best['name'], 'Birth Date': best['birth_date'], 'Regime': best['regime'],
+                       'Is Sanctioned': True, 'Match Found': True,
+                       'Position': best['position'], 'Score': score, 'Confidence': 'High' if score >= 90 else 'Medium' if score >= 80 else 'Low',
+                       'Risk Level': 'High Risk'})
+        result['Check Summary'].update(Status=DOB_REQUIRED_STATUS, Source='; '.join(dict.fromkeys(e['dataset'] or source_label for e in needs_dob)))
+        result['Decision Explanation'] = ('Date of birth required: part of the searched name matches a listed name and no date of birth '
+                                          'was supplied. This is not a clearance. Supply a date of birth and screen again, or have an '
+                                          'analyst review the listed candidates.')
     return result
 
 

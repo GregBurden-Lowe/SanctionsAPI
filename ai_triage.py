@@ -309,6 +309,10 @@ def apply_guardrails(candidate, raw_action):
     if str(raw_action).upper() != 'CLEAR':
         return action, overridden, reasons
     result = candidate.get('result_json') or {}
+    from utils import is_dob_required_result
+    if is_dob_required_result(result):
+        # Its candidates are not potential matches, so nothing below would object.
+        reasons.append('A date of birth is required before this screening can be cleared')
     if result.get('Candidate Evidence Summary', {}).get('display_truncated'):
         reasons.append('Candidate evidence is truncated')
     if _omitted_candidate_count(candidate):

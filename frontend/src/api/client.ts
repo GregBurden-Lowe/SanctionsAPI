@@ -399,6 +399,8 @@ export interface ReviewQueueParams {
   include_cleared?: boolean
   limit?: number
   offset?: number
+  /** 'analyst' leaves out screenings awaiting a date of birth; 'awaiting_dob' returns only those. */
+  queue?: 'all' | 'analyst' | 'awaiting_dob'
 }
 
 export async function getReviewQueue(params: ReviewQueueParams = {}): Promise<Response> {
@@ -409,6 +411,7 @@ export async function getReviewQueue(params: ReviewQueueParams = {}): Promise<Re
   if (params.include_cleared != null) sp.set('include_cleared', String(params.include_cleared))
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
+  if (params.queue != null) sp.set('queue', params.queue)
   const qs = sp.toString()
   return authFetch(resolve(`/review/queue${qs ? `?${qs}` : ''}`), { method: 'GET', headers: defaultHeaders() })
 }

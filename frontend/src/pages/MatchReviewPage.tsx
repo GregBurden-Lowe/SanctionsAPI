@@ -13,7 +13,7 @@ import {
   type ReviewRerunResponse,
   type ReviewQueueItem,
 } from '@/api/client'
-import type { ReviewOutcome } from '@/types/api'
+import { isDobRequiredStatus, type ReviewOutcome } from '@/types/api'
 import { useAuth } from '@/context/AuthContext'
 
 const REVIEW_OUTCOME_OPTIONS: ReviewOutcome[] = [
@@ -39,6 +39,17 @@ function formatDate(iso: string | null): string {
 }
 
 function DecisionBadge({ decision }: { decision: string }) {
+  if (isDobRequiredStatus(decision)) {
+    return (
+      <span
+        className="inline-flex items-center gap-[5px] rounded-[20px] border px-[10px] py-[3px] pl-[7px] font-mono text-[11.5px] font-semibold uppercase tracking-[0.04em] whitespace-nowrap bg-[rgba(245,158,11,0.12)] border-[rgba(245,158,11,0.35)] text-[#b45309]"
+        title="Not cleared. Re-run with the date of birth, or review the listed candidates if it cannot be obtained."
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#f59e0b]" />
+        DOB required
+      </span>
+    )
+  }
   const isSanctions = decision.toLowerCase().includes('sanction')
   return (
     <span
@@ -69,6 +80,7 @@ export function MatchReviewPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
+  const [queueView, setQueueView] = useState<'all' | 'analyst' | 'awaiting_dob'>('all')
   const [selected, setSelected] = useState<ReviewQueueItem | null>(null)
   const [reviewOutcome, setReviewOutcome] = useState<ReviewOutcome>(REVIEW_OUTCOME_OPTIONS[0])
   const [reviewNotes, setReviewNotes] = useState('')
@@ -92,7 +104,9 @@ export function MatchReviewPage() {
   const latestLoad = useRef(0)
 
   const currentUsername = (user?.username || '').trim().toLowerCase()
+  const awaitingDob = (item: ReviewQueueItem): boolean => item.dob_required ?? isDobRequiredStatus(item.decision)
   const scopedItems = items.filter((item) => item.review_status !== 'COMPLETED')
+  const awaitingDobCount = scopedItems.filter(awaitingDob).length
   const myClaimedItems = scopedItems.filter(
     (item) =>
       item.review_status === 'IN_REVIEW' &&
@@ -148,6 +162,7 @@ export function MatchReviewPage() {
   const matchesViewFilters = (item: ReviewQueueItem): boolean => {
     const needle = searchTerm.trim().toLowerCase()
     const haystack = `${item.entity_name || ''} ${item.business_reference || ''} ${item.screening_user || ''}`.toLowerCase()
+    if (queueView !== 'all' && awaitingDob(item) !== (queueView === 'awaiting_dob')) return false
     return !needle || haystack.includes(needle)
   }
   const myClaimedDisplay = myClaimedItems.filter(matchesViewFilters)
@@ -324,6 +339,7 @@ export function MatchReviewPage() {
             {[
               { label: 'My Queue', value: myClaimedItems.length, color: '#3b82f6' },
               { label: 'Unclaimed', value: unclaimedItems.length, color: '#f59e0b' },
+              { label: 'Awaiting DOB', value: awaitingDobCount, color: '#b45309' },
               { label: 'Completed', value: completedCount, color: '#22c55e' },
             ].map((stat) => (
               <div
@@ -350,6 +366,18 @@ export function MatchReviewPage() {
                 className="w-full h-[35px] rounded-lg border border-[#e2e8f0] bg-[#f8fafc] pl-8 pr-2.5 text-[12.5px] text-[#1e293b] outline-none transition focus:border-[#3b82f6]"
               />
             </div>
+            <label className="flex items-center gap-2 text-[12px] text-[#64748b]">
+              Show
+              <select
+                value={queueView}
+                onChange={(e) => setQueueView(e.target.value as 'all' | 'analyst' | 'awaiting_dob')}
+                className="h-[35px] rounded-lg border border-[#e2e8f0] bg-[#f8fafc] px-2.5 text-[12.5px] text-[#1e293b] outline-none transition focus:border-[#3b82f6]"
+              >
+                <option value="all">All open items</option>
+                <option value="analyst">Analyst review only</option>
+                <option value="awaiting_dob">Awaiting date of birth ({awaitingDobCount})</option>
+              </select>
+            </label>
           </div>
         </Card>
 

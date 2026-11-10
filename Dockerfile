@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Backend code
 COPY api_server.py screening_worker.py ai_triage.py ai_triage_worker.py utils.py retention_report.py job_recovery.py screening_policy.py review_decisions.py screening_history.py screening_db.py auth_db.py security.py ./
 COPY acceptance_export.py acceptance_metrics.py source_assurance.py screening_guidance.py screening_monitoring.py company_investigations.py ./
-COPY deployment_runtime.py name_matching.py shadow_matching.py linked_listings.py ./
+COPY deployment_runtime.py name_matching.py shadow_matching.py evidence_grading.py linked_listings.py ./
 COPY scripts/ ./scripts/
 COPY db/ ./db/
 COPY services ./services

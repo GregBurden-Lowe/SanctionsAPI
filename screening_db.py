@@ -398,6 +398,27 @@ async def get_screened_entity_identity(conn, entity_key: str) -> Optional[Dict[s
     return dict(row)
 
 
+async def find_awaiting_dob_entity(conn, *, normalized_name: str, business_reference: str) -> Optional[str]:
+    """The open person screening, for this name and business reference, that is waiting for a date of birth."""
+    return await conn.fetchval(
+        """
+        SELECT entity_key
+        FROM screened_entities
+        WHERE normalized_name = $1
+          AND lower(entity_type) = 'person'
+          AND date_of_birth IS NULL
+          AND business_reference = $2
+          AND status ILIKE 'Fail Sanction - DOB Required%'
+          AND COALESCE(review_status, 'UNREVIEWED') <> 'COMPLETED'
+          AND NOT screening_is_test(screened_entities)
+        ORDER BY last_screened_at DESC, entity_key
+        LIMIT 1
+        """,
+        normalized_name,
+        business_reference,
+    )
+
+
 async def upsert_screening(
     conn,
     entity_key: str,
@@ -896,6 +917,7 @@ async def list_ai_triage_candidates(conn, *, limit: int = 25, retry_failed: bool
             review_status
         FROM screened_entities
         WHERE status NOT ILIKE 'Cleared%'
+          AND status NOT ILIKE 'Fail Sanction - DOB Required%'
           AND NOT screening_is_test(screened_entities)
           AND (
             status ILIKE 'Fail Sanction%'
@@ -1561,12 +1583,20 @@ def _review_queue_filter(
     business_reference: Optional[str],
     reason_for_check: Optional[str],
     include_cleared: bool,
+    queue: Optional[str] = None,
 ) -> Tuple[str, List[Any]]:
     conditions: List[str] = []
     args: List[Any] = []
     n = 0
     if not include_cleared:
         conditions.append("status NOT ILIKE 'Cleared%'")
+    queue_clean = (queue or "").strip().lower()
+    if queue_clean == "awaiting_dob":
+        conditions.append("status ILIKE 'Fail Sanction - DOB Required%'")
+    elif queue_clean == "analyst":
+        conditions.append("status NOT ILIKE 'Fail Sanction - DOB Required%'")
+    elif queue_clean not in ("", "all"):
+        raise ValueError("queue must be all, analyst, or awaiting_dob")
     conditions.append("NOT screening_is_test(screened_entities)")
     review_status_clean = (review_status or "").strip().upper()
     if review_status_clean:
@@ -1600,9 +1630,10 @@ async def count_review_queue(
     business_reference: Optional[str] = None,
     reason_for_check: Optional[str] = None,
     include_cleared: bool = False,
+    queue: Optional[str] = None,
 ) -> int:
     """Total matching the queue filters, so a page can show when items are missing."""
-    where_sql, args = _review_queue_filter(review_status, business_reference, reason_for_check, include_cleared)
+    where_sql, args = _review_queue_filter(review_status, business_reference, reason_for_check, include_cleared, queue)
     return await conn.fetchval(f"SELECT count(*) FROM screened_entities {where_sql}", *args)
 
 
@@ -1615,12 +1646,14 @@ async def list_review_queue(
     include_cleared: bool = False,
     limit: int = 100,
     offset: int = 0,
+    queue: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Review queue for potential matches.
     By default excludes Cleared decisions unless include_cleared is explicitly true.
+    `queue` narrows it to analyst work or to screenings awaiting a date of birth.
     """
-    where_sql, args = _review_queue_filter(review_status, business_reference, reason_for_check, include_cleared)
+    where_sql, args = _review_queue_filter(review_status, business_reference, reason_for_check, include_cleared, queue)
     limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
     args.extend([limit, offset])
@@ -1635,6 +1668,7 @@ async def list_review_queue(
             date_of_birth,
             country_input,
             status AS decision,
+            (status ILIKE 'Fail Sanction - DOB Required%') AS dob_required,
             current_run_id::text AS run_id,
             (SELECT q.request_id::text FROM screening_requests q WHERE q.run_id=screened_entities.current_run_id ORDER BY q.requested_at DESC LIMIT 1) AS request_id,
             result_json->'Screening Guidance' AS screening_guidance,

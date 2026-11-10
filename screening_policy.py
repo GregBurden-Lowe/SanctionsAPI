@@ -1,10 +1,14 @@
 """Entity-type policy for interactive and background screening (sanctions only)."""
-from utils import detect_company_likeness, build_input_classification, effective_screening_country
+from utils import (detect_company_likeness, build_input_classification, effective_screening_country,
+                   is_dob_required_result, _DISPOSITION_ORDER)
 
 
 def _result_priority(result: dict) -> int:
-    if bool(result.get("Is Sanctioned")):
+    # A potential match outranks a search that only needs a date of birth.
+    if is_dob_required_result(result):
         return 2
+    if bool(result.get("Is Sanctioned")):
+        return 3
     return 1
 
 
@@ -41,12 +45,13 @@ def _merge_dual_type_results(
     merged = dict(primary)
     if "Candidate Evidence" in person_result or "Candidate Evidence" in organization_result:
         evidence = person_result.get("Candidate Evidence", []) + organization_result.get("Candidate Evidence", [])
-        evidence.sort(key=lambda item: (item["disposition"] != "potential_match", -item["name_score"]))
+        evidence.sort(key=lambda item: (_DISPOSITION_ORDER.get(item["disposition"], 3), -item["name_score"]))
         merged["Candidate Evidence"] = evidence[:50]
         summaries = [person_result.get("Candidate Evidence Summary", {}), organization_result.get("Candidate Evidence Summary", {})]
         merged["Candidate Evidence Summary"] = {
             key: sum(int(item.get(key, 0)) for item in summaries)
-            for key in ("evaluated_name_matches", "potential_matches", "excluded")
+            for key in ("evaluated_name_matches", "potential_matches", "excluded", "dob_required", "below_alert_threshold")
+            if key in ("evaluated_name_matches", "potential_matches", "excluded") or any(key in item for item in summaries)
         }
         merged["Candidate Evidence Summary"]["display_truncated"] = len(evidence) > 50 or any(item.get("display_truncated") for item in summaries)
     merged["Entity Type Checks"] = {

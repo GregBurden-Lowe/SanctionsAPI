@@ -1721,6 +1721,15 @@ async def _execute_screening(data: OpCheckRequest):
             status_code=503,
             content={"error": "backend_unavailable", "message": "postgres_beta requires DATABASE_URL and watchlist tables."},
         )
+    if not rerun_entity_key and entity_type_norm == "person" and dob:
+        # A date of birth for a screening that was waiting for one resolves that
+        # stored record in place, instead of leaving it open beside a new record.
+        async with pool.acquire() as conn:
+            awaiting_key = await screening_db.find_awaiting_dob_entity(
+                conn, normalized_name=_normalize_text(name), business_reference=business_reference)
+        if awaiting_key:
+            rerun_entity_key = awaiting_key
+            data.rerun_entity_key = awaiting_key
     key_variants = derive_entity_key_variants(display_name=name, entity_type=entity_type, dob=dob)
     entity_key_candidates = [f"{k}-pgb" for k in key_variants]
     if rerun_entity_key:
@@ -2276,8 +2285,12 @@ async def get_review_queue(
     include_cleared: bool = False,
     limit: int = 100,
     offset: int = 0,
+    queue: Optional[str] = None,
 ):
-    """Return potential-match review queue. By default excludes Cleared decisions unless include_cleared=true."""
+    """
+    Return potential-match review queue. By default excludes Cleared decisions unless include_cleared=true.
+    queue=analyst leaves out screenings awaiting a date of birth; queue=awaiting_dob returns only those.
+    """
     pool = await screening_db.get_pool()
     if pool is None:
         raise HTTPException(status_code=503, detail="Review queue unavailable (configure DATABASE_URL)")
@@ -2291,15 +2304,17 @@ async def get_review_queue(
                 include_cleared=bool(include_cleared),
                 limit=limit,
                 offset=offset,
+                queue=queue,
             )
-            total = await screening_db.count_review_queue(
-                conn,
+            filters = dict(
                 review_status=(review_status or "").strip() or None,
                 business_reference=(business_reference or "").strip() or None,
                 reason_for_check=(reason_for_check or "").strip() or None,
                 include_cleared=bool(include_cleared),
             )
-        return {"items": items, "total": total}
+            total = await screening_db.count_review_queue(conn, **filters, queue=queue)
+            awaiting_dob_total = await screening_db.count_review_queue(conn, **filters, queue="awaiting_dob")
+        return {"items": items, "total": total, "awaiting_dob_total": awaiting_dob_total}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -4,7 +4,7 @@
  */
 import { jsPDF } from 'jspdf'
 import html2canvas from 'html2canvas'
-import type { OpCheckResponse } from '@/types/api'
+import { isDobRequiredStatus, type OpCheckResponse } from '@/types/api'
 
 // ─── Colours ────────────────────────────────────────────────────────────────
 const C = {
@@ -77,6 +77,13 @@ function outcomeMetaFor(result: OpCheckResponse): OutcomeMeta {
       label: 'POTENTIAL MATCH, CLEARED AFTER REVIEW',
       detail: '1 alert raised, discounted as false positive. No true matches. Record may proceed.',
       bg: C.fpBg, text: C.fpText, border: C.fpBorder,
+    }
+  }
+  if (isDobRequiredStatus(result['Check Summary']?.Status)) {
+    return {
+      label: 'DATE OF BIRTH REQUIRED — NOT CLEARED',
+      detail: 'Part of this name matches a listed name and no date of birth was supplied. Do not proceed until the date of birth is obtained and the screening is re-run.',
+      bg: C.matchBg, text: C.matchText, border: C.matchBorder,
     }
   }
   if (result['Is Sanctioned']) {
@@ -196,9 +203,11 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
     if (matchedName || result['Is Sanctioned']) {
       const sources = (summary?.Source || '').split(/[;,\n]+/).filter(Boolean).join(', ') || '—'
       const disposition = summary?.Status?.includes('False Positive') ? '<span class="fp">False positive</span>'
+        : isDobRequiredStatus(summary?.Status) ? '<span class="match">Date of birth required</span>'
         : result['Is Sanctioned'] ? '<span class="match">Potential match</span>'
         : '—'
       const topCandidate = candidateEvidence.find(c => c.disposition === 'potential_match')
+        ?? candidateEvidence.find(c => c.disposition === 'dob_required')
       const topAliasLabel = topCandidate?.matched_alias && topCandidate.matched_name
         ? `<br><small>Alias: ${safe(topCandidate.matched_name)}</small>` : ''
       alertRows.push([
@@ -239,6 +248,8 @@ function buildReportHtml(result: OpCheckResponse, search: SearchDetails): string
         : '— Unknown'
       const disp = c.disposition === 'potential_match'
         ? '<span class="match">Potential match</span>'
+        : c.disposition === 'dob_required' ? '<span class="match">DOB required</span>'
+        : c.disposition === 'below_alert_threshold' ? '<span class="clear">Below alert threshold</span>'
         : '<span class="clear">Excluded</span>'
       const aliasLabel = c.matched_alias && c.matched_name
         ? `<br><small>Alias: ${safe(c.matched_name)}</small>` : ''
